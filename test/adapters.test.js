@@ -80,15 +80,25 @@ function run(adapter, responder) {
   const orResponder = async (url) => {
     const body = url.includes('/credits')
       ? { data: { total_credits: 220, total_usage: 212.22 } }
-      : { data: { usage_daily: 0, usage_weekly: 0, usage_monthly: 0.0047, is_free_tier: false } };
+      : { data: { limit: 20, limit_reset: 'monthly', usage_daily: 0, usage_weekly: 0, usage_monthly: 0.0047, is_free_tier: false } };
     return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
   };
   st = await run(openrouter, orResponder);
-  test('healthy balance = credits − usage', () => {
+  test('healthy balance = credits − usage, cap notated', () => {
     assert.strictEqual(st.state, 'healthy');
     assert.strictEqual(st.balance.available, '7.78');
     assert.strictEqual(st.balance.spent.daily, 0);
+    assert.strictEqual(st.balance.limit.amount, 20);
+    assert.strictEqual(st.balance.limit.reset, 'monthly');
   });
+  const orNoCap = async (url) => {
+    const body = url.includes('/credits')
+      ? { data: { total_credits: 220, total_usage: 212.22 } }
+      : { data: { limit: null, usage_daily: 0, usage_weekly: 0 } };
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  };
+  st = await run(openrouter, orNoCap);
+  test('no cap notation when limit is null', () => assert.strictEqual(st.balance.limit, null));
   const orExhausted = async (url) => {
     const body = url.includes('/credits')
       ? { data: { total_credits: 100, total_usage: 100 } }

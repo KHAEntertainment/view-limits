@@ -152,6 +152,10 @@ function renderEntry(id, entry) {
     if (st.balance.spent) {
       quota += ` · spent $${Number(st.balance.spent.daily).toFixed(2)} today / $${Number(st.balance.spent.weekly).toFixed(2)} week`;
     }
+    if (st.balance.limit && st.balance.limit.amount != null) {
+      const amt = Number(st.balance.limit.amount);
+      quota += ` · $${Number.isInteger(amt) ? amt : amt.toFixed(2)} ${st.balance.limit.reset || 'period'} cap`;
+    }
   }
   else if (st.windows && st.windows.length) {
     quota = st.windows.map((w) => {

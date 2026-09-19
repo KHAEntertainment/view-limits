@@ -1,10 +1,10 @@
 ---
 name: setup
-description: Add or rotate view-limits provider credentials — opens the local browser form.
+description: Add or rotate view-limits provider credentials — opens the local browser form. Pass a route id to rotate just one, e.g. /view-limits:setup kimi-code-plan.
+argument-hint: [route-id]
 ---
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup $ARGUMENTS 2>&1`
 
-Tell the user the credential form opened in their browser and to paste their
-provider keys there (never in chat). After they save, run
-`/view-limits:update-providers` to refresh.
+Relay the output above verbatim. If a form URL is shown, tell the user to paste
+keys there (never in chat), then run `/view-limits:update-providers`.

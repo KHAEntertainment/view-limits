@@ -118,38 +118,49 @@ async function refresh(quiet) {
   }));
 
   const doc = writeCache(statuses);
-  if (!quiet) process.stdout.write(renderReport(doc) + '\n');
+  if (!quiet) process.stdout.write(renderReport(doc, cfg) + '\n');
 }
 
 // ---- report -----------------------------------------------------------------
 
-function renderReport(cache) {
+function renderReport(cache, cfg) {
   const routes = cache.routes || {};
-  const ids = Object.keys(routes);
-  const lines = [
-    'ROUTE'.padEnd(22) + 'STATE'.padEnd(12) + 'BALANCE / WINDOWS'.padEnd(42) + 'RESETS',
-  ];
-  for (const id of ids) lines.push(renderEntry(id, routes[id]));
-  if (!ids.length) lines.push('(no cached status — run `vl.js refresh`)');
+  const ids = Object.keys(routes).sort();
+  const lines = ['view-limits account status:'];
+  for (const id of ids) lines.push('  ' + renderEntry(id, routes[id]));
+  if (!ids.length) lines.push('  (no configured routes)');
+
+  const counts = { healthy: 0, constrained: 0, exhausted: 0, unknown: 0 };
+  for (const id of ids) {
+    const s = (routes[id].status && routes[id].status.state) || 'unknown';
+    counts[s] = (counts[s] || 0) + 1;
+  }
   lines.push('');
-  lines.push(`updated: ${cache.updatedAt || 'never'}`);
+  lines.push(`  ${counts.healthy} healthy · ${counts.constrained} constrained · ${counts.exhausted} exhausted · ${counts.unknown} unknown`);
+  const unconfigured = ((cfg && cfg.routes) || []).filter((r) => !routes[r.id]).length;
+  if (unconfigured) lines.push(`  ${unconfigured} route(s) not configured — add via /view-limits:setup`);
+  lines.push(`  updated ${cache.updatedAt || 'never'}`);
   return lines.join('\n');
 }
 
 function renderEntry(id, entry) {
   const st = entry.status || {};
   const state = st.state || 'unknown';
-  let windows = '—';
-  if (st.balance) windows = `balance ${st.balance.available} ${st.balance.currency}`;
+  let quota = '—';
+  if (st.balance) quota = `balance ${st.balance.available} ${st.balance.currency}`;
   else if (st.windows && st.windows.length) {
-    windows = st.windows.map((w) => {
+    quota = st.windows.map((w) => {
       if (w.limit > 0 && w.remaining != null) return `${w.type} ${Math.round((w.remaining / w.limit) * 100)}%`;
       return `${w.type} ${w.remaining}/${w.limit}`;
     }).join(' · ');
   }
-  const reset = st.resetAt ? new Date(st.resetAt).toLocaleString() : '—';
-  const note = st.detail && (st.detail.error || st.detail.note) ? `  [${st.detail.error || st.detail.note}]` : '';
-  return id.padEnd(22) + state.padEnd(12) + windows.padEnd(42) + reset + note;
+  const reset = st.resetAt ? ` · resets ${new Date(st.resetAt).toLocaleString()}` : '';
+  let note = '';
+  if (state === 'unknown' && st.detail && st.detail.error) {
+    const msg = String(st.detail.error);
+    note = ` — ${msg.length > 80 ? msg.slice(0, 80) + '…' : msg} (rotate via /view-limits:setup ${id})`;
+  }
+  return `${id}: ${state}${quota !== '—' ? ' · ' + quota : ''}${reset}${note}`;
 }
 
 // ---- check ------------------------------------------------------------------
@@ -269,23 +280,33 @@ async function promptHeadless(ids) {
   log('done.');
 }
 
+function openForm(ids) {
+  const nonce = crypto.randomBytes(24).toString('hex');
+  pickFreePort().then((port) => {
+    spawn(process.execPath, [path.join(PLUGIN_ROOT, 'bin', 'vl.js'), 'serve', String(port), nonce, ...ids], { detached: true, stdio: 'ignore' }).unref();
+    log(`credential form: http://127.0.0.1:${port}`);
+    log('paste your key(s), then run /view-limits:update-providers to refresh.');
+  });
+}
+
 function setup(args) {
   const cfg = loadConfig();
 
-  // Single-route form: `vl.js setup <routeId> [--key K]`
+  // Single-route: `vl.js setup <routeId> [--key K]` — rotate or add one key.
   if (args[0] && !args[0].startsWith('--')) {
     const id = args[0];
     if (!cfg.routes.find((r) => r.id === id)) err(`unknown route "${id}" (known: ${cfg.routes.map((r) => r.id).join(', ')})`);
     const keyIdx = args.indexOf('--key');
-    let secret = keyIdx >= 0 ? args[keyIdx + 1] : undefined;
-    if (!secret && !process.stdin.isTTY) secret = fs.readFileSync(0, 'utf8').trim();
-    if (!secret) err(`no secret for "${id}" — pipe via stdin or pass --key`);
-    vault.set(id, secret);
-    log(`stored credential for "${id}"`);
+    if (keyIdx >= 0) { vault.set(id, args[keyIdx + 1]); log(`stored credential for "${id}"`); return; }
+    const imp = cfg.importMap && cfg.importMap[id];
+    const native = imp ? readNativeSecret(imp) : null;
+    if (native) { vault.set(id, native); log(`imported from native config: ${id}`); return; }
+    if (args.includes('--headless')) { promptHeadless([id]); return; }
+    openForm([id]);
     return;
   }
 
-  // Full flow: audit → re-import from native files → collect the rest.
+  // Full flow: re-import native, then open the form for whatever's missing.
   const missing = [];
   const imported = [];
   for (const route of cfg.routes) {
@@ -297,16 +318,8 @@ function setup(args) {
   if (imported.length) log(`imported from native config: ${imported.join(', ')}`);
   if (!missing.length) { log('all credentials present.'); return; }
   log(`missing credentials for: ${missing.join(', ')}`);
-
   if (args.includes('--headless')) { promptHeadless(missing); return; }
-
-  // Non-blocking: spawn a detached loopback server, open the browser, return.
-  const nonce = crypto.randomBytes(24).toString('hex');
-  pickFreePort().then((port) => {
-    spawn(process.execPath, [path.join(PLUGIN_ROOT, 'bin', 'vl.js'), 'serve', String(port), nonce, ...missing], { detached: true, stdio: 'ignore' }).unref();
-    log(`credential form: http://127.0.0.1:${port}`);
-    log('paste your keys, then run /view-limits:update-providers to refresh.');
-  });
+  openForm(missing);
 }
 
 function remove(routeId) {
@@ -360,7 +373,7 @@ const hasFlag = (n) => args.includes(n);
         return;
       }
       if (hasFlag('--json')) return process.stdout.write(JSON.stringify(cache, null, 2) + '\n');
-      return process.stdout.write(renderReport(cache) + '\n');
+      return process.stdout.write(renderReport(cache, cfg) + '\n');
     }
     case 'check': return check(args[0]);
     case 'setup': return setup(args);

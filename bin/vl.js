@@ -158,7 +158,7 @@ function renderEntry(id, entry) {
   let note = '';
   if (state === 'unknown' && st.detail && st.detail.error) {
     const msg = String(st.detail.error);
-    note = ` — ${msg.length > 80 ? msg.slice(0, 80) + '…' : msg} (rotate via /view-limits:setup ${id})`;
+    note = ` — ${msg.length > 80 ? msg.slice(0, 80) + '…' : msg} (rotate via /view-limits:update ${id})`;
   }
   return `${id}: ${state}${quota !== '—' ? ' · ' + quota : ''}${reset}${note}`;
 }
@@ -209,7 +209,7 @@ function formHtml(ids, nonce) {
     `<script>document.getElementById('f').addEventListener('submit',async(e)=>{e.preventDefault();const credentials={};` +
     reads +
     `const r=await fetch(location.href,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nonce:${JSON.stringify(nonce)},credentials})});` +
-    `document.body.innerHTML=r.ok?'<h1>Saved</h1><p>Credentials stored. You can close this tab.</p>':'<h1>Error</h1><p>Something went wrong — rerun <code>vl.js setup</code>.</p>';});</script></body></html>`;
+    `if(r.ok){document.body.innerHTML='<h1>Saved</h1><p>Credentials stored. Closing in <span id="n">5</span>s…</p>';let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);}else{document.body.innerHTML='<h1>Error</h1><p>Something went wrong — rerun <code>vl.js setup</code>.</p>';});</script></body></html>`;
 }
 
 function openBrowser(url) {
@@ -256,7 +256,7 @@ function serve(port, nonce, ids) {
           if (creds[id]) { vault.set(id, String(creds[id])); saved += 1; }
         }
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`<h1>Saved ${saved} credential${saved === 1 ? '' : 's'}</h1><p>You can close this tab.</p>`);
+        res.end(`<h1>Saved ${saved} credential${saved === 1 ? '' : 's'}</h1><p>Closing in <span id="n">5</span>s…</p><script>let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);</script>`);
         setTimeout(() => { server.close(); process.exit(0); }, 200);
       });
       return;
@@ -265,7 +265,6 @@ function serve(port, nonce, ids) {
   });
 
   server.listen(port, '127.0.0.1', () => {
-    openBrowser(`http://127.0.0.1:${port}`);
     setTimeout(() => { server.close(); process.exit(0); }, 5 * 60 * 1000);
   });
 }
@@ -284,29 +283,31 @@ function openForm(ids) {
   const nonce = crypto.randomBytes(24).toString('hex');
   pickFreePort().then((port) => {
     spawn(process.execPath, [path.join(PLUGIN_ROOT, 'bin', 'vl.js'), 'serve', String(port), nonce, ...ids], { detached: true, stdio: 'ignore' }).unref();
-    log(`credential form: http://127.0.0.1:${port}`);
-    log('paste your key(s), then run /view-limits:update-providers to refresh.');
+    const url = `http://127.0.0.1:${port}`;
+    setTimeout(() => openBrowser(url), 150); // let the detached server bind first
+    log(`credential form: ${url}`);
+    log('paste your key(s), then run /view-limits to refresh.');
   });
+}
+
+function setupOne(cfg, id, args) {
+  if (!cfg.routes.find((r) => r.id === id)) err(`unknown route "${id}" (known: ${cfg.routes.map((r) => r.id).join(', ')})`);
+  const keyIdx = args.indexOf('--key');
+  if (keyIdx >= 0) { vault.set(id, args[keyIdx + 1]); log(`stored credential for "${id}"`); return; }
+  const imp = cfg.importMap && cfg.importMap[id];
+  const native = imp ? readNativeSecret(imp) : null;
+  if (native) { vault.set(id, native); log(`imported from native config: ${id}`); return; }
+  if (args.includes('--headless')) { promptHeadless([id]); return; }
+  openForm([id]);
 }
 
 function setup(args) {
   const cfg = loadConfig();
 
-  // Single-route: `vl.js setup <routeId> [--key K]` — rotate or add one key.
-  if (args[0] && !args[0].startsWith('--')) {
-    const id = args[0];
-    if (!cfg.routes.find((r) => r.id === id)) err(`unknown route "${id}" (known: ${cfg.routes.map((r) => r.id).join(', ')})`);
-    const keyIdx = args.indexOf('--key');
-    if (keyIdx >= 0) { vault.set(id, args[keyIdx + 1]); log(`stored credential for "${id}"`); return; }
-    const imp = cfg.importMap && cfg.importMap[id];
-    const native = imp ? readNativeSecret(imp) : null;
-    if (native) { vault.set(id, native); log(`imported from native config: ${id}`); return; }
-    if (args.includes('--headless')) { promptHeadless([id]); return; }
-    openForm([id]);
-    return;
-  }
+  // Single route: `vl.js setup <routeId> [--key K]`
+  if (args[0] && !args[0].startsWith('--')) return setupOne(cfg, args[0], args);
 
-  // Full flow: re-import native, then open the form for whatever's missing.
+  // Initial setup: re-import native, then open the form for whatever's missing.
   const missing = [];
   const imported = [];
   for (const route of cfg.routes) {
@@ -320,6 +321,20 @@ function setup(args) {
   log(`missing credentials for: ${missing.join(', ')}`);
   if (args.includes('--headless')) { promptHeadless(missing); return; }
   openForm(missing);
+}
+
+function update(args) {
+  const cfg = loadConfig();
+
+  // Single route: `vl.js update <routeId>` — rotate one existing key.
+  if (args[0] && !args[0].startsWith('--')) return setupOne(cfg, args[0], args);
+
+  // Rotate existing credentials: open the form for configured routes.
+  const existing = cfg.routes.filter((r) => vault.has(r.id));
+  if (!existing.length) { log('no credentials to update — run /view-limits:setup first.'); return; }
+  log(`updating credentials for: ${existing.map((r) => r.id).join(', ')}`);
+  if (args.includes('--headless')) { promptHeadless(existing.map((r) => r.id)); return; }
+  openForm(existing.map((r) => r.id));
 }
 
 function remove(routeId) {
@@ -377,6 +392,7 @@ const hasFlag = (n) => args.includes(n);
     }
     case 'check': return check(args[0]);
     case 'setup': return setup(args);
+    case 'update': return update(args);
     case 'serve': return serve(Number(args[0]), args[1], args.slice(2));
     case 'session-start': return sessionStart();
     case 'remove': return remove(args[0]);

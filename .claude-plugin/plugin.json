@@ -1,9 +1,8 @@
 {
   "name": "view-limits",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Check coding-plan credit and rate-limit status across providers before dispatching sub-agents, and block dispatch of models whose account is exhausted.",
   "author": { "name": "KHA Entertainment" },
   "license": "MIT",
-  "keywords": ["orchestration", "rate-limit", "credits", "multi-harness", "traycer", "subagent", "coding-plan"],
-  "hooks": "./hooks/hooks.json"
+  "keywords": ["orchestration", "rate-limit", "credits", "multi-harness", "traycer", "subagent", "coding-plan"]
 }

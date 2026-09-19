@@ -1,11 +1,12 @@
 ---
-description: Show coding-plan credit and rate-limit status across all routes/accounts
+description: Show coding-plan credit and rate-limit status across all routes/accounts (refreshes live)
 ---
 
 Live account status across providers:
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" report 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" refresh 2>&1`
 
-Render the table above as-is. If any route shows `exhausted` or `0%` remaining,
-call out which model/account is affected and when it resets. To force a fresh
-read, run `"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" refresh`.
+If the output says **no credentials are configured**, run the
+`/view-limits:view-limits` skill so it can open the setup form — do not fabricate
+a table. Otherwise render the table, calling out any `exhausted` route and when
+it resets.

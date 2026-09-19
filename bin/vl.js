@@ -30,6 +30,13 @@ const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '.
 function log(msg) { process.stderr.write(`view-limits: ${msg}\n`); }
 function err(msg) { process.stderr.write(`view-limits: ${msg}\n`); process.exit(1); }
 
+function noCredentialMessage() {
+  return 'view-limits: no credentials configured yet.\n\n' +
+    'Run setup to add your provider keys (auto-imports MiniMax from\n' +
+    '~/.mmx/config.json, then opens a local browser form for the rest):\n\n' +
+    `    ${PLUGIN_ROOT}/bin/vl.js setup\n`;
+}
+
 function readStdin() {
   return new Promise((resolve) => {
     let data = '';
@@ -94,6 +101,10 @@ function unknownStatus(detail) {
 
 async function refresh(quiet) {
   const cfg = loadConfig();
+  if (!cfg.routes.some((r) => vault.has(r.id))) {
+    if (!quiet) process.stdout.write(noCredentialMessage());
+    return;
+  }
   const threshold = cfg.gate.constrainedThreshold;
   const routes = cfg.routes.filter((r) => cfg.providers[r.provider]);
 
@@ -321,7 +332,12 @@ const hasFlag = (n) => args.includes(n);
     case 'gate': return gate();
     case 'refresh': return refresh(hasFlag('--quiet'));
     case 'report': {
+      const cfg = loadConfig();
       const cache = readCache();
+      if (!cfg.routes.some((r) => vault.has(r.id))) {
+        process.stdout.write(noCredentialMessage());
+        return;
+      }
       if (hasFlag('--json')) return process.stdout.write(JSON.stringify(cache, null, 2) + '\n');
       return process.stdout.write(renderReport(cache) + '\n');
     }

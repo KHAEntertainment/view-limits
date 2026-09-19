@@ -5,19 +5,14 @@ description: Check coding-plan credit and rate-limit status across providers (Mi
 
 ## Live account status
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" report 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" refresh 2>&1`
 
 ## Instructions
 
-1. Read the table above.
-2. Never dispatch a sub-agent with a model whose route is `exhausted` or `0%`
-   remaining. Prefer a route showing `healthy` with comfortable quota.
-3. If status is stale or empty, refresh first:
-   `"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" refresh`
-4. To add or rotate a credential, run **in your own terminal** (never paste the
-   key into chat):
-   - `"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup` — opens a local form for missing keys.
-   - `"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup <routeId>` — set one route (pipes from stdin).
-
-Routes: `minimax-token-plan`, `kimi-code-plan`, `glm-coding-plan`,
-`deepseek-direct`, `openrouter-main`.
+1. If the output above says **no credentials are configured**, set them up:
+   run `"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup` yourself (a Bash tool call). It
+   auto-imports MiniMax and opens a local browser form for the remaining keys —
+   tell the user to paste their keys there (never in chat), then rerun this skill.
+   Stop here.
+2. Read the table. Never dispatch a sub-agent with a model whose route is
+   `exhausted` or `0%` remaining — prefer a `healthy` route.

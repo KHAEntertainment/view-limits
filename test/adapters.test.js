@@ -17,12 +17,10 @@ function test(name, fn) {
   catch (e) { failures += 1; console.log(`  ✗ ${name}\n    ${e.message}`); }
 }
 
-function run(adapter, fixture) {
-  global.fetch = async () => ({
-    ok: true, status: 200,
-    json: async () => fixture,
-    text: async () => JSON.stringify(fixture),
-  });
+function run(adapter, responder) {
+  global.fetch = typeof responder === 'function'
+    ? responder
+    : async () => ({ ok: true, status: 200, json: async () => responder, text: async () => JSON.stringify(responder) });
   return adapter.fetchStatus({ baseUrl: 'https://test.invalid' }, 'sk-test', { threshold: 0.2 });
 }
 
@@ -79,14 +77,26 @@ function run(adapter, fixture) {
   test('exhausted when is_available false', () => assert.strictEqual(st.state, 'exhausted'));
 
   console.log('openrouter');
-  st = await run(openrouter, { data: { limit: 20, limit_remaining: 19.956, limit_reset: 'daily', usage: 0.0047, is_free_tier: false } });
-  test('healthy credit (data envelope, currency unit)', () => {
+  const orResponder = async (url) => {
+    const body = url.includes('/credits')
+      ? { data: { total_credits: 220, total_usage: 212.22 } }
+      : { data: { usage_daily: 0, usage_weekly: 0, usage_monthly: 0.0047, is_free_tier: false } };
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  };
+  st = await run(openrouter, orResponder);
+  test('healthy balance = credits − usage', () => {
     assert.strictEqual(st.state, 'healthy');
-    assert.strictEqual(st.windows[0].remaining, 19.956);
-    assert.strictEqual(st.windows[0].unit, 'currency');
+    assert.strictEqual(st.balance.available, '7.78');
+    assert.strictEqual(st.balance.spent.daily, 0);
   });
-  st = await run(openrouter, { data: { limit: 20, limit_remaining: 0 } });
-  test('exhausted at limit_remaining 0', () => assert.strictEqual(st.state, 'exhausted'));
+  const orExhausted = async (url) => {
+    const body = url.includes('/credits')
+      ? { data: { total_credits: 100, total_usage: 100 } }
+      : { data: { usage_daily: 0, usage_weekly: 0 } };
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  };
+  st = await run(openrouter, orExhausted);
+  test('exhausted when balance 0', () => assert.strictEqual(st.state, 'exhausted'));
 
   if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
   console.log('\nall adapter tests passed');

@@ -147,10 +147,14 @@ function renderEntry(id, entry) {
   const st = entry.status || {};
   const state = st.state || 'unknown';
   let quota = '—';
-  if (st.balance) quota = `balance ${st.balance.available} ${st.balance.currency}`;
+  if (st.balance) {
+    quota = `balance ${st.balance.available} ${st.balance.currency}`;
+    if (st.balance.spent) {
+      quota += ` · spent $${Number(st.balance.spent.daily).toFixed(2)} today / $${Number(st.balance.spent.weekly).toFixed(2)} week`;
+    }
+  }
   else if (st.windows && st.windows.length) {
     quota = st.windows.map((w) => {
-      if (w.unit === 'currency' && w.limit > 0) return `credit $${Number(w.remaining).toFixed(2)} / $${Number(w.limit).toFixed(2)}`;
       if (w.limit > 0 && w.remaining != null) return `${w.type} ${Math.round((w.remaining / w.limit) * 100)}%`;
       return `${w.type} ${w.remaining}/${w.limit}`;
     }).join(' · ');

@@ -1,0 +1,32 @@
+{
+  "description": "Gate sub-agent dispatch on coding-plan availability. The PreToolUse hook reads a cached status file synchronously (never network) and blocks only on a fresh, unambiguous exhausted signal for the exact route. The SessionStart hook warms the cache.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent|Task|mcp__traycer_a2a__traycer_create_agent|mcp__traycer_a2a__traycer_configure_agent|mcp__traycer_a2a__traycer_fork_agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "gate"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "refresh", "--quiet"],
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

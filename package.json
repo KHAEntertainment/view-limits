@@ -1,0 +1,14 @@
+{
+  "name": "view-limits",
+  "version": "0.1.0",
+  "description": "Check coding-plan credit and rate-limit status across providers before dispatching sub-agents.",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": { "node": ">=18" },
+  "bin": { "vl": "./bin/vl.js" },
+  "scripts": {
+    "report": "node bin/vl.js report",
+    "refresh": "node bin/vl.js refresh",
+    "config": "node bin/vl.js config"
+  }
+}

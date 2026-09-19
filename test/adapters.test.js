@@ -29,17 +29,19 @@ function run(adapter, fixture) {
 (async () => {
   console.log('minimax');
   let st = await run(minimax, {
-    current_interval_usage_count: 42, current_interval_total_count: 100,
-    current_weekly_usage_count: 85, current_weekly_total_count: 100,
-    remains_time: 1789775460000,
+    model_remains: [
+      { model_name: 'general', current_interval_remaining_percent: 99, current_weekly_remaining_percent: 64, end_time: 1789794000000, weekly_end_time: 1789948800000 },
+      { model_name: 'video', current_interval_remaining_percent: 100, current_weekly_remaining_percent: 100 },
+    ],
+    base_resp: { status_code: 0, status_msg: 'success' },
   });
-  test('healthy: rolling-5h 42/100, weekly 85/100', () => {
+  test('healthy: rolling-5h 99%, weekly 64% (per-model percent)', () => {
     assert.strictEqual(st.state, 'healthy');
     assert.strictEqual(st.windows.length, 2);
     assert.strictEqual(st.windows[0].type, 'rolling-5h');
-    assert.strictEqual(st.windows[1].remaining, 85);
+    assert.strictEqual(st.windows[1].remaining, 64);
   });
-  st = await run(minimax, { current_interval_usage_count: 10, current_interval_total_count: 100, current_weekly_usage_count: 0, current_weekly_total_count: 100 });
+  st = await run(minimax, { model_remains: [{ model_name: 'general', current_interval_remaining_percent: 10, current_weekly_remaining_percent: 0 }] });
   test('exhausted when weekly remaining 0', () => assert.strictEqual(st.state, 'exhausted'));
 
   console.log('kimi');

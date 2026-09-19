@@ -79,12 +79,12 @@ function run(adapter, fixture) {
   test('exhausted when is_available false', () => assert.strictEqual(st.state, 'exhausted'));
 
   console.log('openrouter');
-  st = await run(openrouter, { limit: 10, limit_remaining: 4.5, limit_reset: 'daily', usage: 5.5 });
-  test('healthy credit 45%', () => {
+  st = await run(openrouter, { data: { limit: 20, limit_remaining: 19.956, limit_reset: 'daily', usage: 0.0047, is_free_tier: false } });
+  test('healthy credit ~100% (data envelope)', () => {
     assert.strictEqual(st.state, 'healthy');
-    assert.strictEqual(st.windows[0].remaining, 4.5);
+    assert.strictEqual(st.windows[0].remaining, 19.956);
   });
-  st = await run(openrouter, { limit: 10, limit_remaining: 0 });
+  st = await run(openrouter, { data: { limit: 20, limit_remaining: 0 } });
   test('exhausted at limit_remaining 0', () => assert.strictEqual(st.state, 'exhausted'));
 
   if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }

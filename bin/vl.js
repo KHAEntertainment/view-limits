@@ -101,22 +101,17 @@ function unknownStatus(detail) {
 
 async function refresh(quiet) {
   const cfg = loadConfig();
-  if (!cfg.routes.some((r) => vault.has(r.id))) {
+  const configured = cfg.routes.filter((r) => cfg.providers[r.provider] && vault.has(r.id));
+  if (!configured.length) {
     if (!quiet) process.stdout.write(noCredentialMessage());
     return;
   }
   const threshold = cfg.gate.constrainedThreshold;
-  const routes = cfg.routes.filter((r) => cfg.providers[r.provider]);
 
   const statuses = {};
-  await Promise.all(routes.map(async (route) => {
-    const token = vault.get(route.id);
-    if (!token) {
-      statuses[route.id] = entryFor(route, unknownStatus({ note: 'no credential (run: vl.js setup)' }), route.provider);
-      return;
-    }
+  await Promise.all(configured.map(async (route) => {
     try {
-      const st = await getAdapter(route.provider).fetchStatus(cfg.providers[route.provider], token, { threshold });
+      const st = await getAdapter(route.provider).fetchStatus(cfg.providers[route.provider], vault.get(route.id), { threshold });
       statuses[route.id] = entryFor(route, st, route.provider);
     } catch (e) {
       statuses[route.id] = entryFor(route, unknownStatus({ error: e.message }), route.provider);

@@ -112,6 +112,15 @@ node bin/vl.js config                      # effective config (masked)
 
 ## Testing
 
+Adapter parsing is verified against researched response fixtures (no network,
+no credentials):
+
+```sh
+node test/adapters.test.js
+```
+
+CLI sanity:
+
 ```sh
 # CLI sanity (no credentials needed)
 node bin/vl.js config

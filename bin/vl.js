@@ -32,9 +32,8 @@ function err(msg) { process.stderr.write(`view-limits: ${msg}\n`); process.exit(
 
 function noCredentialMessage() {
   return 'view-limits: no credentials configured yet.\n\n' +
-    'Run setup to add your provider keys (auto-imports MiniMax from\n' +
-    '~/.mmx/config.json, then opens a local browser form for the rest):\n\n' +
-    `    ${PLUGIN_ROOT}/bin/vl.js setup\n`;
+    'Run /view-limits:setup to add your provider keys (auto-imports MiniMax\n' +
+    'from ~/.mmx/config.json, then opens a local browser form for the rest).\n';
 }
 
 function readStdin() {
@@ -212,8 +211,20 @@ function openBrowser(url) {
   }
 }
 
-function launchLoopbackForm(ids) {
-  const nonce = crypto.randomBytes(24).toString('hex');
+function pickFreePort() {
+  const net = require('net');
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
+// Detached loopback server for the credential form (runs until the POST or a
+// 5-minute abandon timeout, then exits).
+function serve(port, nonce, ids) {
   const server = http.createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET') {
@@ -242,11 +253,9 @@ function launchLoopbackForm(ids) {
     res.writeHead(405); res.end();
   });
 
-  server.listen(0, '127.0.0.1', () => {
-    const url = `http://127.0.0.1:${server.address().port}`;
-    log(`opening credential form in your browser: ${url}`);
-    openBrowser(url);
-    setTimeout(() => { log('setup timed out; auto-imported credentials are kept.'); server.close(); process.exit(0); }, 5 * 60 * 1000);
+  server.listen(port, '127.0.0.1', () => {
+    openBrowser(`http://127.0.0.1:${port}`);
+    setTimeout(() => { server.close(); process.exit(0); }, 5 * 60 * 1000);
   });
 }
 
@@ -290,7 +299,14 @@ function setup(args) {
   log(`missing credentials for: ${missing.join(', ')}`);
 
   if (args.includes('--headless')) { promptHeadless(missing); return; }
-  launchLoopbackForm(missing);
+
+  // Non-blocking: spawn a detached loopback server, open the browser, return.
+  const nonce = crypto.randomBytes(24).toString('hex');
+  pickFreePort().then((port) => {
+    spawn(process.execPath, [path.join(PLUGIN_ROOT, 'bin', 'vl.js'), 'serve', String(port), nonce, ...missing], { detached: true, stdio: 'ignore' }).unref();
+    log(`credential form: http://127.0.0.1:${port}`);
+    log('paste your keys, then run /view-limits:update-providers to refresh.');
+  });
 }
 
 function remove(routeId) {
@@ -315,6 +331,17 @@ function config() {
   process.stdout.write(JSON.stringify(out, null, 2) + '\n');
 }
 
+// ---- session-start (first-run nudge) ----------------------------------------
+
+function sessionStart() {
+  const cfg = loadConfig();
+  if (cfg.routes.some((r) => vault.has(r.id))) process.exit(0);
+  process.stdout.write(JSON.stringify({
+    systemMessage: 'view-limits: no credentials configured yet. Run /view-limits:setup to add your provider keys.',
+  }));
+  process.exit(0);
+}
+
 // ---- dispatch ---------------------------------------------------------------
 
 const cmd = process.argv[2];
@@ -337,6 +364,8 @@ const hasFlag = (n) => args.includes(n);
     }
     case 'check': return check(args[0]);
     case 'setup': return setup(args);
+    case 'serve': return serve(Number(args[0]), args[1], args.slice(2));
+    case 'session-start': return sessionStart();
     case 'remove': return remove(args[0]);
     case 'config': return config();
     default:

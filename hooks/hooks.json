@@ -25,6 +25,16 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "session-start"],
+            "timeout": 5
+          }
+        ]
       }
     ]
   }

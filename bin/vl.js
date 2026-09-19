@@ -276,17 +276,16 @@ function setup(args) {
     return;
   }
 
-  // Full flow: audit → auto-import → collect the rest.
+  // Full flow: audit → re-import from native files → collect the rest.
   const missing = [];
   const imported = [];
   for (const route of cfg.routes) {
-    if (vault.has(route.id)) continue;
     const imp = cfg.importMap && cfg.importMap[route.id];
     const secret = imp ? readNativeSecret(imp) : null;
     if (secret) { vault.set(route.id, secret); imported.push(route.id); continue; }
-    missing.push(route.id);
+    if (!vault.has(route.id)) missing.push(route.id);
   }
-  if (imported.length) log(`auto-imported: ${imported.join(', ')}`);
+  if (imported.length) log(`imported from native config: ${imported.join(', ')}`);
   if (!missing.length) { log('all credentials present.'); return; }
   log(`missing credentials for: ${missing.join(', ')}`);
 

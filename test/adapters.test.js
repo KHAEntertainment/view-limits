@@ -80,9 +80,10 @@ function run(adapter, fixture) {
 
   console.log('openrouter');
   st = await run(openrouter, { data: { limit: 20, limit_remaining: 19.956, limit_reset: 'daily', usage: 0.0047, is_free_tier: false } });
-  test('healthy credit ~100% (data envelope)', () => {
+  test('healthy credit (data envelope, currency unit)', () => {
     assert.strictEqual(st.state, 'healthy');
     assert.strictEqual(st.windows[0].remaining, 19.956);
+    assert.strictEqual(st.windows[0].unit, 'currency');
   });
   st = await run(openrouter, { data: { limit: 20, limit_remaining: 0 } });
   test('exhausted at limit_remaining 0', () => assert.strictEqual(st.state, 'exhausted'));

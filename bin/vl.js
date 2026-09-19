@@ -150,6 +150,7 @@ function renderEntry(id, entry) {
   if (st.balance) quota = `balance ${st.balance.available} ${st.balance.currency}`;
   else if (st.windows && st.windows.length) {
     quota = st.windows.map((w) => {
+      if (w.unit === 'currency' && w.limit > 0) return `credit $${Number(w.remaining).toFixed(2)} / $${Number(w.limit).toFixed(2)}`;
       if (w.limit > 0 && w.remaining != null) return `${w.type} ${Math.round((w.remaining / w.limit) * 100)}%`;
       return `${w.type} ${w.remaining}/${w.limit}`;
     }).join(' · ');

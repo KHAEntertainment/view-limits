@@ -582,6 +582,31 @@ test('freshness boundary +1 ms future → deny', () => {
 
 console.log('\ncli gate — calendar-overflow freshness (CodeRabbit 4056155869)');
 
+test('high precision UTC and offset timestamps retain millisecond freshness boundaries', () => {
+  for (const [fraction, expected] of [['001456', 'deny'], ['000999', 'deny']]) {
+    for (const freshUntil of [
+      `2026-09-19T00:00:00.${fraction}Z`,
+      `2026-09-19T05:30:00.${fraction}+05:30`,
+      '2026-09-18T23:59:59.999999Z',
+      '2026-09-19T05:29:59.999999+05:30',
+    ]) {
+      const dir = scratch();
+      writeJson(dir, 'status.json', {
+        updatedAt: isoAtFixed(-1000),
+        routes: { 'kimi-code-plan': {
+          routeId: 'kimi-code-plan', observedAt: isoAtFixed(-1000), freshUntil,
+          source: 'kimi', status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+        } },
+      });
+      const r = runGate({ input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } }, dir, useFixed: true });
+      assert.strictEqual(r.status, 0, `${freshUntil}: ${r.stderr}`);
+      const h = parseHook(r.stdout);
+      assert.strictEqual(h?.hookSpecificOutput?.permissionDecision,
+        Date.parse(freshUntil) < FIXED_NOW ? undefined : expected, freshUntil);
+    }
+  }
+});
+
 test('freshUntil 2030-09-31 normalizes to Oct 1 2030 (future of FIXED_NOW) → fail open, no deny', () => {
   // Date.parse('2030-09-31T00:00:00.000Z') === Date.parse('2030-10-01T00:00:00.000Z')
   // (calendar overflow rolls forward). Without the strict parser, the entry

@@ -24,6 +24,26 @@ function entry(status, freshUntil = FRESH) {
 
 console.log('decide — happy paths');
 
+test('fractional precision preserves UTC/offset instants and freshness boundaries', () => {
+  const { parseStrictIsoTimestamp } = require('../lib/gate');
+  const instant = NOW + 123;
+  for (const fraction of ['1234', '123456', '123456789']) {
+    for (const timestamp of [
+      `2026-09-19T00:00:00.${fraction}Z`,
+      `2026-09-19T05:30:00.${fraction}+05:30`,
+    ]) {
+      assert.strictEqual(parseStrictIsoTimestamp(timestamp), instant, timestamp);
+      for (const [now, expected] of [[instant - 1, 'deny'], [instant, 'deny'], [instant + 1, 'allow']]) {
+        assert.strictEqual(decide({ route: ROUTE, entry: entry({ state: 'exhausted' }, timestamp), now }).action,
+          expected, `${timestamp} at ${now}`);
+      }
+    }
+  }
+  for (const timestamp of ['2030-09-31T00:00:00.123456Z', '2030-09-31T05:30:00.123456+05:30']) {
+    assert.strictEqual(parseStrictIsoTimestamp(timestamp), null, timestamp);
+  }
+});
+
 test('no route → allow (fail open)', () => {
   assert.deepStrictEqual(decide({ route: null, entry: null, now: NOW }), { action: 'allow' });
 });

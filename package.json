@@ -7,7 +7,7 @@
   "engines": { "node": ">=18" },
   "bin": { "vl": "./bin/vl.js" },
   "scripts": {
-    "test": "node test/adapters.test.js",
+    "test": "node test/run.js",
     "report": "node bin/vl.js report",
     "refresh": "node bin/vl.js refresh",
     "config": "node bin/vl.js config"

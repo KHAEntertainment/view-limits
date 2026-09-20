@@ -19,7 +19,10 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 
 const { loadConfig, dataDir, expandHome } = require('../lib/config');
-const { readCache, writeCache, isFresh, tryAcquireRefreshLock, spawnRefresh } = require('../lib/cache');
+const {
+  readCache, writeCache, isFresh,
+  tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
+} = require('../lib/cache');
 const { resolveRoute, dispatchContext } = require('../lib/routes');
 const { decide, summarize } = require('../lib/gate');
 const vault = require('../lib/vault');
@@ -72,7 +75,7 @@ async function gate() {
   const now = Date.now();
   const d = decide({ route, entry, now, config: cfg });
 
-  if (d.refresh && tryAcquireRefreshLock(now, cfg.gate.refreshLockSeconds)) {
+  if (d.refresh && tryScheduleRefresh(now, cfg.gate.refreshLockSeconds)) {
     spawnRefresh(PLUGIN_ROOT);
   }
 
@@ -112,20 +115,44 @@ async function refresh(quiet) {
     if (!quiet) process.stdout.write(noCredentialMessage());
     return;
   }
-  const threshold = cfg.gate.constrainedThreshold;
 
-  const statuses = {};
-  await Promise.all(configured.map(async (route) => {
-    try {
-      const st = await getAdapter(route.provider).fetchStatus(cfg.providers[route.provider], vault.get(route.id), { threshold });
-      statuses[route.id] = entryFor(route, st, route.provider);
-    } catch (e) {
-      statuses[route.id] = entryFor(route, unknownStatus({ error: e.message }), route.provider);
+  // Shared refresh worker ownership: manual refresh, SessionStart's refresh,
+  // and the gate-spawned refresh child all converge on this lock. Only one
+  // worker performs provider calls; the loser prints the cached state plus
+  // an in-progress indication and exits without calling any provider.
+  const ownerToken = crypto.randomBytes(16).toString('hex');
+  const acq = await acquireWorker({
+    ownerToken,
+  });
+  if (!acq.acquired) {
+    if (!quiet) {
+      const cache = readCache();
+      process.stdout.write(renderReport(cache, cfg) + '\n');
+      process.stdout.write(
+        `view-limits: ${acq.error ? 'refresh unavailable (' + acq.error + ')' : 'refresh already in progress'}. ` +
+        `Showing last cached status.\n`,
+      );
     }
-  }));
+    return;
+  }
 
-  const doc = writeCache(statuses);
-  if (!quiet) process.stdout.write(renderReport(doc, cfg) + '\n');
+  try {
+    const threshold = cfg.gate.constrainedThreshold;
+    const statuses = {};
+    await Promise.all(configured.map(async (route) => {
+      try {
+        const st = await getAdapter(route.provider).fetchStatus(cfg.providers[route.provider], vault.get(route.id), { threshold });
+        statuses[route.id] = entryFor(route, st, route.provider);
+      } catch (e) {
+        statuses[route.id] = entryFor(route, unknownStatus({ error: e.message }), route.provider);
+      }
+    }));
+
+    const doc = writeCache(statuses);
+    if (!quiet) process.stdout.write(renderReport(doc, cfg) + '\n');
+  } finally {
+    releaseWorker(acq);
+  }
 }
 
 // ---- report -----------------------------------------------------------------

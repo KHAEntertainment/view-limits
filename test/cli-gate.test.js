@@ -156,7 +156,7 @@ test('native Agent kimi-k2 + fresh exhausted kimi cache → deny JSON', () => {
 
 console.log('\ncli gate — stale entry → allow + refresh + detached');
 
-test('stale kimi cache + native Agent kimi-k2 → allow context, refresh.lock written, gate exits promptly', () => {
+test('stale kimi cache + native Agent kimi-k2 → allow context, refresh.scheduled written, gate exits promptly', () => {
   const dir = scratch();
   writeJson(dir, 'status.json', {
     updatedAt: isoOffsetMs(-3600 * 1000),
@@ -183,7 +183,10 @@ test('stale kimi cache + native Agent kimi-k2 → allow context, refresh.lock wr
   assert.ok(h && h.hookSpecificOutput, 'expected hook output');
   assert.ok(!h.hookSpecificOutput.permissionDecision, 'stale entry must not deny');
   assert.match(h.hookSpecificOutput.additionalContext || '', /no fresh status/);
-  assert.ok(fs.existsSync(path.join(dir, 'refresh.lock')), 'expected refresh.lock after stale gate');
+  // Gate-side throttle marker; the actual worker lock is written by the
+  // detached child after it acquires ownership, which the gate never waits
+  // for, so it is not asserted here.
+  assert.ok(fs.existsSync(path.join(dir, 'refresh.scheduled')), 'expected refresh.scheduled after stale gate');
 });
 
 console.log('\ncli gate — F1 conflict end-to-end must fail open');

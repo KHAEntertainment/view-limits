@@ -287,16 +287,60 @@ test('valid date with sub-millisecond precision (.1) → accepted', () => {
   assert.strictEqual(d.action, 'deny');
 });
 
-test('non-UTC timezone designator (offset) → fail open', () => {
-  // The cache contract is UTC. An offset-form timestamp is ambiguous about
-  // the same normalization surface we want to defend against, so we reject.
-  for (const off of ['2099-09-19T00:00:00+00:00', '2099-09-19T00:00:00-05:00']) {
+test('non-UTC timezone designator (offset) → accepted; fresh + exhausted still denies', () => {
+  // The cache contract is the INSTANT, not the textual form. Valid ISO 8601
+  // offsets represent real instants and must not be rejected as a policy
+  // choice. A future schema or a manual cache edit using offsets must still
+  // gate the dispatch on the resolved instant.
+  const offCases = [
+    '2099-09-19T00:00:00+00:00', // offset 0 == UTC Z
+    '2099-09-19T00:00:00-05:00', // Sep 19 local == Sep 19 05:00 UTC
+    '2099-09-19T00:00:00+05:00', // Sep 19 local == Sep 18 19:00 UTC
+    '2099-09-19T00:00:00+0000', // compact offset form (no colon)
+  ];
+  for (const off of offCases) {
     const d = decide({
       route: ROUTE,
       entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, off),
       now: NOW,
     });
-    assert.strictEqual(d.action, 'allow', `offset ${off} should not deny`);
+    assert.strictEqual(d.action, 'deny', `valid offset ${off} must deny when fresh+exhausted`);
+  }
+});
+
+test('equivalent instants (UTC Z vs offset) produce identical freshness decisions', () => {
+  // 2099-09-19T00:00:00Z ≡ 2099-09-19T05:00:00+05:00 ≡ 2099-09-19T00:00:00+00:00.
+  // All three must produce the same epoch and therefore the same decision.
+  const equivs = [
+    '2099-09-19T00:00:00Z',
+    '2099-09-19T05:00:00+05:00',
+    '2099-09-19T00:00:00+00:00',
+  ];
+  for (const e of equivs) {
+    const d = decide({
+      route: ROUTE,
+      entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, e),
+      now: NOW,
+    });
+    assert.strictEqual(d.action, 'deny', `${e} (future, exhausted) must deny`);
+  }
+});
+
+test('overflow with offset designator → fail open', () => {
+  // The overflow defense is calendar-only; an offset does not let a bad
+  // calendar slip through.
+  for (const off of [
+    '2030-09-31T00:00:00+00:00',
+    '2030-09-31T00:00:00-05:00',
+    '2099-02-29T00:00:00+00:00',
+    '2026-13-01T00:00:00+05:00',
+  ]) {
+    const d = decide({
+      route: ROUTE,
+      entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, off),
+      now: NOW,
+    });
+    assert.strictEqual(d.action, 'allow', `overflow ${off} must fail open`);
     assert.strictEqual(d.refresh, true);
   }
 });
@@ -319,19 +363,32 @@ test('parseStrictIsoTimestamp unit cases', () => {
   assert.ok(Number.isFinite(parseStrictIsoTimestamp('2026-09-19T00:00:00Z')), 'no millis');
   assert.ok(Number.isFinite(parseStrictIsoTimestamp('2026-09-19T00:00:00.000Z')), 'canonical');
   assert.ok(Number.isFinite(parseStrictIsoTimestamp('2026-09-19T00:00:00.1Z')), 'sub-millis');
-  // rejected
+  // valid offsets accepted
+  assert.ok(Number.isFinite(parseStrictIsoTimestamp('2099-09-19T00:00:00+00:00')), 'offset +00:00');
+  assert.ok(Number.isFinite(parseStrictIsoTimestamp('2099-09-19T00:00:00-05:00')), 'offset -05:00');
+  assert.ok(Number.isFinite(parseStrictIsoTimestamp('2099-09-19T00:00:00+05:00')), 'offset +05:00');
+  assert.ok(Number.isFinite(parseStrictIsoTimestamp('2099-09-19T00:00:00+0000')), 'compact offset');
+  // rejected — calendar overflow
   assert.strictEqual(parseStrictIsoTimestamp('2030-09-31T00:00:00.000Z'), null, 'Sept 31 overflow');
+  assert.strictEqual(parseStrictIsoTimestamp('2030-09-31T00:00:00+00:00'), null, 'Sept 31 overflow with offset');
   assert.strictEqual(parseStrictIsoTimestamp('2025-02-29T00:00:00.000Z'), null, 'Feb 29 non-leap');
   assert.strictEqual(parseStrictIsoTimestamp('2026-13-01T00:00:00.000Z'), null, 'month 13');
-  assert.strictEqual(parseStrictIsoTimestamp('2026-09-19T00:00:00+00:00'), null, 'offset rejected');
+  // rejected — bad shape
   assert.strictEqual(parseStrictIsoTimestamp('2026-09-19'), null, 'date-only rejected');
   assert.strictEqual(parseStrictIsoTimestamp('2026-09-19 00:00:00Z'), null, 'space separator rejected');
+  assert.strictEqual(parseStrictIsoTimestamp('2026-09-19T00:00:00'), null, 'no tz designator rejected');
   assert.strictEqual(parseStrictIsoTimestamp(''), null, 'empty');
   assert.strictEqual(parseStrictIsoTimestamp(null), null, 'null');
   assert.strictEqual(parseStrictIsoTimestamp(undefined), null, 'undefined');
   assert.strictEqual(parseStrictIsoTimestamp(12345), null, 'number');
   assert.strictEqual(parseStrictIsoTimestamp([]), null, 'array');
   assert.strictEqual(parseStrictIsoTimestamp('not-a-date'), null, 'garbage');
+  // equivalent instants → identical epoch
+  assert.strictEqual(
+    parseStrictIsoTimestamp('2099-09-19T00:00:00Z'),
+    parseStrictIsoTimestamp('2099-09-19T05:00:00+05:00'),
+    'UTC Z and +05:00 offset of same instant must produce identical epoch',
+  );
 });
 
 if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }

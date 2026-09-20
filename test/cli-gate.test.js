@@ -635,27 +635,73 @@ test('freshUntil 2099-02-29 normalizes to Mar 1 2099 (future of FIXED_NOW) → f
   assert.ok(!h || !h.hookSpecificOutput || !h.hookSpecificOutput.permissionDecision);
 });
 
-test('freshUntil offset form (e.g. +00:00) → fail open, no deny', () => {
-  const dir = scratch();
-  writeJson(dir, 'status.json', {
-    updatedAt: isoAtFixed(-1000),
-    routes: {
-      'kimi-code-plan': {
-        routeId: 'kimi-code-plan',
-        observedAt: isoAtFixed(-1000),
-        freshUntil: '2099-09-19T00:00:00+00:00',
-        source: 'kimi',
-        status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+test('freshUntil valid offset form (e.g. +00:00, +05:00, -05:00) → deny at FIXED_NOW', () => {
+  // Valid ISO 8601 offsets represent real instants and must still deny
+  // when fresh + exhausted. The cache contract is the INSTANT, not the
+  // textual form, so we do not impose a Z-only policy on inputs.
+  const offCases = [
+    '2099-09-19T00:00:00+00:00',
+    '2099-09-19T00:00:00-05:00',
+    '2099-09-19T05:00:00+05:00', // equivalent UTC instant to the first two
+    '2099-09-19T00:00:00+0000',  // compact offset form
+  ];
+  for (const off of offCases) {
+    const dir = scratch();
+    writeJson(dir, 'status.json', {
+      updatedAt: isoAtFixed(-1000),
+      routes: {
+        'kimi-code-plan': {
+          routeId: 'kimi-code-plan',
+          observedAt: isoAtFixed(-1000),
+          freshUntil: off,
+          source: 'kimi',
+          status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+        },
       },
-    },
-  });
-  const r = runGate({
-    input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
-    dir, useFixed: true,
-  });
-  assert.strictEqual(r.status, 0);
-  const h = parseHook(r.stdout);
-  assert.ok(!h || !h.hookSpecificOutput || !h.hookSpecificOutput.permissionDecision);
+    });
+    const r = runGate({
+      input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
+      dir, useFixed: true,
+    });
+    assert.strictEqual(r.status, 0, `[${off}] gate crashed: ${r.stderr}`);
+    const h = parseHook(r.stdout);
+    assert.strictEqual(h.hookSpecificOutput.permissionDecision, 'deny',
+      `[${off}] valid offset future timestamp must deny`);
+  }
+});
+
+test('freshUntil overflow with offset designator → fail open, no deny', () => {
+  // Calendar defense is timezone-independent; an offset does not let a
+  // bad calendar slip through.
+  const overflowCases = [
+    '2030-09-31T00:00:00+00:00',
+    '2030-09-31T00:00:00-05:00',
+    '2099-02-29T00:00:00+00:00', // non-leap year
+    '2026-13-01T00:00:00+05:00',
+  ];
+  for (const ov of overflowCases) {
+    const dir = scratch();
+    writeJson(dir, 'status.json', {
+      updatedAt: isoAtFixed(-1000),
+      routes: {
+        'kimi-code-plan': {
+          routeId: 'kimi-code-plan',
+          observedAt: isoAtFixed(-1000),
+          freshUntil: ov,
+          source: 'kimi',
+          status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+        },
+      },
+    });
+    const r = runGate({
+      input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
+      dir, useFixed: true,
+    });
+    assert.strictEqual(r.status, 0, `[${ov}] gate crashed: ${r.stderr}`);
+    const h = parseHook(r.stdout);
+    assert.ok(!h || !h.hookSpecificOutput || !h.hookSpecificOutput.permissionDecision,
+      `[${ov}] overflow with offset must fail open`);
+  }
 });
 
 test('valid leap-year freshUntil (2104-02-29) → deny at FIXED_NOW', () => {

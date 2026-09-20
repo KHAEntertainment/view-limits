@@ -24,6 +24,19 @@ function entry(status, freshUntil = FRESH) {
 
 console.log('decide — happy paths');
 
+test('unsupported leap-second timestamps are rejected and fail open', () => {
+  const { parseStrictIsoTimestamp } = require('../lib/gate');
+  for (const timestamp of ['2030-12-31T23:59:60Z', '2030-12-31T23:59:60.123456+00:00']) {
+    assert.strictEqual(parseStrictIsoTimestamp(timestamp), null, timestamp);
+    const result = decide({ route: ROUTE, entry: entry({ state: 'exhausted' }, timestamp), now: NOW });
+    assert.strictEqual(result.action, 'allow', timestamp);
+    assert.strictEqual(result.refresh, true, timestamp);
+  }
+  const ordinary = '2030-12-31T23:59:59Z';
+  assert.strictEqual(parseStrictIsoTimestamp(ordinary), Date.parse(ordinary));
+  assert.strictEqual(decide({ route: ROUTE, entry: entry({ state: 'exhausted' }, ordinary), now: NOW }).action, 'deny');
+});
+
 test('fractional precision preserves UTC/offset instants and freshness boundaries', () => {
   const { parseStrictIsoTimestamp } = require('../lib/gate');
   const instant = NOW + 123;

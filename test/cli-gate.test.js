@@ -580,6 +580,108 @@ test('freshness boundary +1 ms future → deny', () => {
   assert.strictEqual(h.hookSpecificOutput.permissionDecision, 'deny');
 });
 
+console.log('\ncli gate — calendar-overflow freshness (CodeRabbit 4056155869)');
+
+test('freshUntil 2030-09-31 normalizes to Oct 1 2030 (future of FIXED_NOW) → fail open, no deny', () => {
+  // Date.parse('2030-09-31T00:00:00.000Z') === Date.parse('2030-10-01T00:00:00.000Z')
+  // (calendar overflow rolls forward). Without the strict parser, the entry
+  // would mark fresh and a deny would emit. With the fix, the entry is
+  // treated as not-fresh and the gate fails open.
+  const dir = scratch();
+  writeJson(dir, 'status.json', {
+    updatedAt: isoAtFixed(-1000),
+    routes: {
+      'kimi-code-plan': {
+        routeId: 'kimi-code-plan',
+        observedAt: isoAtFixed(-1000),
+        freshUntil: '2030-09-31T00:00:00.000Z', // overflow — Date.parse → Oct 1
+        source: 'kimi',
+        status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+      },
+    },
+  });
+  const r = runGate({
+    input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
+    dir, useFixed: true,
+  });
+  assert.strictEqual(r.status, 0, `gate crashed: ${r.stderr}`);
+  const h = parseHook(r.stdout);
+  assert.ok(!h || !h.hookSpecificOutput || !h.hookSpecificOutput.permissionDecision,
+    'overflow-date freshUntil must not deny a dispatch');
+  assert.match((h && h.hookSpecificOutput && h.hookSpecificOutput.additionalContext) || '',
+    /no fresh status/, 'gate should fail open with the standard refresh context');
+});
+
+test('freshUntil 2099-02-29 normalizes to Mar 1 2099 (future of FIXED_NOW) → fail open, no deny', () => {
+  const dir = scratch();
+  writeJson(dir, 'status.json', {
+    updatedAt: isoAtFixed(-1000),
+    routes: {
+      'kimi-code-plan': {
+        routeId: 'kimi-code-plan',
+        observedAt: isoAtFixed(-1000),
+        freshUntil: '2099-02-29T00:00:00.000Z', // non-leap year, rolls to Mar 1
+        source: 'kimi',
+        status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+      },
+    },
+  });
+  const r = runGate({
+    input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
+    dir, useFixed: true,
+  });
+  assert.strictEqual(r.status, 0);
+  const h = parseHook(r.stdout);
+  assert.ok(!h || !h.hookSpecificOutput || !h.hookSpecificOutput.permissionDecision);
+});
+
+test('freshUntil offset form (e.g. +00:00) → fail open, no deny', () => {
+  const dir = scratch();
+  writeJson(dir, 'status.json', {
+    updatedAt: isoAtFixed(-1000),
+    routes: {
+      'kimi-code-plan': {
+        routeId: 'kimi-code-plan',
+        observedAt: isoAtFixed(-1000),
+        freshUntil: '2099-09-19T00:00:00+00:00',
+        source: 'kimi',
+        status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+      },
+    },
+  });
+  const r = runGate({
+    input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
+    dir, useFixed: true,
+  });
+  assert.strictEqual(r.status, 0);
+  const h = parseHook(r.stdout);
+  assert.ok(!h || !h.hookSpecificOutput || !h.hookSpecificOutput.permissionDecision);
+});
+
+test('valid leap-year freshUntil (2104-02-29) → deny at FIXED_NOW', () => {
+  const dir = scratch();
+  writeJson(dir, 'status.json', {
+    updatedAt: isoAtFixed(-1000),
+    routes: {
+      'kimi-code-plan': {
+        routeId: 'kimi-code-plan',
+        observedAt: isoAtFixed(-1000),
+        freshUntil: '2104-02-29T00:00:00.000Z', // real leap-year Feb 29, future
+        source: 'kimi',
+        status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+      },
+    },
+  });
+  const r = runGate({
+    input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
+    dir, useFixed: true,
+  });
+  assert.strictEqual(r.status, 0);
+  const h = parseHook(r.stdout);
+  assert.strictEqual(h.hookSpecificOutput.permissionDecision, 'deny',
+    'valid leap-year future timestamp must still deny');
+});
+
 console.log('\ncli gate — preload guard: zero provider / RPC / credential / HTTP activity (F5)');
 
 test('gate subprocess makes zero provider, fetch, HTTP, TCP, TLS, vault, or exec calls', () => {

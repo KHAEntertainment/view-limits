@@ -221,5 +221,118 @@ test('window without type field → still emits a summary line', () => {
   assert.match(d.context, /window 50%/);
 });
 
+console.log('\ndecide — strict ISO 8601 UTC timestamps (CodeRabbit 4056155869)');
+
+test('calendar overflow: Sept 31 normalizes to Oct 1 → fail open (no deny)', () => {
+  // FIXED_NOW = Sep 19 2026; '2030-09-31' parses as Oct 1 2030 (future),
+  // which under the loose Date.parse check would mark the entry as fresh
+  // and produce a deny. The strict parser must reject the overflow.
+  const d = decide({
+    route: ROUTE,
+    entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, '2030-09-31T00:00:00.000Z'),
+    now: NOW,
+  });
+  assert.strictEqual(d.action, 'allow');
+  assert.strictEqual(d.refresh, true);
+});
+
+test('calendar overflow: Feb 29 in non-leap year → fail open', () => {
+  const d = decide({
+    route: ROUTE,
+    entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, '2025-02-29T00:00:00.000Z'),
+    now: NOW,
+  });
+  assert.strictEqual(d.action, 'allow');
+  assert.strictEqual(d.refresh, true);
+});
+
+test('calendar overflow: month > 12 → fail open', () => {
+  const d = decide({
+    route: ROUTE,
+    entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, '2026-13-01T00:00:00.000Z'),
+    now: NOW,
+  });
+  assert.strictEqual(d.action, 'allow');
+  assert.strictEqual(d.refresh, true);
+});
+
+test('valid leap-year date (Feb 29) → accepted as fresh', () => {
+  // 2104 is a leap year (2104 % 4 == 0; 2104 % 100 != 0); Feb 29 is real;
+  // round-trip matches; the future marks fresh + exhausted → deny.
+  const d = decide({
+    route: ROUTE,
+    entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, '2104-02-29T00:00:00.000Z'),
+    now: NOW,
+  });
+  assert.strictEqual(d.action, 'deny');
+});
+
+test('valid date without millisecond component → accepted', () => {
+  // Cache may write toISOString (always .sss) but a provider or a manual
+  // cache edit may omit the millis — still a valid ISO 8601 UTC string.
+  const d = decide({
+    route: ROUTE,
+    entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, '2099-09-19T00:00:00Z'),
+    now: NOW,
+  });
+  assert.strictEqual(d.action, 'deny');
+});
+
+test('valid date with sub-millisecond precision (.1) → accepted', () => {
+  const d = decide({
+    route: ROUTE,
+    entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, '2099-09-19T00:00:00.1Z'),
+    now: NOW,
+  });
+  assert.strictEqual(d.action, 'deny');
+});
+
+test('non-UTC timezone designator (offset) → fail open', () => {
+  // The cache contract is UTC. An offset-form timestamp is ambiguous about
+  // the same normalization surface we want to defend against, so we reject.
+  for (const off of ['2099-09-19T00:00:00+00:00', '2099-09-19T00:00:00-05:00']) {
+    const d = decide({
+      route: ROUTE,
+      entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: null }, off),
+      now: NOW,
+    });
+    assert.strictEqual(d.action, 'allow', `offset ${off} should not deny`);
+    assert.strictEqual(d.refresh, true);
+  }
+});
+
+test('safeIso also rejects calendar-overflow resetAt — no Invalid Date in deny reason', () => {
+  const d = decide({
+    route: ROUTE,
+    entry: entry({ state: 'exhausted', windows: [], balance: null, resetAt: '2030-09-31T00:00:00.000Z' }, '2030-09-31T00:00:00.000Z'),
+    now: NOW,
+  });
+  // Both freshUntil AND resetAt are overflow; entry fails open.
+  assert.strictEqual(d.action, 'allow');
+  assert.strictEqual(d.refresh, true);
+});
+
+test('parseStrictIsoTimestamp unit cases', () => {
+  const { parseStrictIsoTimestamp } = require('../lib/gate');
+  // accepted
+  assert.ok(Number.isFinite(parseStrictIsoTimestamp('2024-02-29T00:00:00.000Z')), 'leap-year Feb 29');
+  assert.ok(Number.isFinite(parseStrictIsoTimestamp('2026-09-19T00:00:00Z')), 'no millis');
+  assert.ok(Number.isFinite(parseStrictIsoTimestamp('2026-09-19T00:00:00.000Z')), 'canonical');
+  assert.ok(Number.isFinite(parseStrictIsoTimestamp('2026-09-19T00:00:00.1Z')), 'sub-millis');
+  // rejected
+  assert.strictEqual(parseStrictIsoTimestamp('2030-09-31T00:00:00.000Z'), null, 'Sept 31 overflow');
+  assert.strictEqual(parseStrictIsoTimestamp('2025-02-29T00:00:00.000Z'), null, 'Feb 29 non-leap');
+  assert.strictEqual(parseStrictIsoTimestamp('2026-13-01T00:00:00.000Z'), null, 'month 13');
+  assert.strictEqual(parseStrictIsoTimestamp('2026-09-19T00:00:00+00:00'), null, 'offset rejected');
+  assert.strictEqual(parseStrictIsoTimestamp('2026-09-19'), null, 'date-only rejected');
+  assert.strictEqual(parseStrictIsoTimestamp('2026-09-19 00:00:00Z'), null, 'space separator rejected');
+  assert.strictEqual(parseStrictIsoTimestamp(''), null, 'empty');
+  assert.strictEqual(parseStrictIsoTimestamp(null), null, 'null');
+  assert.strictEqual(parseStrictIsoTimestamp(undefined), null, 'undefined');
+  assert.strictEqual(parseStrictIsoTimestamp(12345), null, 'number');
+  assert.strictEqual(parseStrictIsoTimestamp([]), null, 'array');
+  assert.strictEqual(parseStrictIsoTimestamp('not-a-date'), null, 'garbage');
+});
+
 if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
 console.log('\nall gate tests passed');

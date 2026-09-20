@@ -13,7 +13,7 @@ const route = { id: 'kimi-code-plan', provider: 'kimi', match: { model: 'kimi' }
 fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ routes: [route] }));
 const old = { updatedAt: '2000-01-01T00:00:00Z', routes: { 'kimi-code-plan': {
   freshUntil: '2000-01-01T00:00:00Z', status: { state: 'healthy' },
-} } };
+}, invalidNull: null, invalidArray: [], invalidPrimitive: 3 } };
 fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify(old));
 const events = () => {
   try { return fs.readFileSync(path.join(dir, 'events'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse); }
@@ -38,12 +38,18 @@ async function kill(child) {
 }
 (async () => {
   try {
+    const report = run(['report']);
+    assert.match(report.stdout, /kimi-code-plan: healthy/);
+    assert.doesNotMatch(report.stdout, /invalidNull|invalidArray|invalidPrimitive/);
+    const jsonReport = JSON.parse(run(['report', '--json']).stdout);
+    assert.deepStrictEqual(Object.keys(jsonReport.routes), ['kimi-code-plan']);
     const owner = spawn(process.execPath, [cli, 'refresh', '--quiet'], { env, stdio: 'ignore' });
     children.push(owner);
     await until(() => events().some(e => e.kind === 'provider' && e.pid === owner.pid));
     const manual = run(['refresh']);
     assert.match(manual.stdout, /refresh already in progress/);
     assert.match(manual.stdout, /2000-01-01/);
+    assert.doesNotMatch(manual.stdout, /invalidNull|invalidArray|invalidPrimitive/);
     const hooks = require('../hooks/hooks.json');
     const sessionArgs = hooks.hooks.SessionStart[0].hooks[0].args.slice(1);
     assert.deepStrictEqual(sessionArgs, ['refresh', '--quiet']);

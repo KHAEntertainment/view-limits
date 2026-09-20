@@ -92,6 +92,16 @@ test('scheduling throttle is separate from actual ownership', async () => {
   assert.strictEqual(cache.releaseWorker(handle), true);
 });
 
+test('invalid route containers are omitted without losing valid siblings', () => {
+  scratch();
+  const valid = { routeId: 'good', freshUntil: '2030-01-01T00:00:00Z', status: { state: 'healthy' } };
+  const doc = { updatedAt: '2026-09-20T00:00:00Z', routes: {
+    good: valid, nullEntry: null, arrayEntry: [], stringEntry: 'bad', numberEntry: 3, boolEntry: true,
+  } };
+  fs.writeFileSync(cache.cachePath(), JSON.stringify(doc));
+  assert.deepStrictEqual(cache.readCache(), { updatedAt: doc.updatedAt, routes: { good: valid } });
+});
+
 test('live owner excludes competitors regardless of elapsed throttle; old release cannot clear successor', async () => {
   scratch(); const first = await cache.acquireWorker({ ownerToken: 'first' });
   assert.strictEqual(first.acquired, true);

@@ -18,9 +18,19 @@ const VL = path.join(PLUGIN_ROOT, 'bin', 'vl.js');
 const GUARD = path.join(__dirname, 'guard.cjs');
 
 let failures = 0;
+const pendingTests = [];
 function test(name, fn) {
-  try { fn(); console.log(`  ✓ ${name}`); }
-  catch (e) { failures += 1; console.log(`  ✗ ${name}\n    ${e.message}`); }
+  let result;
+  try { result = fn(); }
+  catch (e) { failures += 1; console.log(`  ✗ ${name}\n    ${e.message}`); return; }
+  if (result && typeof result.then === 'function') {
+    pendingTests.push(result.then(
+      () => { console.log(`  ✓ ${name}`); },
+      (e) => { failures += 1; console.log(`  ✗ ${name}\n    ${e.message}`); },
+    ));
+  } else {
+    console.log(`  ✓ ${name}`);
+  }
 }
 
 function scratch() {
@@ -624,29 +634,19 @@ test('gate subprocess makes zero provider, fetch, HTTP, TCP, TLS, vault, or exec
 
 console.log('\ncli gate — real detached pending worker (F5)');
 
-test('refresh spawns a real detached pending worker; gate exits while child alive', () => {
-  // The guard's REVIEW_REAL_REFRESH branch passes the spawn through to the
-  // real child_process.spawn. We point CLAUDE_PLUGIN_ROOT at a tmp plugin
-  // root whose `bin/vl.js` is a copy of the committed refresh-pending-worker
-  // fixture — a standalone script that, after parsing, writes a readiness
-  // marker file and stays alive. No prepending of bin/vl.js source, so the
-  // production shebang and declarations never enter the worker file.
-  //
-  // Sequence:
-  //   1. Build tmpRoot, copy the fixture as tmpRoot/bin/vl.js, syntax-check
-  //      the generated worker explicitly before spawning.
-  //   2. Set WORKER_READY_PATH in env (inherited by the refresh child) and
-  //      pass WORKER_READY_PATH into the gate subprocess.
-  //   3. Spawn the gate with REVIEW_REAL_REFRESH=1 (the guard observes the
-  //      real spawn + unref and lets the real child run).
-  //   4. Wait for the readiness marker with a bounded timeout. If the worker
-  //      never becomes ready (e.g. parse error), the test fails explicitly
-  //      with the captured worker stderr.
-  //   5. Assert gate exit 0, detached:true, stdio:'ignore', unref observed,
-  //      and worker still alive after gate exit.
-  //   6. Cleanup is unconditional (finally): kill the worker via SIGTERM.
-  const dir = scratch();
-  writeJson(dir, 'status.json', {
+// Reusable async detachment probe. Builds a tmp plugin root whose `bin/vl.js`
+// is `workerContent` (so the gate's refresh spawn executes it), syntax-checks
+// the generated worker, spawns the gate with REVIEW_REAL_REFRESH=1 and
+// WORKER_READY_PATH inherited, and waits for the readiness marker with a
+// bounded timeout. Cleanup (timer + watcher + worker pid) is unconditional.
+//
+//   expectReady=true  → readiness must fire; then assert detached/stdio/unref/
+//                       liveness/pid-match.
+//   expectReady=false → readiness must time out (worker exited without writing
+//                       ready); gate still exits 0; worker pid is dead.
+async function probeDetachment({ label, workerContent, expectReady, readyTimeoutMs = 2500 }) {
+  const dataDir = scratch();
+  writeJson(dataDir, 'status.json', {
     updatedAt: isoOffsetMs(-3600 * 1000),
     routes: {
       'kimi-code-plan': {
@@ -661,17 +661,15 @@ test('refresh spawns a real detached pending worker; gate exits while child aliv
 
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-root-'));
   fs.mkdirSync(path.join(tmpRoot, 'bin'), { recursive: true });
-  const fixturePath = path.join(__dirname, 'fixtures', 'refresh-pending-worker.js');
   const workerPath = path.join(tmpRoot, 'bin', 'vl.js');
-  fs.copyFileSync(fixturePath, workerPath);
+  fs.writeFileSync(workerPath, workerContent);
 
-  // Explicit syntax check on the actual file we will spawn. A worker that
-  // can't parse cannot pass a kill(pid, 0) race — fail loudly here.
+  // Syntax check before spawning so a parse error fails this control
+  // immediately rather than racing startup liveness.
   const check = spawnSync(process.execPath, ['--check', workerPath], { encoding: 'utf8' });
-  assert.strictEqual(check.status, 0, `generated worker fails syntax: ${check.stderr}`);
+  assert.strictEqual(check.status, 0, `[${label}] generated worker fails syntax: ${check.stderr}`);
 
   const readyPath = path.join(tmpRoot, 'ready');
-  const READINESS_TIMEOUT_MS = 2500;
   let watcher = null;
   let timer = null;
   const readiness = new Promise((resolve, reject) => {
@@ -679,14 +677,14 @@ test('refresh spawns a real detached pending worker; gate exits while child aliv
       if (filename === 'ready' && fs.existsSync(readyPath)) resolve();
     });
     timer = setTimeout(
-      () => reject(new Error(`worker never wrote readiness marker at ${readyPath}`)),
-      READINESS_TIMEOUT_MS,
+      () => reject(new Error(`worker never wrote readiness marker at ${readyPath} within ${readyTimeoutMs}ms`)),
+      readyTimeoutMs,
     );
   });
 
   const { r, calls } = runGateLogged({
     input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
-    dir,
+    dir: dataDir,
     env: {
       CLAUDE_PLUGIN_ROOT: tmpRoot,
       WORKER_READY_PATH: readyPath,
@@ -696,45 +694,97 @@ test('refresh spawns a real detached pending worker; gate exits while child aliv
   });
 
   const realChild = calls.find((c) => c.kind === 'real-child');
-  const cleanup = () => {
+  let cleaned = false;
+  function cleanup() {
+    if (cleaned) return;
+    cleaned = true;
     if (timer) clearTimeout(timer);
     if (watcher) try { watcher.close(); } catch { /* */ }
     if (realChild && realChild.detail && realChild.detail.pid) {
       try { process.kill(realChild.detail.pid, 'SIGTERM'); } catch { /* already gone */ }
+      try { process.kill(realChild.detail.pid, 'SIGKILL'); } catch { /* */ }
     }
-  };
+  }
 
   try {
-    // Wait for the worker to publish its readiness marker before asserting
-    // anything about the gate. If this rejects, the worker never initialized
-    // and we surface the gate stderr + worker stderr (if any) for diagnosis.
-    return readiness.then(() => {
-      assert.strictEqual(r.status, 0, `gate crashed: ${r.stderr}`);
-      assert.ok(realChild, 'expected guard to spawn a real child for refresh');
-      assert.strictEqual(realChild.detail.detached, true, 'real child must be detached');
-      assert.strictEqual(realChild.detail.stdio, 'ignore', 'real child must ignore stdio');
-      assert.ok(realChild.detail.pid, 'real child must have a pid');
-      assert.ok(calls.some((c) => c.kind === 'real-unref'),
-        'expected guard to observe real unref call on the pending worker');
-
-      // Worker is still alive after the gate exits — proves the gate did not
-      // await. Process.kill(pid, 0) throws ESRCH if dead.
+    if (expectReady) {
+      await readiness;
+      assert.strictEqual(r.status, 0, `[${label}] gate crashed: ${r.stderr}`);
+      assert.ok(realChild, `[${label}] expected guard to spawn real child for refresh`);
+      assert.strictEqual(realChild.detail.detached, true, `[${label}] real child must be detached`);
+      assert.strictEqual(realChild.detail.stdio, 'ignore', `[${label}] real child must ignore stdio`);
+      assert.ok(realChild.detail.pid, `[${label}] real child must have a pid`);
+      assert.ok(
+        calls.some((c) => c.kind === 'real-unref'),
+        `[${label}] expected guard to observe real unref call on the pending worker`,
+      );
       let alive = true;
       try { process.kill(realChild.detail.pid, 0); }
       catch { alive = false; }
-      assert.ok(alive, `pending worker pid=${realChild.detail.pid} should still be alive after gate exits`);
-
-      // Read the readiness payload to cross-check pid matches the spawn log.
+      assert.ok(alive, `[${label}] worker pid=${realChild.detail.pid} should still be alive after gate exits`);
       const payload = JSON.parse(fs.readFileSync(readyPath, 'utf8'));
       assert.strictEqual(payload.pid, realChild.detail.pid,
-        'readiness marker pid must match the spawned child pid');
-    }).catch((e) => {
-      throw new Error(`${e.message}\ngate stderr: ${r.stderr}`);
-    });
+        `[${label}] readiness marker pid must match the spawned child pid`);
+    } else {
+      // Startup-failure control: worker exits (or otherwise fails to write
+      // ready) before readiness fires. The probe must REJECT the readiness
+      // Promise via the bounded timeout, the gate must still exit 0 (refresh
+      // is detached so gate does not await), and the worker pid must be gone.
+      let timedOut = false;
+      try {
+        await readiness;
+        assert.fail(`[${label}] readiness unexpectedly fired (worker initialized despite failure control)`);
+      } catch (e) {
+        if (!/never wrote readiness|never became ready/i.test(e.message)) throw e;
+        timedOut = true;
+      }
+      assert.ok(timedOut, `[${label}] expected readiness timeout`);
+      assert.strictEqual(r.status, 0, `[${label}] gate must still exit 0 (detached refresh): ${r.stderr}`);
+      assert.ok(realChild, `[${label}] expected guard to spawn real child even when worker exits early`);
+      assert.ok(
+        calls.some((c) => c.kind === 'real-unref'),
+        `[${label}] expected guard to observe real unref call on the failing worker`,
+      );
+      let alive = false;
+      try { process.kill(realChild.detail.pid, 0); alive = true; } catch { /* expected */ }
+      assert.strictEqual(alive, false,
+        `[${label}] worker pid=${realChild.detail.pid} should have exited (startup-failure control)`);
+    }
   } finally {
+    // Cleanup runs AFTER the awaited try settles, so the readiness timeout
+    // and watcher stay live for the assertions and the worker pid is still
+    // meaningful when we liveness-check it.
     cleanup();
   }
+}
+
+test('refresh spawns a real detached pending worker; gate exits while child alive', () => {
+  return probeDetachment({
+    label: 'valid-worker',
+    workerContent: fs.readFileSync(
+      path.join(__dirname, 'fixtures', 'refresh-pending-worker.js'),
+      'utf8',
+    ),
+    expectReady: true,
+  });
 });
 
-if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
-console.log('\nall cli-gate tests passed');
+test('refresh startup-failure control: process.exit(2) worker is rejected with bounded timeout', () => {
+  // Syntax-valid fixture that does NOT write a readiness marker and does
+  // NOT stay pending — proves the test cannot falsely pass a worker that
+  // never initializes. The probe must time out readiness, the gate must
+  // still exit 0 (detached refresh does not block gate exit), and the
+  // worker pid must be dead.
+  return probeDetachment({
+    label: 'startup-failure-control',
+    workerContent: "'use strict';\nprocess.exit(2);\n",
+    expectReady: false,
+  });
+});
+
+// Aggregate async outcomes before declaring success.
+(async () => {
+  await Promise.all(pendingTests);
+  if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
+  console.log('\nall cli-gate tests passed');
+})();

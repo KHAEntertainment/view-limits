@@ -55,13 +55,20 @@ async function gate() {
 
   const cfg = loadConfig();
   const ctx = dispatchContext(evt);
-  if (!ctx.model) process.exit(0); // no explicit model → fail open
+  if (!ctx.model) process.exit(0); // no/invalid model identity → fail open
 
   const route = resolveRoute(ctx.model, ctx, cfg.routes);
-  if (!route) process.exit(0); // unmapped/native → fail open
+  if (!route) process.exit(0); // unmapped/native/ambiguous → fail open
 
   const cache = readCache();
-  const entry = (cache.routes || {})[route.id];
+  // Guard the cache envelope before reading `routes`. `readCache` catches
+  // parse failures and returns {}, but `JSON.parse('null')` is valid JSON and
+  // would otherwise surface here as `null` — accessing `.routes` on null
+  // throws and the hook fails on an uncaught exception. Any non-object envelope
+  // (null, primitive, array) becomes an empty routes map so we fail open.
+  const routes = (cache && typeof cache === 'object' && !Array.isArray(cache) && cache.routes)
+    || {};
+  const entry = routes[route.id];
   const now = Date.now();
   const d = decide({ route, entry, now, config: cfg });
 

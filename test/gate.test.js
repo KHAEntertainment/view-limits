@@ -168,5 +168,58 @@ test('decide is pure: same inputs → same outputs (no Date.now leakage)', () =>
   assert.deepStrictEqual(a, b);
 });
 
+console.log('\ndecide — nested malformed status fields (F3)');
+
+test('windows is an object (not iterable) → safe summary, no throw', () => {
+  assert.doesNotThrow(() => {
+    const d = decide({
+      route: ROUTE,
+      entry: entry({ state: 'unknown', windows: {} }),
+      now: NOW,
+    });
+    assert.strictEqual(d.action, 'allow');
+  });
+});
+
+test('windows array contains null element → safe summary, no throw', () => {
+  assert.doesNotThrow(() => {
+    const d = decide({
+      route: ROUTE,
+      entry: entry({ state: 'healthy', windows: [null] }),
+      now: NOW,
+    });
+    assert.strictEqual(d.action, 'allow');
+  });
+});
+
+test('windows array contains primitive → safe summary, no throw', () => {
+  assert.doesNotThrow(() => {
+    const d = decide({
+      route: ROUTE,
+      entry: entry({ state: 'healthy', windows: [42, 'string', true] }),
+      now: NOW,
+    });
+    assert.strictEqual(d.action, 'allow');
+  });
+});
+
+test('balance is null/array/primitive → safe summary, no throw', () => {
+  for (const b of [null, [], 42, 'string']) {
+    assert.doesNotThrow(() => {
+      decide({ route: ROUTE, entry: entry({ state: 'healthy', balance: b }), now: NOW });
+    });
+  }
+});
+
+test('window without type field → still emits a summary line', () => {
+  const d = decide({
+    route: ROUTE,
+    entry: entry({ state: 'healthy', windows: [{ limit: 100, remaining: 50 }] }),
+    now: NOW,
+  });
+  assert.strictEqual(d.action, 'allow');
+  assert.match(d.context, /window 50%/);
+});
+
 if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
 console.log('\nall gate tests passed');

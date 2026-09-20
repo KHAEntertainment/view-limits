@@ -106,6 +106,52 @@ test('null/undefined routes array → null (no crash)', () => {
   assert.strictEqual(resolveRoute('kimi-k2', { harness: null }), null);
 });
 
+console.log('\nresolveRoute — model identity validation (F1)');
+
+test('non-string model is not coerced into a signal (array model fails open)', () => {
+  // The reviewer reproduced a deny against fresh exhausted kimi with model
+  // = ['kimi-k2'] because String([...]) joined to 'kimi-k2'. The exported
+  // boundary must reject non-string model identity outright.
+  const routes = [{ id: 'kimi-code-plan', match: { model: 'kimi' } }];
+  for (const bad of [['kimi-k2'], { name: 'kimi-k2' }, 42, true, null, undefined, '', '   ']) {
+    assert.strictEqual(
+      resolveRoute(bad, { harness: null }, routes),
+      null,
+      `expected null for model=${JSON.stringify(bad)}`,
+    );
+  }
+});
+
+test('empty / whitespace-only model string → null (no route match)', () => {
+  const routes = [{ id: 'kimi-code-plan', match: { model: 'kimi' } }];
+  assert.strictEqual(resolveRoute('', { harness: null }, routes), null);
+  assert.strictEqual(resolveRoute('   ', { harness: null }, routes), null);
+});
+
+console.log('\nresolveRoute — combined specificity preserved (F4)');
+
+test('combined match: longer harness wins over shorter harness with equal model', () => {
+  // Baseline behavior preserved: broad (harness=open, len 4) vs
+  // specific (harness=openrouter, len 9) → specific wins on combined score.
+  // Baseline scores: broad 1004+504=1508, specific 1004+509=1513.
+  const routes = [
+    { id: 'broad', match: { model: 'kimi', harness: 'open' } },
+    { id: 'specific', match: { model: 'kimi', harness: 'openrouter' } },
+  ];
+  const r = resolveRoute('kimi-k2', { harness: 'openrouter' }, routes);
+  assert.ok(r, 'expected a winner (unequal combined scores)');
+  assert.strictEqual(r.id, 'specific');
+});
+
+test('combined match: equal-best combined scores across distinct accounts → null', () => {
+  const routes = [
+    { id: 'openrouter-main', match: { model: 'openrouter', harness: 'openrouter' } },
+    { id: 'openrouter-alt', match: { model: 'openrouter', harness: 'openrouter' } },
+  ];
+  const r = resolveRoute('openrouter/kimi-k2', { harness: 'openrouter' }, routes);
+  assert.strictEqual(r, null);
+});
+
 test('route without match.match → null', () => {
   assert.strictEqual(
     resolveRoute('kimi-k2', { harness: null }, [{ id: 'nope' }]),
@@ -161,13 +207,13 @@ test('unknown tool name → surface: unknown, harness: null', () => {
 test('missing tool_input → still produces context, no throw', () => {
   const c = dispatchContext({ tool_name: 'Agent' });
   assert.strictEqual(c.harness, 'claude');
-  assert.strictEqual(c.model, undefined);
+  assert.strictEqual(c.model, null); // absent model identity stays null
 });
 
 test('non-object tool_input → no throw', () => {
   const c = dispatchContext({ tool_name: 'Task', tool_input: 'a string' });
   assert.strictEqual(c.harness, 'claude');
-  assert.strictEqual(c.model, undefined);
+  assert.strictEqual(c.model, null); // absent model identity stays null
 });
 
 if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }

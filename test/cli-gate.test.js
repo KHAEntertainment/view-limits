@@ -858,6 +858,13 @@ async function probeDetachment({ label, workerContent, expectReady, readyTimeout
       resolve();
     }, 10);
     timer = setTimeout(() => {
+      if (fs.existsSync(readyPath)) {
+        clearInterval(poller);
+        poller = null;
+        timer = null;
+        resolve();
+        return;
+      }
       clearInterval(poller);
       poller = null;
       timer = null;

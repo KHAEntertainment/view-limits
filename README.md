@@ -25,6 +25,19 @@ synchronously, never the provider API, so unknown/stale/unmapped state can never
 cause a false-positive block. A `SessionStart` hook warms the cache and nudges
 "set up credentials" on first run.
 
+Refreshes publish `status.json` by replacing it with a complete file; a failed
+write leaves the previous cache intact. Manual, SessionStart and gate-triggered
+refreshes share worker ownership. A competing manual refresh displays the last
+cache and reports that a refresh is already in progress.
+
+`gate.refreshLockSeconds` remains the gate's spawn throttle (default 60 seconds),
+not a timeout on a running worker. The gate never waits for a worker. Ownership
+records under `refresh-workers/` are unique to each invocation and ordered before
+provider reads; only records with a provably absent process can be recovered.
+Live or uncertain owners are retained, including when process inspection is
+denied. This coordination assumes a local filesystem and one host; it is not a
+distributed lock. The legacy timestamp-only `refresh.lock` is no longer used.
+
 ## Providers
 
 | Route | Provider | Signal |

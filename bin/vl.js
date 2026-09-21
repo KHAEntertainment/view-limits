@@ -177,19 +177,55 @@ function renderReport(cache, cfg) {
   return lines.join('\n');
 }
 
+function finiteNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatMoney(value, currency) {
+  const amount = finiteNumber(value);
+  if (amount == null) return null;
+  const unit = typeof currency === 'string' && currency.trim() ? ` ${currency.trim()}` : '';
+  if (amount > 0 && amount < 0.01) return `<0.01${unit}`;
+  if (amount < 0 && amount > -0.01) return `${amount.toPrecision(2)}${unit}`;
+  return `${amount.toFixed(2)}${unit}`;
+}
+
 function renderEntry(id, entry) {
   const st = entry.status || {};
   const state = st.state || 'unknown';
   let quota = '—';
-  if (st.balance) {
-    quota = `balance ${st.balance.available} ${st.balance.currency}`;
-    if (st.balance.spent) {
-      quota += ` · spent $${Number(st.balance.spent.daily).toFixed(2)} today / $${Number(st.balance.spent.weekly).toFixed(2)} week`;
+  const balance = st.balance && typeof st.balance === 'object' && !Array.isArray(st.balance)
+    ? st.balance : null;
+  const formattedBalance = balance && formatMoney(balance.available, balance.currency);
+  if (formattedBalance) {
+    quota = `balance ${formattedBalance}`;
+    if (balance.spent && typeof balance.spent === 'object' && !Array.isArray(balance.spent)) {
+      const spent = [];
+      const daily = formatMoney(balance.spent.daily, balance.currency);
+      const weekly = formatMoney(balance.spent.weekly, balance.currency);
+      if (daily) spent.push(`${daily} today`);
+      if (weekly) spent.push(`${weekly} week`);
+      if (spent.length) quota += ` · spent ${spent.join(' / ')}`;
     }
-    if (st.balance.limit && st.balance.limit.amount != null) {
-      const amt = Number(st.balance.limit.amount);
-      quota += ` · $${Number.isInteger(amt) ? amt : amt.toFixed(2)} ${st.balance.limit.reset || 'period'} cap`;
+    if (balance.limit && typeof balance.limit === 'object' && !Array.isArray(balance.limit)) {
+      const cap = formatMoney(balance.limit.amount, balance.currency);
+      if (cap) quota += ` · ${cap} ${balance.limit.reset || 'period'} cap`;
     }
+  }
+  else if (st.detail && typeof st.detail === 'object' && !Array.isArray(st.detail) &&
+           st.detail.usage && typeof st.detail.usage === 'object' && !Array.isArray(st.detail.usage)) {
+    const usage = st.detail.usage;
+    const spent = [];
+    const daily = formatMoney(usage.daily, usage.currency);
+    const weekly = formatMoney(usage.weekly, usage.currency);
+    const monthly = formatMoney(usage.monthly, usage.currency);
+    if (daily) spent.push(`${daily} today`);
+    if (weekly) spent.push(`${weekly} week`);
+    if (monthly) spent.push(`${monthly} month`);
+    if (spent.length) quota = `spent ${spent.join(' / ')}`;
   }
   else if (st.windows && st.windows.length) {
     quota = st.windows.map((w) => {

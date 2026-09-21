@@ -814,7 +814,7 @@ console.log('\ncli gate — real detached pending worker (F5)');
 // is `workerContent` (so the gate's refresh spawn executes it), syntax-checks
 // the generated worker, spawns the gate with REVIEW_REAL_REFRESH=1 and
 // WORKER_READY_PATH inherited, and waits for the readiness marker with a
-// bounded timeout. Cleanup (timer + watcher + worker pid) is unconditional.
+// bounded timeout. Cleanup (timer + poller + worker pid) is unconditional.
 //
 //   expectReady=true  → readiness must fire; then assert detached/stdio/unref/
 //                       liveness/pid-match.
@@ -846,16 +846,23 @@ async function probeDetachment({ label, workerContent, expectReady, readyTimeout
   assert.strictEqual(check.status, 0, `[${label}] generated worker fails syntax: ${check.stderr}`);
 
   const readyPath = path.join(tmpRoot, 'ready');
-  let watcher = null;
+  let poller = null;
   let timer = null;
   const readiness = new Promise((resolve, reject) => {
-    watcher = fs.watch(tmpRoot, (_event, filename) => {
-      if (filename === 'ready' && fs.existsSync(readyPath)) resolve();
-    });
-    timer = setTimeout(
-      () => reject(new Error(`worker never wrote readiness marker at ${readyPath} within ${readyTimeoutMs}ms`)),
-      readyTimeoutMs,
-    );
+    poller = setInterval(() => {
+      if (!fs.existsSync(readyPath)) return;
+      clearInterval(poller);
+      poller = null;
+      clearTimeout(timer);
+      timer = null;
+      resolve();
+    }, 10);
+    timer = setTimeout(() => {
+      clearInterval(poller);
+      poller = null;
+      timer = null;
+      reject(new Error(`worker never wrote readiness marker at ${readyPath} within ${readyTimeoutMs}ms`));
+    }, readyTimeoutMs);
   });
 
   const { r, calls } = runGateLogged({
@@ -875,7 +882,7 @@ async function probeDetachment({ label, workerContent, expectReady, readyTimeout
     if (cleaned) return;
     cleaned = true;
     if (timer) clearTimeout(timer);
-    if (watcher) try { watcher.close(); } catch { /* */ }
+    if (poller) clearInterval(poller);
     if (realChild && realChild.detail && realChild.detail.pid) {
       try { process.kill(realChild.detail.pid, 'SIGTERM'); } catch { /* already gone */ }
       try { process.kill(realChild.detail.pid, 'SIGKILL'); } catch { /* */ }
@@ -927,8 +934,7 @@ async function probeDetachment({ label, workerContent, expectReady, readyTimeout
         `[${label}] worker pid=${realChild.detail.pid} should have exited (startup-failure control)`);
     }
   } finally {
-    // Cleanup runs AFTER the awaited try settles, so the readiness timeout
-    // and watcher stay live for the assertions and the worker pid is still
+    // Cleanup runs AFTER the awaited probe settles, so the worker pid is still
     // meaningful when we liveness-check it.
     cleanup();
   }

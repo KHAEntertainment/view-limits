@@ -10,11 +10,13 @@
 //   vl.js setup [<routeId> [--key K]] audit + auto-import + loopback form / stdin.
 //   vl.js remove <routeId>            delete a credential.
 //   vl.js config                      show effective config (secrets masked).
+//   vl.js snapshot --json [--refresh] normalized runtime snapshot (cache-only).
 
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
+const os = require('os');
 const readline = require('readline');
 const { spawn } = require('child_process');
 
@@ -27,6 +29,7 @@ const { resolveRoute, dispatchContext } = require('../lib/routes');
 const { decide, summarize } = require('../lib/gate');
 const vault = require('../lib/vault');
 const { getAdapter, ADAPTERS } = require('../lib/adapters');
+const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 
@@ -557,6 +560,27 @@ function remove(routeId) {
   log(vault.remove(routeId) ? `removed credential for "${routeId}"` : `no credential for "${routeId}"`);
 }
 
+// ---- snapshot ---------------------------------------------------------------
+//
+// Cache-only normalized runtime snapshot. Emits exactly one JSON document on
+// stdout; per-diagnostic notices go to stderr. The snapshot path performs no
+// provider calls, subprocesses, refresh scheduling, or cache writes.
+
+async function snapshot(args) {
+  const allowed = new Set(['--json', '--refresh']);
+  if (!args.includes('--json') || args.some((a) => !allowed.has(a))) {
+    err('usage: vl.js snapshot --json [--refresh]');
+  }
+  const snap = await getRuntimeSnapshot({
+    refresh: args.includes('--refresh'),
+    callerContext: { host: os.hostname(), surface: 'cli' },
+  });
+  for (const d of snap.diagnostics || []) {
+    process.stderr.write(`view-limits snapshot: ${d.code} — ${d.summary}\n`);
+  }
+  process.stdout.write(JSON.stringify(snap, null, 2) + '\n');
+}
+
 // ---- config -----------------------------------------------------------------
 
 function config() {
@@ -613,7 +637,8 @@ const hasFlag = (n) => args.includes(n);
     case 'session-start': return sessionStart();
     case 'remove': return remove(args[0]);
     case 'config': return config();
+    case 'snapshot': return snapshot(args);
     default:
-      return err('usage: vl.js gate|refresh|report|check <routeId>|setup [<routeId>]|update [<routeId>]|remove <routeId>|config');
+      return err('usage: vl.js gate|refresh|report|check <routeId>|setup [<routeId>]|update [<routeId>]|remove <routeId>|config|snapshot --json [--refresh]|session-start|serve <port> <nonce> <ids...>');
   }
 })();

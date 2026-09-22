@@ -272,6 +272,34 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+function preflightVault() {
+  try {
+    vault.assertWritable();
+  } catch (error) {
+    if (error && error.code === 'VIEW_LIMITS_MASTER_KEY_REQUIRED') {
+      err('file vault needs VIEW_LIMITS_MASTER_KEY (or a pre-provisioned master.key) before credentials can be stored.');
+    }
+    err('credential vault is unavailable — verify its configuration and access, then try again.');
+  }
+}
+
+function storeCredential(id, secret) {
+  try {
+    vault.set(id, secret);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function logWriteResults(saved, failed) {
+  if (saved.length) log(`stored credentials for: ${saved.join(', ')}`);
+  if (failed.length) {
+    log(`could not store credentials for: ${failed.join(', ')} — verify vault access and try again.`);
+    process.exitCode = 1;
+  }
+}
+
 function formHtml(ids, nonce) {
   const fields = ids.map((id) =>
     `<label for="${escapeHtml(id)}">${escapeHtml(id)}</label>` +
@@ -303,8 +331,9 @@ function openBrowser(url) {
 
 function pickFreePort() {
   const net = require('net');
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const srv = net.createServer();
+    srv.once('error', reject);
     srv.listen(0, '127.0.0.1', () => {
       const port = srv.address().port;
       srv.close(() => resolve(port));
@@ -315,6 +344,14 @@ function pickFreePort() {
 // Detached loopback server for the credential form (runs until the POST or a
 // 5-minute abandon timeout, then exits).
 function serve(port, nonce, ids) {
+  const cfg = loadConfig();
+  const known = new Set(cfg.routes.map((route) => route.id));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) err('credential form received an invalid port.');
+  if (typeof nonce !== 'string' || !nonce) err('credential form received an invalid nonce.');
+  if (!ids.length || ids.some((id) => !known.has(id))) err('credential form received an unknown route.');
+  preflightVault();
+
+  let abandonTimer = null;
   const server = http.createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET') {
@@ -327,93 +364,176 @@ function serve(port, nonce, ids) {
       req.on('data', (c) => (body += c));
       req.on('end', () => {
         let data;
-        try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('bad request'); server.close(); return; }
-        if (data.nonce !== nonce) { res.writeHead(403); res.end('bad nonce'); server.close(); return; }
-        const creds = data.credentials || {};
-        let saved = 0;
+        try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('bad request'); shutdown(0); return; }
+        if (data.nonce !== nonce) { res.writeHead(403); res.end('bad nonce'); shutdown(0); return; }
+        const creds = data.credentials && typeof data.credentials === 'object' && !Array.isArray(data.credentials)
+          ? data.credentials : {};
+        const saved = [];
+        const failed = [];
         for (const id of ids) {
-          if (creds[id]) { vault.set(id, String(creds[id])); saved += 1; }
+          if (!creds[id]) continue;
+          if (storeCredential(id, String(creds[id]))) saved.push(id);
+          else failed.push(id);
+        }
+        if (failed.length) {
+          res.writeHead(500, { 'Content-Type': 'text/html' });
+          res.end(`<h1>Credential storage failed</h1><p>Stored: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Could not store: ${failed.map(escapeHtml).join(', ')}.</p><p>Verify vault access, then rerun setup or update.</p>`);
+          shutdown(1, 200);
+          return;
         }
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`<h1>Saved ${saved} credential${saved === 1 ? '' : 's'}</h1><p>Closing in <span id="n">5</span>s…</p><script>let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);</script>`);
-        setTimeout(() => { server.close(); process.exit(0); }, 200);
+        res.end(`<h1>Saved ${saved.length} credential${saved.length === 1 ? '' : 's'}</h1><p>Routes: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Closing in <span id="n">5</span>s…</p><script>let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);</script>`);
+        shutdown(0, 200);
       });
       return;
     }
     res.writeHead(405); res.end();
   });
 
+  server.on('error', () => {
+    log('credential form could not start — rerun setup or update.');
+    process.exit(1);
+  });
+
+  function shutdown(code, delay = 0) {
+    if (abandonTimer) clearTimeout(abandonTimer);
+    setTimeout(() => server.close(() => process.exit(code)), delay);
+  }
+
   server.listen(port, '127.0.0.1', () => {
-    setTimeout(() => { server.close(); process.exit(0); }, 5 * 60 * 1000);
+    abandonTimer = setTimeout(() => server.close(() => process.exit(0)), 5 * 60 * 1000);
   });
 }
 
 async function promptHeadless(ids) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  for (const id of ids) {
-    const secret = await new Promise((res) => rl.question(`Paste credential for ${id}: `, (a) => res(a.trim())));
-    if (secret) vault.set(id, secret);
+  const saved = [];
+  const failed = [];
+  try {
+    for (const id of ids) {
+      const secret = await new Promise((res) => rl.question(`Paste credential for ${id}: `, (a) => res(a.trim())));
+      if (secret && storeCredential(id, secret)) saved.push(id);
+      else failed.push(id);
+    }
+  } finally {
+    rl.close();
   }
-  rl.close();
-  log('done.');
+  logWriteResults(saved, failed);
 }
 
-function openForm(ids) {
-  const nonce = crypto.randomBytes(24).toString('hex');
-  pickFreePort().then((port) => {
+async function openForm(ids) {
+  try {
+    const nonce = crypto.randomBytes(24).toString('hex');
+    const port = await pickFreePort();
     spawn(process.execPath, [path.join(PLUGIN_ROOT, 'bin', 'vl.js'), 'serve', String(port), nonce, ...ids], { detached: true, stdio: 'ignore' }).unref();
     const url = `http://127.0.0.1:${port}`;
     setTimeout(() => openBrowser(url), 150); // let the detached server bind first
     log(`credential form: ${url}`);
     log('paste your key(s), then run /view-limits to refresh.');
-  });
+  } catch {
+    err('credential form could not start — rerun setup or update.');
+  }
 }
 
-function setupOne(cfg, id, args) {
-  if (!cfg.routes.find((r) => r.id === id)) err(`unknown route "${id}" (known: ${cfg.routes.map((r) => r.id).join(', ')})`);
-  const keyIdx = args.indexOf('--key');
-  if (keyIdx >= 0) { vault.set(id, args[keyIdx + 1]); log(`stored credential for "${id}"`); return; }
-  const imp = cfg.importMap && cfg.importMap[id];
-  const native = imp ? readNativeSecret(imp) : null;
-  if (native) { vault.set(id, native); log(`imported from native config: ${id}`); return; }
-  if (args.includes('--headless')) { promptHeadless([id]); return; }
-  openForm([id]);
+function parseCredentialArgs(cfg, args) {
+  const parsed = { routeId: null, headless: false, key: null };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--headless') {
+      if (parsed.headless) err('duplicate --headless option.');
+      parsed.headless = true;
+      continue;
+    }
+    if (arg === '--key') {
+      if (parsed.key !== null) err('duplicate --key option.');
+      const value = args[i + 1];
+      if (typeof value !== 'string' || !value || value.startsWith('--')) err('--key requires a non-empty value.');
+      parsed.key = value;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--')) err(`unknown option "${arg}".`);
+    if (parsed.routeId) err('only one route can be selected at a time.');
+    parsed.routeId = arg;
+  }
+  if (parsed.routeId && !cfg.routes.some((route) => route.id === parsed.routeId)) {
+    err(`unknown route "${parsed.routeId}" (known: ${cfg.routes.map((route) => route.id).join(', ')})`);
+  }
+  if (parsed.key !== null && !parsed.routeId) err('--key requires a route id.');
+  if (parsed.key !== null && parsed.headless) err('--key and --headless cannot be used together.');
+  return parsed;
+}
+
+function setupOne(cfg, options, allowImport) {
+  const id = options.routeId;
+  if (options.key !== null) {
+    if (!storeCredential(id, options.key)) err(`could not store credential for "${id}" — verify vault access and try again.`);
+    log(`stored credential for "${id}"`);
+    return;
+  }
+  if (allowImport) {
+    const imp = cfg.importMap && cfg.importMap[id];
+    const native = imp ? readNativeSecret(imp) : null;
+    if (native) {
+      if (!storeCredential(id, native)) err(`could not import credential for "${id}" — verify vault access and try again.`);
+      log(`imported from native config: ${id}`);
+      return;
+    }
+  }
+  if (options.headless) return promptHeadless([id]);
+  return openForm([id]);
 }
 
 function setup(args) {
   const cfg = loadConfig();
+  const options = parseCredentialArgs(cfg, args);
+  preflightVault();
 
   // Single route: `vl.js setup <routeId> [--key K]`
-  if (args[0] && !args[0].startsWith('--')) return setupOne(cfg, args[0], args);
+  if (options.routeId) return setupOne(cfg, options, true);
 
   // Initial setup: re-import native, then open the form for whatever's missing.
   const missing = [];
   const imported = [];
+  const failed = [];
   for (const route of cfg.routes) {
     const imp = cfg.importMap && cfg.importMap[route.id];
     const secret = imp ? readNativeSecret(imp) : null;
-    if (secret) { vault.set(route.id, secret); imported.push(route.id); continue; }
+    if (secret) {
+      if (storeCredential(route.id, secret)) imported.push(route.id);
+      else failed.push(route.id);
+      continue;
+    }
     if (!vault.has(route.id)) missing.push(route.id);
   }
   if (imported.length) log(`imported from native config: ${imported.join(', ')}`);
-  if (!missing.length) { log('all credentials present.'); return; }
+  if (failed.length) {
+    log(`could not import credentials for: ${failed.join(', ')} — verify vault access and try again.`);
+    process.exitCode = 1;
+  }
+  if (!missing.length) {
+    if (!failed.length) log('all credentials present.');
+    return;
+  }
   log(`missing credentials for: ${missing.join(', ')}`);
-  if (args.includes('--headless')) { promptHeadless(missing); return; }
-  openForm(missing);
+  if (options.headless) return promptHeadless(missing);
+  return openForm(missing);
 }
 
 function update(args) {
   const cfg = loadConfig();
+  const options = parseCredentialArgs(cfg, args);
+  preflightVault();
 
   // Single route: `vl.js update <routeId>` — rotate one existing key.
-  if (args[0] && !args[0].startsWith('--')) return setupOne(cfg, args[0], args);
+  if (options.routeId) return setupOne(cfg, options, false);
 
   // Rotate existing credentials: open the form for configured routes.
   const existing = cfg.routes.filter((r) => vault.has(r.id));
   if (!existing.length) { log('no credentials to update — run /view-limits:setup first.'); return; }
   log(`updating credentials for: ${existing.map((r) => r.id).join(', ')}`);
-  if (args.includes('--headless')) { promptHeadless(existing.map((r) => r.id)); return; }
-  openForm(existing.map((r) => r.id));
+  if (options.headless) return promptHeadless(existing.map((r) => r.id));
+  return openForm(existing.map((r) => r.id));
 }
 
 function remove(routeId) {
@@ -477,6 +597,6 @@ const hasFlag = (n) => args.includes(n);
     case 'remove': return remove(args[0]);
     case 'config': return config();
     default:
-      return err('usage: vl.js gate|refresh|report|check <routeId>|setup [<routeId>]|remove <routeId>|config');
+      return err('usage: vl.js gate|refresh|report|check <routeId>|setup [<routeId>]|update [<routeId>]|remove <routeId>|config');
   }
 })();

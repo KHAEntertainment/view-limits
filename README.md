@@ -15,6 +15,7 @@ orchestrator fans work out across models on different provider accounts.
   that have no key yet (auto-imports MiniMax from `~/.mmx/config.json`).
 - **`/view-limits:update [route-id]`** — rotate existing keys: opens the form for
   configured routes, or one route, e.g. `/view-limits:update kimi-code-plan`.
+  Rotation always requests a replacement; it never reimports a native key.
 - A **`PreToolUse` hook** fires on sub-agent dispatch (`Agent`/`Task`, Traycer
   `create_agent`/`configure_agent`/`fork_agent`), resolves the model to a
   route/account, and **denies** only a *freshly + unambiguously* exhausted route —
@@ -77,7 +78,9 @@ Credentials are managed **in-CLI**, never pasted into chat:
 
 Storage: macOS Keychain (generic password, no biometric prompt) by default;
 AES-256-GCM encrypted file (keyed by `VIEW_LIMITS_MASTER_KEY`) elsewhere. No
-runtime password-manager calls.
+runtime password-manager calls. The file backend requires
+`VIEW_LIMITS_MASTER_KEY` (or an already provisioned `master.key`) before setup;
+view-limits does not generate master keys.
 
 Non-secret config lives in `~/.claude/plugins/data/*/config.json` (endpoints,
 routes, TTLs, thresholds). `node bin/vl.js config` shows it (secrets masked).

@@ -287,6 +287,97 @@ test('rows missing key fields dropped; duplicate keys keep first occurrence', as
   assert.ok(diagCodes(s).includes('runtime-sidecar-section-invalid@sessions'));
 });
 
+test('boundary-shift composite keys stay distinct rows', async () => {
+  // 'a'+'bc' and 'ab'+'c' produce identical delimiter-less signatures — the
+  // tuple must be encoded, not concatenated, or the second row is lost.
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1, updatedAt: iso(0),
+    sessions: [
+      { key: { host: 'a', ade: 'bc', epicId: 'e', agentId: 'g' }, note: { value: 'one', provenance: 'observed' } },
+      { key: { host: 'ab', ade: 'c', epicId: 'e', agentId: 'g' }, note: { value: 'two', provenance: 'observed' } },
+    ],
+  });
+  const s = await snap(dir);
+  assert.strictEqual(s.sessions.length, 2, 'boundary-shifted keys collided — a valid row was dropped');
+  assert.ok(!diagCodes(s).includes('runtime-sidecar-section-invalid@sessions'),
+    'distinct keys must not emit a duplicate-key diagnostic');
+});
+
+test('opaque-id boundary shift (epicId/agentId) stays distinct', async () => {
+  // 'e1'+'agent-A' and 'e1agent'+'-A' collide without a delimiter.
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1, updatedAt: iso(0),
+    sessions: [
+      { key: { host: 'h', ade: 'a', epicId: 'e1', agentId: 'agent-A' } },
+      { key: { host: 'h', ade: 'a', epicId: 'e1agent', agentId: '-A' } },
+    ],
+  });
+  const s = await snap(dir);
+  assert.strictEqual(s.sessions.length, 2, 'opaque-id boundary shift collided');
+  assert.ok(!diagCodes(s).includes('runtime-sidecar-section-invalid@sessions'));
+});
+
+test('valid-key row with junk fields retains only key + facts — junk never reaches output', async () => {
+  const SENTINEL = 'SENTINEL-LEAK-XYZ-7f3c';
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1, updatedAt: iso(0),
+    sessions: [
+      {
+        key: { host: 'h', ade: 'a', epicId: 'e', agentId: 'g', extra: SENTINEL },
+        note: { value: 'ok', provenance: 'observed', smuggled: SENTINEL },
+        junk: SENTINEL,
+        junkObj: { nested: SENTINEL },
+        junkArr: [SENTINEL],
+      },
+    ],
+  });
+  const s = await snap(dir);
+  assert.strictEqual(s.sessions.length, 1, 'valid-key row is retained');
+  assert.deepStrictEqual(Object.keys(s.sessions[0]).sort(), ['key', 'note'],
+    'only the validated key and fact-shaped fields may be retained');
+  assert.deepStrictEqual(s.sessions[0].key, { host: 'h', ade: 'a', epicId: 'e', agentId: 'g' },
+    'extra key fields are stripped to the declared composite');
+  assert.deepStrictEqual(s.sessions[0].note, {
+    value: 'ok', provenance: 'observed', source: null, observedAt: null, freshUntil: null, reason: null,
+  }, 'retained facts are reduced to the canonical envelope');
+  assert.ok(!JSON.stringify(s).includes(SENTINEL), 'raw file bytes must not reach the snapshot');
+  assert.ok(diagCodes(s).includes('runtime-sidecar-section-invalid@sessions'),
+    'dropped junk fields surface as section-invalid');
+});
+
+test('harness defaults/sessionRefs/resourceRefs survive when shape-valid; malformed members drop', async () => {
+  const SENTINEL = 'SENTINEL-LEAK-XYZ-7f3c';
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1, updatedAt: iso(0),
+    harnesses: [
+      {
+        key: { host: 'h', harness: 'claude', surface: 'gui' },
+        installed: { value: true, provenance: 'observed' },
+        defaults: {
+          model: { value: 'm-1', provenance: 'configured' },
+          bogus: SENTINEL,
+        },
+        sessionRefs: [{ host: 'h', ade: 'a', epicId: 'e', agentId: 'g' }, SENTINEL, 42],
+        resourceRefs: [],
+      },
+    ],
+  });
+  const s = await snap(dir);
+  assert.strictEqual(s.harnesses.length, 1);
+  const row = s.harnesses[0];
+  assert.strictEqual(row.installed.value, true);
+  assert.deepStrictEqual(row.defaults.model.value, 'm-1', 'conforming fact-map member retained');
+  assert.deepStrictEqual(row.sessionRefs, [{ host: 'h', ade: 'a', epicId: 'e', agentId: 'g' }],
+    'only key-like reference objects are retained');
+  assert.deepStrictEqual(row.resourceRefs, []);
+  assert.ok(!JSON.stringify(s).includes(SENTINEL), 'malformed container members must not reach output');
+  assert.ok(diagCodes(s).includes('runtime-sidecar-section-invalid@harnesses'));
+});
+
 console.log('\nruntime snapshot — cross-session isolation');
 
 test('two agents on one harness stay distinct rows; caller reflects only injected context', async () => {

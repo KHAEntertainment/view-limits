@@ -44,11 +44,14 @@ function listTree(dir) {
 }
 
 function runSnapshot({ args = ['--json'], dir, env = {}, timeoutMs = 5000, guard = true, log = true }) {
-  const childEnv = {
-    ...process.env,
-    ...env,
-    CLAUDE_PLUGIN_DATA: dir,
-  };
+  const childEnv = { ...process.env };
+  // Traycer launch env is request-local identity evidence: tests are hermetic
+  // non-Traycer callers unless they explicitly pass TRAYCER_* via `env`.
+  for (const k of Object.keys(childEnv)) {
+    if (k.startsWith('TRAYCER_')) delete childEnv[k];
+  }
+  Object.assign(childEnv, env);
+  childEnv.CLAUDE_PLUGIN_DATA = dir;
   if (guard) childEnv.NODE_OPTIONS = `--require=${GUARD}`;
   if (log) childEnv.REVIEW_LOG = path.join(dir, 'guard-events.log');
   return spawnSync(process.execPath, [VL, 'snapshot', ...args], {

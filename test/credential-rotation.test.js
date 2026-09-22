@@ -196,6 +196,13 @@ const route = (id) => ({ id, provider: 'fake', account: 'test', match: { model: 
     assert.strictEqual(missing.status, 1);
     assert.match(missing.stderr, /--key requires a non-empty value/);
     assert.ok(!fs.existsSync(path.join(ctx.dir, 'secrets')));
+
+    withVault(ctx, (vault) => vault.set('known-route', OLD));
+    const whitespace = run(ctx, ['update', 'known-route', '--key', '   ']);
+    assert.strictEqual(whitespace.status, 1);
+    assert.match(whitespace.stderr, /--key requires a non-empty value/);
+    assertResultSecretsHidden(whitespace);
+    assert.strictEqual(withVault(ctx, (vault) => vault.get('known-route')), OLD);
   });
 
   await test('direct and headless write failures are contained and preserve the old credential', async () => {
@@ -259,6 +266,7 @@ const route = (id) => ({ id, provider: 'fake', account: 'test', match: { model: 
     const page = await waitForServer(rejectedPort);
     assert.strictEqual(page.status, 200);
     assert.strictEqual(page.headers['cache-control'], 'no-store');
+    assert.match(page.body, /type="password"[^>]*required/);
     const bad = await request(rejectedPort, {
       method: 'POST', body: JSON.stringify({ nonce: 'wrong', credentials: { 'known-route': REPLACEMENT } }),
     });
@@ -282,6 +290,71 @@ const route = (id) => ({ id, provider: 'fake', account: 'test', match: { model: 
     const [successCode] = await once(success.child, 'exit');
     assert.strictEqual(successCode, 0, success.output());
     assert.strictEqual(withVault(ctx, (vault) => vault.get('known-route')), REPLACEMENT);
+  });
+
+  await test('form rejects non-object JSON with safe 400 responses and normal shutdown', async () => {
+    if (!loopbackAvailable) { console.log('    (loopback unavailable; malformed-body lifecycle exercised when host permits binding)'); return; }
+    const ctx = scratch('form-malformed', [route('known-route')]);
+    withVault(ctx, (vault) => vault.set('known-route', OLD));
+    for (const [index, body] of ['null', '[]', '42', '"text"'].entries()) {
+      const port = await freePort();
+      const server = startServer(ctx, port, `nonce-${index}`, 'known-route');
+      await waitForServer(port);
+      const response = await request(port, { method: 'POST', body });
+      assert.strictEqual(response.status, 400);
+      assert.strictEqual(response.headers['cache-control'], 'no-store');
+      assert.strictEqual(response.body, 'bad request');
+      assertSecretsHidden(response.body);
+      const [code] = await once(server.child, 'exit');
+      assert.strictEqual(code, 0, server.output());
+      assert.doesNotMatch(server.output(), /TypeError|uncaught|ECONNRESET/);
+      assertSecretsHidden(server.output());
+    }
+    assert.strictEqual(withVault(ctx, (vault) => vault.get('known-route')), OLD);
+  });
+
+  await test('form rejects blank and mixed incomplete replacements without false success', async () => {
+    if (!loopbackAvailable) { console.log('    (loopback unavailable; incomplete-form lifecycle exercised when host permits binding)'); return; }
+    const routes = ['route-one', 'route-two', 'route-three', 'route-four'];
+    const ctx = scratch('form-incomplete', routes.map(route));
+    withVault(ctx, (vault) => routes.forEach((id) => vault.set(id, OLD)));
+
+    const blankPort = await freePort();
+    const blankServer = startServer(ctx, blankPort, 'blank-nonce', 'route-one');
+    await waitForServer(blankPort);
+    const blank = await request(blankPort, {
+      method: 'POST', body: JSON.stringify({ nonce: 'blank-nonce', credentials: { 'route-one': '' } }),
+    });
+    assert.strictEqual(blank.status, 400);
+    assert.strictEqual(blank.headers['cache-control'], 'no-store');
+    assert.match(blank.body, /Stored: none/);
+    assert.match(blank.body, /Could not store: route-one/);
+    assertSecretsHidden(blank.body);
+    const [blankCode] = await once(blankServer.child, 'exit');
+    assert.strictEqual(blankCode, 1, blankServer.output());
+    assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), OLD);
+
+    const mixedPort = await freePort();
+    const mixedServer = startServer(ctx, mixedPort, 'mixed-nonce', routes);
+    await waitForServer(mixedPort);
+    const mixed = await request(mixedPort, {
+      method: 'POST', body: JSON.stringify({
+        nonce: 'mixed-nonce',
+        credentials: { 'route-one': REPLACEMENT, 'route-two': '   ', 'route-three': 123 },
+      }),
+    });
+    assert.strictEqual(mixed.status, 400);
+    assert.strictEqual(mixed.headers['cache-control'], 'no-store');
+    assert.match(mixed.body, /Stored: route-one/);
+    assert.match(mixed.body, /Could not store: route-two, route-three, route-four/);
+    assertSecretsHidden(mixed.body);
+    const [mixedCode] = await once(mixedServer.child, 'exit');
+    assert.strictEqual(mixedCode, 1, mixedServer.output());
+    assertSecretsHidden(mixedServer.output());
+    assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), REPLACEMENT);
+    for (const id of ['route-two', 'route-three', 'route-four']) {
+      assert.strictEqual(withVault(ctx, (vault) => vault.get(id)), OLD);
+    }
   });
 
   await test('form write failure returns safe HTML and preserves the old credential', async () => {

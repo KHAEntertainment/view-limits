@@ -303,7 +303,7 @@ function logWriteResults(saved, failed) {
 function formHtml(ids, nonce) {
   const fields = ids.map((id) =>
     `<label for="${escapeHtml(id)}">${escapeHtml(id)}</label>` +
-    `<input id="${escapeHtml(id)}" type="password" autocomplete="off" spellcheck="false">`,
+    `<input id="${escapeHtml(id)}" type="password" autocomplete="off" spellcheck="false" required>`,
   ).join('');
   const reads = ids.map((id) =>
     `credentials[${JSON.stringify(id)}] = document.getElementById(${JSON.stringify(id)}).value;`,
@@ -365,19 +365,36 @@ function serve(port, nonce, ids) {
       req.on('end', () => {
         let data;
         try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('bad request'); shutdown(0); return; }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          res.writeHead(400);
+          res.end('bad request');
+          shutdown(0);
+          return;
+        }
         if (data.nonce !== nonce) { res.writeHead(403); res.end('bad nonce'); shutdown(0); return; }
         const creds = data.credentials && typeof data.credentials === 'object' && !Array.isArray(data.credentials)
           ? data.credentials : {};
         const saved = [];
         const failed = [];
+        let persistenceFailed = false;
         for (const id of ids) {
-          if (!creds[id]) continue;
-          if (storeCredential(id, String(creds[id]))) saved.push(id);
-          else failed.push(id);
+          const replacement = creds[id];
+          if (typeof replacement !== 'string' || !replacement.trim()) {
+            failed.push(id);
+            continue;
+          }
+          if (storeCredential(id, replacement)) saved.push(id);
+          else {
+            failed.push(id);
+            persistenceFailed = true;
+          }
         }
         if (failed.length) {
-          res.writeHead(500, { 'Content-Type': 'text/html' });
-          res.end(`<h1>Credential storage failed</h1><p>Stored: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Could not store: ${failed.map(escapeHtml).join(', ')}.</p><p>Verify vault access, then rerun setup or update.</p>`);
+          res.writeHead(persistenceFailed ? 500 : 400, { 'Content-Type': 'text/html' });
+          const remediation = persistenceFailed
+            ? 'Verify vault access, then rerun setup or update.'
+            : 'Enter a replacement for every route, then rerun setup or update.';
+          res.end(`<h1>Credential storage failed</h1><p>Stored: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Could not store: ${failed.map(escapeHtml).join(', ')}.</p><p>${remediation}</p>`);
           shutdown(1, 200);
           return;
         }
@@ -447,7 +464,7 @@ function parseCredentialArgs(cfg, args) {
     if (arg === '--key') {
       if (parsed.key !== null) err('duplicate --key option.');
       const value = args[i + 1];
-      if (typeof value !== 'string' || !value || value.startsWith('--')) err('--key requires a non-empty value.');
+      if (typeof value !== 'string' || !value.trim() || value.startsWith('--')) err('--key requires a non-empty value.');
       parsed.key = value;
       i += 1;
       continue;

@@ -10,7 +10,8 @@
 //   vl.js setup [<routeId> [--key K]] audit + auto-import + loopback form / stdin.
 //   vl.js remove <routeId>            delete a credential.
 //   vl.js config                      show effective config (secrets masked).
-//   vl.js snapshot --json [--refresh] normalized runtime snapshot (cache-only).
+//   vl.js snapshot --json [--refresh] normalized runtime snapshot; --refresh
+//                                     adds bounded Traycer CLI live reads.
 
 const fs = require('fs');
 const path = require('path');
@@ -30,6 +31,7 @@ const { decide, summarize } = require('../lib/gate');
 const vault = require('../lib/vault');
 const { getAdapter, ADAPTERS } = require('../lib/adapters');
 const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
+const { traycerEnvCallerContext } = require('../lib/traycer-adapter');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 
@@ -562,9 +564,13 @@ function remove(routeId) {
 
 // ---- snapshot ---------------------------------------------------------------
 //
-// Cache-only normalized runtime snapshot. Emits exactly one JSON document on
-// stdout; per-diagnostic notices go to stderr. The snapshot path performs no
-// provider calls, subprocesses, refresh scheduling, or cache writes.
+// Normalized runtime snapshot. Emits exactly one JSON document on stdout;
+// per-diagnostic notices go to stderr. Without --refresh the snapshot path
+// performs no provider calls, subprocesses, refresh scheduling, or cache
+// writes; --refresh adds only bounded supported Traycer CLI reads.
+// Traycer launch-environment identity is request-local evidence about this
+// process; it is seeded into the caller context as traycer-env facts (the
+// variable names themselves live in lib/traycer-adapter.js).
 
 async function snapshot(args) {
   const allowed = new Set(['--json', '--refresh']);
@@ -573,7 +579,11 @@ async function snapshot(args) {
   }
   const snap = await getRuntimeSnapshot({
     refresh: args.includes('--refresh'),
-    callerContext: { host: os.hostname(), surface: 'cli' },
+    callerContext: {
+      host: os.hostname(),
+      surface: 'cli',
+      ...traycerEnvCallerContext(process.env),
+    },
   });
   for (const d of snap.diagnostics || []) {
     process.stderr.write(`view-limits snapshot: ${d.code} — ${d.summary}\n`);

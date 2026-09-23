@@ -442,6 +442,10 @@ test('vl report renders requester, harness pool and routes with visible unknown/
     'stale exhausted route stays exhausted AND marked stale');
   assert.match(out, /glm-coding-plan: unknown — no-cached-observation/,
     'never-observed route is explicitly unknown with its reason');
+  assert.match(out, /1 configured route\(s\) have no cached observation/,
+    'unobserved notice counts only configured routes without cache');
+  assert.doesNotMatch(out, /selection:/,
+    'no selection line when selectedProfile and selectedAccount are unknown');
   assert.doesNotMatch(out, /garbage-orphan/, 'malformed orphan cache entry never prints');
   assert.match(out, /notice \[routes\] status-entry-malformed/, 'degradation surfaces as a notice');
   assert.doesNotMatch(out, /bound to/, 'no proven binding → no merge shown');

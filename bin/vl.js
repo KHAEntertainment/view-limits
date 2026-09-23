@@ -241,7 +241,7 @@ function renderInventory(snap, updatedAt) {
   const unobserved = (Array.isArray(snap.routes) ? snap.routes : [])
     .filter((r) => r.configured && r.resource && r.resource.state && r.resource.state.reason === 'no-cached-observation')
     .length;
-  if (unobserved) lines.push(`  ${unobserved} configured route(s) have no cached observation — run /view-limits to refresh`);
+  if (unobserved) lines.push(`  ${unobserved} configured route(s) have no cached observation — /view-limits refreshes routes with stored keys and provider config (/view-limits:setup)`);
   for (const d of snap.diagnostics || []) {
     lines.push(`  notice [${d.scope || 'snapshot'}] ${d.code} — ${d.summary}`);
   }

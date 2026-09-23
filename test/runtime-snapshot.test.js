@@ -253,6 +253,20 @@ test('absent sidecar is not an error — sections empty, no diagnostic', async (
   assert.ok(!diagCodes(s).some((c) => c.startsWith('runtime-sidecar')));
 });
 
+test('unreadable sidecar (non-ENOENT) → runtime-sidecar-corrupt, not silent absence', async () => {
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', { version: 1, sessions: [], harnesses: [], profiles: [] });
+  fs.chmodSync(path.join(dir, 'runtime.json'), 0o000);
+  try {
+    const s = await snap(dir);
+    assert.ok(diagCodes(s).includes('runtime-sidecar-corrupt@sidecar'),
+      'read failure must surface as corrupt, not absence');
+    assert.deepStrictEqual(s.sessions, []);
+  } finally {
+    fs.chmodSync(path.join(dir, 'runtime.json'), 0o600);
+  }
+});
+
 console.log('\nruntime snapshot — sidecar section validation');
 
 test('malformed section degrades alone; valid siblings survive; no duplicate (code,scope)', async () => {
@@ -529,6 +543,41 @@ test('config.json corrupt → defaults in effect + config-corrupt diagnostic', a
   const s = await snap(dir);
   assert.ok(diagCodes(s).includes('config-corrupt@routes'));
   assert.ok(s.routes.some((r) => r.id === 'kimi-code-plan'), 'defaults still applied');
+});
+
+test('unreadable status.json (non-ENOENT) → status-cache-corrupt, not silent absence', async () => {
+  const dir = scratch();
+  writeJson(dir, 'status.json', { updatedAt: iso(0), routes: {} });
+  fs.chmodSync(path.join(dir, 'status.json'), 0o000);
+  try {
+    const s = await snap(dir);
+    assert.ok(diagCodes(s).includes('status-cache-corrupt@routes'),
+      'read failure must surface as corrupt, not absence');
+    for (const r of s.routes) assert.strictEqual(r.resource.state.reason, 'no-cached-observation');
+  } finally {
+    fs.chmodSync(path.join(dir, 'status.json'), 0o600);
+  }
+});
+
+test('unreadable config.json (non-ENOENT) → config-corrupt, defaults in effect', async () => {
+  const dir = scratch();
+  writeJson(dir, 'config.json', { routes: [] });
+  fs.chmodSync(path.join(dir, 'config.json'), 0o000);
+  try {
+    const s = await snap(dir);
+    assert.ok(diagCodes(s).includes('config-corrupt@routes'),
+      'read failure must surface as corrupt, not absence');
+    assert.ok(s.routes.some((r) => r.id === 'kimi-code-plan'), 'defaults still applied');
+  } finally {
+    fs.chmodSync(path.join(dir, 'config.json'), 0o600);
+  }
+});
+
+test('absent status.json and config.json → no corrupt diagnostic (ENOENT is not an error)', async () => {
+  const dir = scratch();
+  const s = await snap(dir);
+  assert.ok(!diagCodes(s).includes('status-cache-corrupt@routes'));
+  assert.ok(!diagCodes(s).includes('config-corrupt@routes'));
 });
 
 console.log('\nruntime snapshot — diagnostic safety (sentinel)');

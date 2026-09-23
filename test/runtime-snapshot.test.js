@@ -616,7 +616,7 @@ test('complete requires zero unknown facts and zero diagnostics', async () => {
     routes: {
       'only-route': {
         routeId: 'only-route', observedAt: iso(-100), freshUntil: iso(60_000), source: 'kimi',
-        status: { state: 'healthy', windows: [], balance: null, resetAt: iso(3_600_000) },
+        status: { state: 'healthy', windows: [], balance: null, resetAt: iso(3_600_000), detail: { model: 'kimi-k2' } },
       },
     },
   });

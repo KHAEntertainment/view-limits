@@ -5,7 +5,9 @@
 //   vl.js gate                        PreToolUse hook: read hook JSON on stdin,
 //                                     decide deny / allow+context from cache.
 //   vl.js refresh [--quiet] [--debug] query all routes, write the cache.
-//   vl.js report [--json]             render the cached status table.
+//   vl.js report [--json]             render the runtime inventory from the
+//                                     normalized snapshot (--json prints the
+//                                     raw status cache).
 //   vl.js check <routeId>             live-check one route (JSON).
 //   vl.js setup [<routeId> [--key K]] audit + auto-import + loopback form / stdin.
 //   vl.js remove <routeId>            delete a credential.
@@ -132,7 +134,8 @@ async function refresh(quiet) {
   if (!acq.acquired) {
     if (!quiet) {
       const cache = readCache();
-      process.stdout.write(renderReport(cache, cfg) + '\n');
+      const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
+      process.stdout.write(renderInventory(snap, cache.updatedAt) + '\n');
       process.stdout.write(
         `view-limits: ${acq.error ? 'refresh unavailable (' + acq.error + ')' : 'refresh already in progress'}. ` +
         `Showing last cached status.\n`,
@@ -154,32 +157,146 @@ async function refresh(quiet) {
     }));
 
     const doc = writeCache(statuses);
-    if (!quiet) process.stdout.write(renderReport(doc, cfg) + '\n');
+    if (!quiet) {
+      const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
+      process.stdout.write(renderInventory(snap, doc.updatedAt) + '\n');
+    }
   } finally {
     releaseWorker(acq);
   }
 }
 
 // ---- report -----------------------------------------------------------------
+//
+// /view-limits renders the normalized runtime snapshot — the requester, the
+// harness pool (harnesses, sessions, native profiles) and the external
+// provider routes. Every printed value comes from a snapshot fact: the
+// renderer never infers effective models or selected accounts, and unknown /
+// stale evidence stays visibly distinct from healthy / exhausted states.
 
-function renderReport(cache, cfg) {
-  const routes = cache.routes || {};
-  const ids = Object.keys(routes).sort();
-  const lines = ['view-limits account status:'];
-  for (const id of ids) lines.push('  ' + renderEntry(id, routes[id]));
-  if (!ids.length) lines.push('  (no configured routes)');
+function cliCallerContext() {
+  return { host: os.hostname(), surface: 'cli', ...traycerEnvCallerContext(process.env) };
+}
+
+function factValue(f) {
+  return f && f.provenance !== 'unknown' && f.value !== null && f.value !== undefined
+    ? f.value : null;
+}
+
+function factText(f) {
+  const v = factValue(f);
+  return v === null ? 'unknown' : String(v);
+}
+
+function renderInventory(snap, updatedAt) {
+  const lines = [`view-limits runtime inventory — generated ${snap.generatedAt} · completeness ${snap.completeness}`];
+
+  // Requester — the assembled caller facts, verbatim.
+  const c = snap.caller || {};
+  const who = [
+    factValue(c.ade),
+    factValue(c.agentId) != null ? `agent ${factValue(c.agentId)}` : null,
+    factValue(c.epicId) != null ? `epic ${factValue(c.epicId)}` : null,
+  ].filter(Boolean).join(' · ');
+  const where = [factValue(c.harness), factValue(c.surface), factValue(c.host)].filter(Boolean).join(' · ');
+  lines.push(`  requester: ${who || 'unknown'}${where ? ` — ${where}` : ''}`);
+  lines.push(`    models: configured ${factText(c.configuredModel)} · default ${factText(c.defaultModel)} · effective ${factText(c.effectiveModel)}${factValue(c.differsFromDefault) === true ? ' (differs from default)' : ''}`);
+  if (factValue(c.selectedProfile) !== null || factValue(c.selectedAccount) !== null) {
+    lines.push(`    selection: profile ${factText(c.selectedProfile)} · account ${factText(c.selectedAccount)}`);
+  }
+
+  // Harness pool — harnesses, sessions and native profiles stay separate
+  // sections keyed by their own composite identity; nothing here merges with
+  // external routes by name.
+  lines.push('  harness pool:');
+  const harnesses = Array.isArray(snap.harnesses) ? snap.harnesses : [];
+  const sessions = Array.isArray(snap.sessions) ? snap.sessions : [];
+  const profiles = Array.isArray(snap.profiles) ? snap.profiles : [];
+  if (!harnesses.length && !sessions.length && !profiles.length) {
+    lines.push('    (no runtime harness/session/profile facts)');
+  }
+  for (const h of harnesses) lines.push('    ' + renderHarness(h));
+  for (const s of sessions) lines.push('    ' + renderSession(s));
+  for (const p of profiles) lines.push('    ' + renderProfile(p));
+
+  // External provider routes — one line per route with usable identity:
+  // configured routes always render; unconfigured cache rows render only when
+  // they carry some observed evidence (garbage cache entries never print).
+  lines.push('  external routes:');
+  const rows = (Array.isArray(snap.routes) ? snap.routes : [])
+    .filter(renderableRoute)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  if (!rows.length) lines.push('    (no configured routes)');
+  for (const row of rows) lines.push('    ' + renderRoute(row));
 
   const counts = { healthy: 0, constrained: 0, exhausted: 0, unknown: 0 };
-  for (const id of ids) {
-    const s = (routes[id].status && routes[id].status.state) || 'unknown';
+  let stale = 0;
+  for (const row of rows) {
+    const s = factValue(row.resource && row.resource.state) || 'unknown';
     counts[s] = (counts[s] || 0) + 1;
+    if (row.resource && row.resource.freshness === 'stale') stale += 1;
   }
   lines.push('');
-  lines.push(`  ${counts.healthy} healthy · ${counts.constrained} constrained · ${counts.exhausted} exhausted · ${counts.unknown} unknown`);
-  const unconfigured = ((cfg && cfg.routes) || []).filter((r) => !routes[r.id]).length;
-  if (unconfigured) lines.push(`  ${unconfigured} route(s) not configured — add via /view-limits:setup`);
-  lines.push(`  updated ${cache.updatedAt || 'never'}`);
+  lines.push(`  ${counts.healthy} healthy · ${counts.constrained} constrained · ${counts.exhausted} exhausted · ${counts.unknown} unknown${stale ? ` · ${stale} stale` : ''}`);
+  const unobserved = (Array.isArray(snap.routes) ? snap.routes : [])
+    .filter((r) => r.configured && r.resource && r.resource.state && r.resource.state.reason === 'no-cached-observation')
+    .length;
+  if (unobserved) lines.push(`  ${unobserved} configured route(s) have no cached observation — /view-limits refreshes routes with stored keys and provider config (/view-limits:setup)`);
+  for (const d of snap.diagnostics || []) {
+    lines.push(`  notice [${d.scope || 'snapshot'}] ${d.code} — ${d.summary}`);
+  }
+  lines.push(`  cache updated ${updatedAt || 'never'}`);
   return lines.join('\n');
+}
+
+function renderHarness(h) {
+  const key = h.key || {};
+  const avail = factValue(h.available);
+  const availability = avail === true ? 'available'
+    : avail === false ? 'unavailable'
+    : `availability unknown${h.available && h.available.reason ? ` — ${h.available.reason}` : ''}`;
+  const refs = Array.isArray(h.sessionRefs) ? h.sessionRefs.length : 0;
+  const resources = Array.isArray(h.resourceRefs) ? h.resourceRefs.length : 0;
+  const defaults = h.defaults && typeof h.defaults === 'object'
+    ? Object.entries(h.defaults).map(([k, f]) => `${k}=${factText(f)}`).join(' ')
+    : '';
+  return `${key.harness || 'unknown'} (${key.surface || 'unknown'}) @ ${key.host || 'unknown'}: ${availability}` +
+    `${refs ? ` · ${refs} session(s)` : ''}${resources ? ` · ${resources} resource ref(s)` : ''}` +
+    `${defaults ? ` · defaults: ${defaults}` : ''}`;
+}
+
+function renderSession(s) {
+  const key = s.key || {};
+  const bits = [];
+  if (factValue(s.harness) !== null) bits.push(`harness ${factValue(s.harness)}`);
+  if (factValue(s.surface) !== null) bits.push(factValue(s.surface));
+  if (factValue(s.title) !== null) bits.push(`"${factValue(s.title)}"`);
+  const active = factValue(s.active);
+  if (active !== null) bits.push(active ? 'active' : 'idle');
+  if (factValue(s.isSelf) === true) bits.push('this requester');
+  return `session ${key.agentId || 'unknown'} @ ${key.host || 'unknown'}: ${bits.join(' · ') || 'no facts'}`;
+}
+
+function renderProfile(p) {
+  const key = p.key || {};
+  const bits = [];
+  if (factValue(p.authStatus) !== null) bits.push(`auth ${factValue(p.authStatus)}`);
+  if (factValue(p.rateLimitStatus) !== null) bits.push(`rate limits ${factValue(p.rateLimitStatus)}`);
+  const usageAt = factValue(p.usageUpdatedAt);
+  bits.push(usageAt ? `usage observed ${usageAt}` : 'usage unobserved');
+  if (factValue(p.nativeRateLimits) !== null) bits.push('native rate limits observed');
+  return `profile ${key.provider || 'unknown'}/${key.profileId || 'unknown'} @ ${key.host || 'unknown'}: ${bits.join(' · ')}`;
+}
+
+// An unconfigured (cache-orphan) row renders only when it carries some known
+// evidence; a malformed or empty orphan reproduces the v1 behavior of
+// dropping non-object cache entries from the human report.
+function renderableRoute(row) {
+  if (row.configured) return true;
+  const r = row.resource || {};
+  return factValue(r.state) !== null || factValue(r.observedAt) !== null ||
+    factValue(r.source) !== null || (Array.isArray(r.windows) && r.windows.length > 0) ||
+    r.balance != null || r.usage != null;
 }
 
 function finiteNumber(value) {
@@ -198,12 +315,12 @@ function formatMoney(value, currency) {
   return `${amount.toFixed(2)}${unit}`;
 }
 
-function renderEntry(id, entry) {
-  const st = entry.status || {};
-  const state = st.state || 'unknown';
+function renderRoute(row) {
+  const res = row.resource || {};
+  const state = factValue(res.state) || 'unknown';
   let quota = '—';
-  const balance = st.balance && typeof st.balance === 'object' && !Array.isArray(st.balance)
-    ? st.balance : null;
+  const balance = res.balance && typeof res.balance === 'object' && !Array.isArray(res.balance)
+    ? res.balance : null;
   const formattedBalance = balance && formatMoney(balance.available, balance.currency);
   if (formattedBalance) {
     quota = `balance ${formattedBalance}`;
@@ -220,9 +337,8 @@ function renderEntry(id, entry) {
       if (cap) quota += ` · ${cap} ${balance.limit.reset || 'period'} cap`;
     }
   }
-  else if (st.detail && typeof st.detail === 'object' && !Array.isArray(st.detail) &&
-           st.detail.usage && typeof st.detail.usage === 'object' && !Array.isArray(st.detail.usage)) {
-    const usage = st.detail.usage;
+  else if (res.usage && typeof res.usage === 'object' && !Array.isArray(res.usage)) {
+    const usage = res.usage;
     const spent = [];
     const daily = formatMoney(usage.daily, usage.currency);
     const weekly = formatMoney(usage.weekly, usage.currency);
@@ -232,19 +348,33 @@ function renderEntry(id, entry) {
     if (monthly) spent.push(`${monthly} month`);
     if (spent.length) quota = `spent ${spent.join(' / ')}`;
   }
-  else if (st.windows && st.windows.length) {
-    quota = st.windows.map((w) => {
+  else if (res.windows && res.windows.length) {
+    quota = res.windows.map((w) => {
       if (w.limit > 0 && w.remaining != null) return `${w.type} ${Math.round((w.remaining / w.limit) * 100)}%`;
       return `${w.type} ${w.remaining}/${w.limit}`;
     }).join(' · ');
   }
-  const reset = st.resetAt ? ` · resets ${new Date(st.resetAt).toLocaleString()}` : '';
+  const resetAt = factValue(res.resetAt);
+  const reset = resetAt ? ` · resets ${new Date(resetAt).toLocaleString()}` : '';
   let note = '';
-  if (state === 'unknown' && st.detail && st.detail.error) {
-    const msg = String(st.detail.error);
-    note = ` — ${msg.length > 80 ? msg.slice(0, 80) + '…' : msg} (rotate via /view-limits:update ${id})`;
+  if (state === 'unknown') {
+    if (res.error) {
+      const msg = String(res.error);
+      note = ` — ${msg.length > 80 ? msg.slice(0, 80) + '…' : msg} (rotate via /view-limits:update ${row.id})`;
+    } else if (res.state && res.state.reason) {
+      note = ` — ${res.state.reason}`;
+    }
   }
-  return `${id}: ${state}${quota !== '—' ? ' · ' + quota : ''}${reset}${note}`;
+  // Stale evidence is marked at end of line: a stale exhausted route still
+  // says exhausted, but never reads as current.
+  const stale = res.freshness === 'stale' ? ' (stale)' : '';
+  const binding = Array.isArray(row.boundBy) && row.boundBy.length
+    ? ` · bound to ${row.boundBy.map((b) => `${b.harness}@${b.host}`).join(', ')}`
+    : '';
+  const models = Array.isArray(factValue(row.models)) && factValue(row.models).length
+    ? ` · models ${factValue(row.models).join(', ')}`
+    : '';
+  return `${row.id}: ${state}${quota !== '—' ? ' · ' + quota : ''}${reset}${note}${binding}${models}${stale}`;
 }
 
 // ---- check ------------------------------------------------------------------
@@ -579,11 +709,7 @@ async function snapshot(args) {
   }
   const snap = await getRuntimeSnapshot({
     refresh: args.includes('--refresh'),
-    callerContext: {
-      host: os.hostname(),
-      surface: 'cli',
-      ...traycerEnvCallerContext(process.env),
-    },
+    callerContext: cliCallerContext(),
   });
   for (const d of snap.diagnostics || []) {
     process.stderr.write(`view-limits snapshot: ${d.code} — ${d.summary}\n`);
@@ -638,7 +764,8 @@ const hasFlag = (n) => args.includes(n);
         return;
       }
       if (hasFlag('--json')) return process.stdout.write(JSON.stringify(cache, null, 2) + '\n');
-      return process.stdout.write(renderReport(cache, cfg) + '\n');
+      const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
+      return process.stdout.write(renderInventory(snap, cache.updatedAt) + '\n');
     }
     case 'check': return check(args[0]);
     case 'setup': return setup(args);

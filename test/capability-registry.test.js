@@ -69,21 +69,42 @@ console.log('\ncapability registry — construction and extension');
 
 test('createRegistry validates: duplicate ids, ambiguous aliases, missing model family', () => {
   assert.throws(() => createRegistry({
+    families: { x: {} },
     models: { 'a': { family: 'x' }, 'A': { family: 'x' } },
   }), /duplicate model id/);
   assert.throws(() => createRegistry({
+    families: { x: {} },
     models: { 'a': { family: 'x', aliases: ['shared'] }, 'b': { family: 'x', aliases: ['shared'] } },
   }), /ambiguous model alias/);
   assert.throws(() => createRegistry({
+    families: { x: {} },
     models: { 'a': { family: 'x' }, 'b': { family: 'x', aliases: ['a'] } },
   }), /ambiguous model alias|collides with canonical id/);
   assert.throws(() => createRegistry({ models: { 'm': {} } }), /requires a family/);
   // an alias pointing at its own canonical id is redundant, not ambiguous
-  assert.doesNotThrow(() => createRegistry({ models: { 'm': { family: 'x', aliases: ['m'] } } }));
+  assert.doesNotThrow(() => createRegistry({
+    families: { x: {} },
+    models: { 'm': { family: 'x', aliases: ['m'] } },
+  }));
+});
+
+test('model.family must reference a declared family id or alias, stored canonical', () => {
+  // undeclared family → build-time error, never a runtime unknown
+  assert.throws(() => createRegistry({
+    families: { x: {} },
+    models: { 'm': { family: 'ghost' } },
+  }), /undeclared family "ghost"/);
+  // family declared via its alias → entry stores the canonical id
+  const reg = createRegistry({
+    families: { anthropic: { aliases: ['claude'] } },
+    models: { 'm': { family: 'Claude', taskCapabilities: ['code'] } },
+  });
+  assert.strictEqual(reg.lookupModel('m').value.family, 'anthropic');
 });
 
 test('mergeEntries adds a new entry without touching built-in data (AC1 support)', () => {
   const merged = mergeEntries(DEFAULT_ENTRIES, {
+    families: { acme: {} },
     models: { 'acme-ultra': { family: 'acme', taskCapabilities: ['code', 'vision'], aliases: ['acme'] } },
   });
   const reg = createRegistry(merged);

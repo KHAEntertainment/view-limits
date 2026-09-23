@@ -63,12 +63,39 @@ test('fully proven candidate + satisfied policy → eligible with no reasons', (
   assert.ok(RESULTS.includes(r.result));
 });
 
-test('fact-shaped candidate inputs carry their own provenance', () => {
+test('fact-shaped inputs: observed and configured provenance both count as proven evidence', () => {
+  // Provenance distinguishes evidence sources but never gatekeeps truth here:
+  // 'observed' and 'configured' facts are equally proven for eligibility.
+  for (const prov of ['observed', 'configured']) {
+    const r = evaluate(baseCandidate({
+      model: { value: 'kimi-k2', provenance: prov, source: 'runtime.json' },
+      harnessAvailable: { value: true, provenance: prov, source: 'config' },
+    }), BASE_POLICY, REG);
+    assert.strictEqual(r.result, 'eligible', prov);
+  }
+});
+
+test('fact-shaped input with provenance unknown is NOT proven — never coerced to a value', () => {
   const r = evaluate(baseCandidate({
-    model: { value: 'kimi-k2', provenance: 'observed', source: 'runtime.json' },
-    harnessAvailable: { value: true, provenance: 'configured', source: 'config' },
-  }), BASE_POLICY, REG);
-  assert.strictEqual(r.result, 'eligible');
+    model: { value: 'kimi-k2', provenance: 'unknown', reason: 'model-evidence-absent' },
+  }), { require: { taskCapabilities: ['code'] } }, REG);
+  assert.strictEqual(r.result, 'unresolved');
+  assert.ok(hasCode(r, 'model-capability-unproven'));
+});
+
+test('a fact-shaped input is not silently downgraded to a bare primitive', () => {
+  // An unknown-provenance fact object must not collapse to its value; a
+  // proven fact object must still drive registry resolution (alias lookup).
+  const unknownFact = evaluate(baseCandidate({
+    harness: { value: 'claude', provenance: 'unknown', reason: 'harness-absent' },
+  }), { forbid: { harnesses: ['claude'] } }, REG);
+  assert.strictEqual(unknownFact.result, 'unresolved');
+  assert.ok(hasCode(unknownFact, 'harness-identity-unproven'));
+  const provenFact = evaluate(baseCandidate({
+    harness: { value: 'Claude-Code', provenance: 'observed', source: 'runtime.json' },
+  }), { forbid: { harnesses: ['claude'] } }, REG);
+  assert.strictEqual(provenFact.result, 'ineligible'); // alias resolved → forbidden
+  assert.ok(hasCode(provenFact, 'harness-forbidden'));
 });
 
 test('unknown-provenance facts are never coerced — required evidence stays unproven', () => {
@@ -277,20 +304,57 @@ test('(g) allowlist matches aliases; unproven model under allowlist → unresolv
   assert.ok(hasCode(r, 'model-identity-unproven'));
 });
 
-console.log('\neligibility — harness availability');
+console.log('\neligibility — proven-positive sentinel contract (route state + harness availability)');
 
-test('proven-unavailable harness → ineligible regardless of policy', () => {
+test('proven-negative harness availability → ineligible regardless of policy', () => {
   for (const v of [false, 'unavailable', { value: false, provenance: 'observed', source: 'runtime.json' }]) {
     const r = evaluate(baseCandidate({ harnessAvailable: v }), {}, REG);
-    assert.strictEqual(r.result, 'ineligible');
+    assert.strictEqual(r.result, 'ineligible', JSON.stringify(v));
     assert.ok(hasCode(r, 'harness-unavailable'));
   }
 });
 
-test('harness requirement + unproven availability → unresolved', () => {
+test('only an explicit positive proves availability; every other value is unproven', () => {
+  const pol = { require: { harnesses: ['claude'] } };
+  for (const v of [true, 'available']) {
+    const r = evaluate(baseCandidate({ harnessAvailable: v }), pol, REG);
+    assert.strictEqual(r.result, 'eligible', `proven positive ${JSON.stringify(v)}`);
+  }
+  // 'unknown', 'false', '', 0 — same sentinels, same treatment: never a
+  // proven positive, and not a proven negative either → unresolved.
+  for (const v of ['unknown', 'false', '', 0, 'yes', null, undefined]) {
+    const cand = baseCandidate({ harnessAvailable: v });
+    if (v === undefined) delete cand.harnessAvailable;
+    const r = evaluate(cand, pol, REG);
+    assert.strictEqual(r.result, 'unresolved', `unproven ${JSON.stringify(v)}`);
+    assert.ok(codes(r).includes('harness-availability-unproven@harness'), JSON.stringify(v));
+  }
+});
+
+test('route state uses the same sentinel rule under require.usableRoute', () => {
+  const pol = { require: { usableRoute: true } };
+  for (const state of ['healthy', 'constrained']) {
+    const r = evaluate(baseCandidate({ route: { id: 'kimi-code-plan', state } }), pol, REG);
+    assert.strictEqual(r.result, 'eligible', state);
+  }
+  for (const state of ['unknown', 'weird-state', '', 0]) {
+    const r = evaluate(baseCandidate({ route: { id: 'kimi-code-plan', state } }), pol, REG);
+    assert.strictEqual(r.result, 'unresolved', JSON.stringify(state));
+    assert.ok(codes(r).includes('route-state-unproven@route'), JSON.stringify(state));
+  }
+  // 'exhausted' is a proven negative: ineligible only, never ALSO unproven
+  const r = evaluate(baseCandidate({ route: { id: 'kimi-code-plan', state: 'exhausted' } }), pol, REG);
+  assert.strictEqual(r.result, 'ineligible');
+  assert.deepStrictEqual(codes(r), ['route-exhausted@route:kimi-code-plan']);
+});
+
+test('unproven availability is only required when the policy demands a harness', () => {
   const cand = baseCandidate();
   delete cand.harnessAvailable;
-  const r = evaluate(cand, { require: { harnesses: ['claude'] } }, REG);
+  // no harness requirement → absent availability is not a deficit
+  assert.strictEqual(evaluate(cand, { require: { taskCapabilities: ['code'] } }, REG).result, 'eligible');
+  // execution-capability requirement → unproven availability → unresolved
+  const r = evaluate(cand, { require: { executionCapabilities: ['dispatch'] } }, REG);
   assert.strictEqual(r.result, 'unresolved');
   assert.ok(codes(r).includes('harness-availability-unproven@harness'));
 });
@@ -343,6 +407,7 @@ test('(h) adding a registry entry flips unresolved → eligible with zero adapte
   const hashesBefore = hashAdapters();
 
   const extended = createRegistry(mergeEntries(DEFAULT_ENTRIES, {
+    families: { acme: {} },
     models: { 'acme-ultra': { family: 'acme', taskCapabilities: ['code'] } },
   }));
   const after = evaluate(cand, pol, extended);
@@ -360,6 +425,57 @@ test('(h) eligibility modules never import adapters or runtime discovery', () =>
     assert.ok(!/require\([^)]*adapters/.test(src), `${mod} must not require adapters`);
     assert.ok(!/require\([^)]*traycer-adapter/.test(src), `${mod} must not require the runtime adapter`);
   }
+});
+
+test('(h) lib sources are plain text — no NUL bytes that would break grep/file tooling', () => {
+  for (const mod of ['eligibility.js', 'capability-registry.js']) {
+    const buf = fs.readFileSync(path.join(__dirname, '..', 'lib', mod));
+    assert.strictEqual(buf.includes(0), false, `${mod} must contain no NUL bytes`);
+  }
+});
+
+console.log('\neligibility — review-coverage hardening');
+
+test('skills union: unregistered harness + proven-empty candidate inventory → unresolved', () => {
+  // Harness side cannot prove absence (unregistered → harnessSkills null);
+  // the known-empty candidate inventory alone cannot prove it either.
+  const r = evaluate(baseCandidate({ harness: 'paperclip-os', skills: [] }),
+    { require: { skills: ['dev'] } }, REG);
+  assert.strictEqual(r.result, 'unresolved');
+  assert.ok(codes(r).includes('required-skill-unproven@skill:dev'));
+});
+
+test('bare-string subject naming an unregistered family compares as a literal', () => {
+  // Documented decision: a supplied family literal is evidence of itself.
+  // 'totally-unknown-family' ≠ candidate 'moonshot' → families differ → the
+  // review requirement is satisfied.
+  const r = evaluate(baseCandidate({ model: 'kimi-k2' }), {
+    review: { requireDifferentFamily: true, subject: 'totally-unknown-family' },
+  }, REG);
+  assert.strictEqual(r.result, 'eligible');
+});
+
+test('family declared via alias on a model entry canonicalizes in BOTH directions', () => {
+  const reg = createRegistry({
+    families: { anthropic: { aliases: ['claude'] }, acme: {} },
+    models: {
+      'm-one': { family: 'claude', taskCapabilities: ['code'] }, // alias → anthropic
+      'm-two': { family: 'acme', taskCapabilities: ['code'] },
+    },
+    harnesses: { h: { executionCapabilities: [], skills: [] } },
+  });
+  const cand = { model: 'm-one', harness: 'h', harnessAvailable: true };
+  // candidate family 'claude' (alias) vs subject 'anthropic' (canonical)
+  const same = evaluate(cand, {
+    review: { requireDifferentFamily: true, subject: { family: 'anthropic' } },
+  }, reg);
+  assert.strictEqual(same.result, 'ineligible');
+  assert.ok(codes(same).includes('review-same-family@review'));
+  // candidate 'claude' (alias → anthropic) vs subject model m-two (acme)
+  const diff = evaluate(cand, {
+    review: { requireDifferentFamily: true, subject: { model: 'm-two' } },
+  }, reg);
+  assert.strictEqual(diff.result, 'eligible');
 });
 
 if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }

@@ -17,6 +17,7 @@
 // (selected-vs-last-used profile separation, availabilityPending).
 
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -323,15 +324,25 @@ function liveSnap(dir, extraIo = {}, opts = {}) {
 
 // ---- CLI helpers ---------------------------------------------------------------
 
-// Recursive relative listing of a directory (sorted, files+dirs as relpaths).
+// Recursive relative listing of a directory (sorted). Directories record as
+// `name/`; files record as `name:sha256` so a before/after compare catches
+// in-place rewrites, not just created or deleted names.
 function listTree(dir) {
   const out = [];
   (function walk(rel) {
     const abs = path.join(dir, rel);
     for (const name of fs.readdirSync(abs).sort()) {
       const p = path.join(rel, name);
-      out.push(p + (fs.statSync(path.join(abs, name)).isDirectory() ? '/' : ''));
-      if (fs.statSync(path.join(abs, name)).isDirectory()) walk(p);
+      const st = fs.statSync(path.join(abs, name));
+      if (st.isDirectory()) {
+        out.push(p + '/');
+        walk(p);
+      } else {
+        const digest = crypto.createHash('sha256')
+          .update(fs.readFileSync(path.join(abs, name)))
+          .digest('hex');
+        out.push(`${p}:${digest}`);
+      }
     }
   })('');
   return out;
@@ -412,7 +423,7 @@ test('CLI cache-only under guard: zero guard events, zero filesystem writes', ()
   assert.strictEqual(doc.requestedRefresh, false);
   assert.deepStrictEqual(guardEvents(dir), [], 'guard observed forbidden activity');
   assert.deepStrictEqual(
-    listTree(dir).filter((p) => p !== 'guard-events.log'), before,
+    listTree(dir).filter((p) => !p.startsWith('guard-events.log')), before,
     'cache-only snapshot must not create or modify files under dataDir',
   );
 });

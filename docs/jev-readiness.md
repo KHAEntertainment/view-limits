@@ -30,12 +30,12 @@ default. `PARTIAL` means proven on a strict subset of the required harnesses.
 
 | AC | Status | Evidence |
 |----|--------|----------|
-| AC1 read-only probes from all three callers | Probes executed (Track B): identity/model/profile fields recorded honestly per harness; unsupported fields are `caller-fact-absent` with stable reasons, never sentinel defaults. |
-| AC2 non-default / third-party model backend | Separation + no-inference **proven** (opencode probe ran `minimax-coding-plan:MiniMax-M3`; fixtures pin harness≠model and zero `family` keys). Positive `effectiveModel` distinction **BLOCKING** — unobservable upstream. |
-| AC3 managed/non-default profile evidence | `isEffectiveLastUsed` reported separately from `selectedProfile` (fixtures + probes). `selectedProfile` unavailable on all three harnesses → recorded as upstream gap, not synthesized. |
-| AC4 cache-only/live, malformed sources, multi-window, precise balances, cross-session isolation | **PASS** — `test/cross-harness-readiness.test.js` (15 tests), incl. the `guard.cjs` zero-I/O gate. |
-| AC5 eleven-item gate | This document. Items 5–10 PASS; 1 and 4 PARTIAL; 2, 3, 11 BLOCKING — every BLOCKING has a precise reason. |
-| AC6 Traycer capability gaps | "Upstream gaps" below — documented for upstream; no Traycer-side work done in this repo. |
+| AC1 read-only probes from all three callers | PARTIAL | Track B probes executed on all three harnesses; identity/model/profile fields recorded honestly per harness; unsupported fields are `caller-fact-absent` with stable reasons, never sentinel defaults. |
+| AC2 non-default / third-party model backend | PARTIAL | Separation + no-inference proven: opencode probe ran `minimax-coding-plan:MiniMax-M3`; fixtures pin harness≠model and zero `family` keys. Positive `effectiveModel` distinction BLOCKING — unobservable upstream. |
+| AC3 managed/non-default profile evidence | BLOCKING (recorded) | `isEffectiveLastUsed` reported separately from `selectedProfile` (fixtures + probes). `selectedProfile` unavailable on all three harnesses → recorded as upstream gap, not synthesized. |
+| AC4 cache-only/live, malformed sources, multi-window, precise balances, cross-session isolation | PASS | `test/cross-harness-readiness.test.js` (16 tests), incl. the `guard.cjs` zero-I/O gate. |
+| AC5 eleven-item gate | PASS (documented) | This document: items 5–10 PASS; 1 and 4 PARTIAL; 2, 3, 11 BLOCKING — every BLOCKING has a precise reason. |
+| AC6 Traycer capability gaps | PASS | "Upstream gaps" below — documented for upstream; no Traycer-side work done in this repo. |
 
 ## Upstream gaps
 

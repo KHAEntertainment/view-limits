@@ -1,6 +1,6 @@
 {
   "name": "view-limits",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "description": "Check coding-plan credit and rate-limit status across providers before dispatching sub-agents, and block dispatch of models whose account is exhausted.",
   "author": { "name": "KHA Entertainment" },
   "license": "MIT",

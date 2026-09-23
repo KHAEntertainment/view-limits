@@ -423,7 +423,7 @@ test('CLI cache-only under guard: zero guard events, zero filesystem writes', ()
   assert.strictEqual(doc.requestedRefresh, false);
   assert.deepStrictEqual(guardEvents(dir), [], 'guard observed forbidden activity');
   assert.deepStrictEqual(
-    listTree(dir).filter((p) => !p.startsWith('guard-events.log')), before,
+    listTree(dir).filter((p) => !/^guard-events\.log:[0-9a-f]{64}$/.test(p)), before,
     'cache-only snapshot must not create or modify files under dataDir',
   );
 });

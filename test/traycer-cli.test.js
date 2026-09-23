@@ -161,6 +161,10 @@ test('happy path: caller overlay, session/harness/profile rows, native usage tim
   // Authoritative caller row resolved by exact id match.
   assert.strictEqual(doc.caller.agentId.value, AGENT_ID);
   assert.strictEqual(doc.caller.agentId.source, 'traycer-cli');
+  // epicId is launch-env evidence only — the CLI output never carries it.
+  assert.strictEqual(doc.caller.epicId.value, EPIC_ID);
+  assert.strictEqual(doc.caller.epicId.source, 'traycer-env');
+  assert.strictEqual(doc.caller.epicId.observedAt, null);
   assert.strictEqual(doc.caller.surface.value, 'gui');
   assert.strictEqual(doc.caller.harness.value, 'devin');
   assert.deepStrictEqual(doc.caller.configuredModel.value, { kind: 'concrete', slug: 'swe-2-high' });

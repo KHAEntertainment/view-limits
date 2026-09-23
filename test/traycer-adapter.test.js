@@ -199,6 +199,10 @@ function fullRun(overrides = {}) {
 }
 
 const CTX = { host: 'test-host', surface: 'cli', agentId: AGENT_ID, epicId: EPIC_ID, ade: 'traycer' };
+// Launch-environment identity — the common path (vl.js seeds these into
+// callerContext). Epic ids are verified only via this env evidence.
+const ENV = { TRAYCER_AGENT_ID: AGENT_ID, TRAYCER_EPIC_ID: EPIC_ID };
+const NOENV = {};
 
 function diagList(out) {
   return out.diagnostics.map((d) => `${d.code}@${d.scope}`);
@@ -221,7 +225,7 @@ test('progress timestamps never become observation freshness', async () => {
   const fake = fullRun({
     'agent list --json': { code: 0, stdout: ndjson([progress('p1', '2026-09-22T06:00:00.000Z'), resultOk(AGENTS_DATA, TS_RESULT)]), stderr: '' },
   });
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   assert.strictEqual(out.sessions[0].active.observedAt, TS_RESULT, 'session facts stamp the terminal timestamp');
   assert.ok(!JSON.stringify(out).includes('T06:00:00'), 'progress timestamp must not appear as freshness');
 });
@@ -243,14 +247,19 @@ console.log('\ntraycer adapter — caller resolution');
 
 test('matching supplied agent/epic identity → authoritative caller overlay only', async () => {
   const fake = fullRun();
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   assert.deepStrictEqual(diagList(out), []);
   const c = out.caller;
   assert.ok(c, 'caller overlay emitted');
   assert.strictEqual(c.ade.value, 'traycer');
   assert.strictEqual(c.agentId.value, AGENT_ID);
   assert.strictEqual(c.agentId.source, 'traycer-cli');
+  assert.strictEqual(c.agentId.observedAt, TS_RESULT);
+  // epicId is never a CLI observation — the CLI output carries no epic id;
+  // launch env is the only honest source and gets no CLI observedAt.
   assert.strictEqual(c.epicId.value, EPIC_ID);
+  assert.strictEqual(c.epicId.source, 'traycer-env');
+  assert.strictEqual(c.epicId.observedAt, null);
   assert.strictEqual(c.surface.value, 'gui', 'GUI surface preserved');
   assert.strictEqual(c.harness.value, 'devin');
   assert.deepStrictEqual(c.configuredModel.value, { kind: 'concrete', slug: 'swe-2-high' });
@@ -267,15 +276,17 @@ test('supplied agentId mismatch vs CLI caller → mismatch diag, overlay withhel
   const fake = fullRun();
   const out = await readTraycerRuntime({
     callerContext: { ...CTX, agentId: 'agent-WRONG' },
-    env: {},
+    env: ENV,
     run: fake.run,
   });
   assert.ok(diagList(out).includes('traycer-caller-mismatch@caller'));
   assert.strictEqual(out.caller, null, 'authoritative caller facts withheld on mismatch');
   assert.strictEqual(out.sessions.length, 3, 'session rows are still valid observations');
-  // No session row may be borrowed for the wrong identity.
-  assert.ok(!out.sessions.some((s) => s.key.agentId === 'agent-WRONG' && s.isSelf.value === true) ||
-    true, 'isSelf row is never borrowed');
+  // A foreign isSelf row can never be borrowed for a mismatched identity: the
+  // only isSelf:true row is the real caller's, and it produced no overlay.
+  const selfRows = out.sessions.filter((s) => s.isSelf.value === true);
+  assert.deepStrictEqual(selfRows.map((s) => s.key.agentId), [AGENT_ID]);
+  assert.strictEqual(out.caller, null);
 });
 
 test('supplied-vs-env identity conflict → mismatch before reads; rows keyed by env epic', async () => {
@@ -293,7 +304,7 @@ test('supplied-vs-env identity conflict → mismatch before reads; rows keyed by
 test('verified caller with no self row → identity-only overlay + row-absent diag', async () => {
   const data = { ...AGENTS_DATA, agents: AGENTS_DATA.agents.filter((a) => a.id !== AGENT_ID) };
   const fake = fullRun({ 'agent list --json': { code: 0, stdout: ndjson([resultOk(data)]), stderr: '' } });
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   assert.ok(diagList(out).includes('traycer-caller-row-absent@caller'));
   assert.ok(out.caller, 'identity overlay still emitted');
   assert.strictEqual(out.caller.agentId.value, AGENT_ID);
@@ -305,7 +316,7 @@ console.log('\ntraycer adapter — failure containment');
 test('missing CLI (ENOENT) → traycer-cli-missing per read; all sections empty; caller null', async () => {
   const fake = makeRun([]);
   fake.run = async () => ({ error: Object.assign(new Error('spawn traycer ENOENT'), { code: 'ENOENT' }) });
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   const codes = diagList(out);
   for (const scope of ['sessions', 'harnesses', 'profiles:claude', 'profiles:codex', 'profiles:opencode']) {
     assert.ok(codes.includes(`traycer-cli-missing@${scope}`), `missing diag for ${scope}: ${codes}`);
@@ -321,7 +332,7 @@ test('timeout → traycer-read-timeout scoped to the failed read; siblings survi
     'agent list-profiles codex --json': { timedOut: true },
     'agent profile-rate-limits codex --profile ambient --json': { timedOut: true },
   });
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   const codes = diagList(out);
   assert.ok(codes.includes('traycer-read-timeout@profiles:codex'));
   assert.ok(!codes.includes('traycer-read-timeout@sessions'));
@@ -333,7 +344,7 @@ test('malformed agents output → sessions diag only; profiles/harnesses unaffec
   const fake = fullRun({
     'agent list --json': { code: 0, stdout: ndjson([progress('x'), 'this is not json']), stderr: '' },
   });
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   const codes = diagList(out);
   assert.ok(codes.includes('traycer-output-malformed@sessions'));
   assert.strictEqual(out.caller, null);
@@ -346,20 +357,20 @@ test('terminal error result → traycer-read-failed; nonzero exit → traycer-re
   const fake = fullRun({
     'agent list-harnesses --json': { code: 0, stdout: ndjson([resultErr('E_PERMISSION', 'denied')]), stderr: '' },
   });
-  let out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  let out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   assert.ok(diagList(out).includes('traycer-read-failed@harnesses'));
 
   const fake2 = fullRun({
     'agent list-harnesses --json': { code: 2, stdout: '', stderr: 'boom' },
   });
-  out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake2.run });
+  out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake2.run });
   assert.ok(diagList(out).includes('traycer-read-failed@harnesses'));
 });
 
 test('no Traycer identity → live-reads-unavailable, zero subprocess invocations', async () => {
   const fake = fullRun();
   for (const ctx of [null, {}, { host: 'h', surface: 'cli' }, { agentId: 'only-agent' }]) {
-    const out = await readTraycerRuntime({ callerContext: ctx, env: {}, run: fake.run });
+    const out = await readTraycerRuntime({ callerContext: ctx, env: NOENV, run: fake.run });
     assert.deepStrictEqual(diagList(out), ['live-reads-unavailable@envelope'], JSON.stringify(ctx));
   }
   assert.strictEqual(fake.calls.length, 0, 'no identity must mean zero Traycer invocations');
@@ -369,7 +380,7 @@ console.log('\ntraycer adapter — profile catalog + native rate limits');
 
 test('profile rows keyed host+provider+profileId; last-used never claims selection', async () => {
   const fake = fullRun();
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   const claude = out.profiles.filter((p) => p.key.provider === 'claude-code');
   assert.strictEqual(claude.length, 2);
   const ambient = claude.find((p) => p.key.profileId === 'ambient');
@@ -384,7 +395,7 @@ test('profile rows keyed host+provider+profileId; last-used never claims selecti
 
 test('usageUpdatedAt preserved as ISO source time; null never becomes fresh capacity', async () => {
   const fake = fullRun();
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   const claude = out.profiles.find((p) => p.key.provider === 'claude-code' && p.key.profileId === 'ambient');
   assert.strictEqual(claude.usageUpdatedAt.value, USAGE_ISO, 'epoch ms → ISO preserved');
   assert.strictEqual(claude.usageUpdatedAt.observedAt, USAGE_ISO);
@@ -402,7 +413,7 @@ test('usageUpdatedAt preserved as ISO source time; null never becomes fresh capa
 
 test('profile-rate-limits runs only for isEffectiveLastUsed profiles', async () => {
   const fake = fullRun();
-  await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   const rl = fake.calls.filter((a) => a[1] === 'profile-rate-limits');
   assert.strictEqual(rl.length, 3, 'one detailed read per harness');
   assert.ok(rl.every((a) => a.includes('ambient')), 'each read targets the last-used ambient selection');
@@ -412,8 +423,8 @@ test('detailed read failure is scoped; catalog row survives', async () => {
   const fake = fullRun({
     'agent profile-rate-limits claude --profile ambient --json': { timedOut: true },
   });
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
-  assert.ok(diagList(out).includes('traycer-read-timeout@rate-limits:claude'));
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  assert.ok(diagList(out).includes('traycer-read-timeout@rate-limits:claude:ambient'));
   const claude = out.profiles.find((p) => p.key.provider === 'claude-code' && p.key.profileId === 'ambient');
   assert.strictEqual(claude.authStatus.value, 'authenticated', 'catalog facts survive a failed detailed read');
   assert.ok(!('nativeRateLimits' in claude));
@@ -430,14 +441,14 @@ test('identical command keys coalesce to one subprocess', async () => {
   const fake = fullRun({
     'agent list-profiles codex --json': { code: 0, stdout: ndjson([resultOk(dupProfiles)]), stderr: '' },
   });
-  await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   const rlCalls = fake.calls.filter((a) => a.join(' ') === 'agent profile-rate-limits codex --profile ambient --json');
   assert.strictEqual(rlCalls.length, 1, 'duplicate profile selections coalesce');
 });
 
 test('at most MAX_CONCURRENT Traycer subprocesses at once', async () => {
   const fake = fullRun();
-  await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   assert.ok(fake.maxInflight() <= 2, `max concurrency ${fake.maxInflight()} exceeds 2`);
   assert.ok(fake.calls.length >= 5, 'all wave-1 reads ran');
 });
@@ -446,7 +457,7 @@ console.log('\ntraycer adapter — harness rows and surface separation');
 
 test('catalog rows keyed by caller surface; pending availability is unknown; usage rows merge', async () => {
   const fake = fullRun();
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   const devin = out.harnesses.find((h) => h.key.harness === 'devin');
   assert.ok(devin, 'catalog row for devin');
   assert.strictEqual(devin.key.surface, 'gui', 'catalog keyed by resolved caller surface');
@@ -472,7 +483,7 @@ test('junk fields on agent/profile rows never reach output', async () => {
     ],
   };
   const fake = fullRun({ 'agent list --json': { code: 0, stdout: ndjson([resultOk(dirty)]), stderr: '' } });
-  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
   assert.ok(!JSON.stringify(out).includes(SENTINEL), 'raw CLI bytes must not leak into rows');
 });
 
@@ -512,7 +523,7 @@ test('refresh:true composes live rows, caller overlay, and cached siblings', asy
   const s = await getRuntimeSnapshot({
     refresh: true, now: frozen, dataDir: dir,
     callerContext: CTX,
-    io: { env: {}, traycerRun: fake.run },
+    io: { env: ENV, traycerRun: fake.run },
   });
   assert.strictEqual(s.requestedRefresh, true);
   assert.strictEqual(s.caller.surface.value, 'gui', 'authoritative surface replaces cli claim');
@@ -579,6 +590,9 @@ test('env identity alone (no supplied caller ids) resolves the caller row', asyn
   });
   assert.strictEqual(s.caller.agentId.value, AGENT_ID);
   assert.strictEqual(s.caller.agentId.source, 'traycer-cli');
+  assert.strictEqual(s.caller.epicId.value, EPIC_ID);
+  assert.strictEqual(s.caller.epicId.source, 'traycer-env', 'epicId is env evidence, not a CLI observation');
+  assert.strictEqual(s.caller.epicId.observedAt, null);
   assert.strictEqual(s.caller.surface.value, 'gui');
   assert.strictEqual(s.sessions.length, 3);
 });
@@ -604,10 +618,113 @@ test('no lingering handles after a live refresh', async () => {
   const dir = scratch();
   await getRuntimeSnapshot({
     refresh: true, now: frozen, dataDir: dir,
-    callerContext: CTX, io: { env: {}, traycerRun: fake.run },
+    callerContext: CTX, io: { env: ENV, traycerRun: fake.run },
   });
   const after = process._getActiveHandles().length;
   assert.deepStrictEqual(after, before, 'live refresh must not leave handles');
+});
+
+console.log('\ntraycer adapter — epic verification');
+
+test('supplied-only epic id (no env evidence) → session rows withheld, never keyed on the claim', async () => {
+  const fake = fullRun();
+  const out = await readTraycerRuntime({ callerContext: CTX, env: {}, run: fake.run });
+  assert.ok(diagList(out).includes('traycer-epic-unverified@sessions'));
+  assert.deepStrictEqual(out.sessions, [], 'unverified epic must not propagate into session row keys');
+  // The caller row itself is still verified against the CLI caller.agentId.
+  assert.ok(out.caller, 'caller overlay still emitted — agentId was CLI-verified');
+  assert.strictEqual(out.caller.agentId.value, AGENT_ID);
+  assert.ok(!('epicId' in out.caller), 'unverified epic is not overlaid');
+  // Host-scoped sections are unaffected — their keys carry no epic id.
+  assert.ok(out.harnesses.length >= 2);
+  assert.ok(out.profiles.length >= 3);
+  // And no sessionRef may leak the unverified epic either.
+  for (const h of out.harnesses) assert.deepStrictEqual(h.sessionRefs, []);
+});
+
+console.log('\ntraycer adapter — diagnostic uniqueness and edge timestamps');
+
+test('two failed rate-limit reads on one harness never duplicate (code,scope)', async () => {
+  const twoLastUsed = {
+    providerId: 'codex',
+    profiles: [
+      { selection: { kind: 'ambient' }, label: 'A', authStatus: 'unknown', rateLimitStatus: 'unknown', usageUpdatedAt: null, isEffectiveLastUsed: true },
+      { selection: { kind: 'profile', profileId: 'prof-b' }, label: 'B', authStatus: 'unknown', rateLimitStatus: 'unknown', usageUpdatedAt: null, isEffectiveLastUsed: true },
+    ],
+  };
+  const fake = fullRun({
+    'agent list-profiles codex --json': { code: 0, stdout: ndjson([resultOk(twoLastUsed)]), stderr: '' },
+    'agent profile-rate-limits codex --profile ambient --json': { timedOut: true },
+    'agent profile-rate-limits codex --profile prof-b --json': { timedOut: true },
+  });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  const pairs = out.diagnostics.map((d) => `${d.code}|${d.scope}`);
+  assert.strictEqual(new Set(pairs).size, pairs.length, `duplicate diagnostics: ${pairs.join(', ')}`);
+  assert.ok(pairs.includes('traycer-read-timeout|rate-limits:codex:ambient'));
+  assert.ok(pairs.includes('traycer-read-timeout|rate-limits:codex:prof-b'));
+});
+
+test('coalesced duplicate selections share one read AND one diagnostic', async () => {
+  const dupSame = {
+    providerId: 'codex',
+    profiles: [
+      { selection: { kind: 'ambient' }, label: 'A', authStatus: 'unknown', rateLimitStatus: 'unknown', usageUpdatedAt: null, isEffectiveLastUsed: true },
+      { selection: { kind: 'ambient' }, label: 'B', authStatus: 'unknown', rateLimitStatus: 'unknown', usageUpdatedAt: null, isEffectiveLastUsed: true },
+    ],
+  };
+  const fake = fullRun({
+    'agent list-profiles codex --json': { code: 0, stdout: ndjson([resultOk(dupSame)]), stderr: '' },
+    'agent profile-rate-limits codex --profile ambient --json': { timedOut: true },
+  });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  const rlCalls = fake.calls.filter((a) => a.join(' ') === 'agent profile-rate-limits codex --profile ambient --json');
+  assert.strictEqual(rlCalls.length, 1);
+  const pairs = out.diagnostics.map((d) => `${d.code}|${d.scope}`);
+  assert.strictEqual(new Set(pairs).size, pairs.length, 'coalesced read must emit at most one diagnostic');
+});
+
+test('usageUpdatedAt: 0 (epoch) is a real timestamp, not null', async () => {
+  const zeroUsage = {
+    providerId: 'codex',
+    profiles: [
+      { selection: { kind: 'ambient' }, label: 'A', authStatus: 'unknown', rateLimitStatus: 'unknown', usageUpdatedAt: 0, isEffectiveLastUsed: true },
+    ],
+  };
+  const zeroRate = { rateLimits: { provider: 'codex', available: true }, usageUpdatedAt: 0 };
+  const fake = fullRun({
+    'agent list-profiles codex --json': { code: 0, stdout: ndjson([resultOk(zeroUsage)]), stderr: '' },
+    'agent profile-rate-limits codex --profile ambient --json': { code: 0, stdout: ndjson([resultOk(zeroRate)]), stderr: '' },
+  });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  const codex = out.profiles.find((p) => p.key.provider === 'codex');
+  assert.strictEqual(codex.usageUpdatedAt.value, '1970-01-01T00:00:00.000Z');
+  assert.strictEqual(codex.nativeRateLimits.observedAt, '1970-01-01T00:00:00.000Z');
+});
+
+console.log('\nsnapshot wiring — adapter failure boundaries');
+
+test('a throwing adapter degrades to traycer-read-failed@traycer, not a rejection', async () => {
+  const dir = scratch();
+  const s = await getRuntimeSnapshot({
+    refresh: true, now: frozen, dataDir: dir,
+    callerContext: CTX,
+    io: { env: ENV, readTraycer: async () => { throw new Error('adapter exploded'); } },
+  });
+  assert.ok(diagList(s).includes('traycer-read-failed@traycer'));
+  assert.strictEqual(s.requestedRefresh, true);
+  assert.strictEqual(s.caller.agentId.value, AGENT_ID, 'supplied caller context still reported');
+});
+
+test('refresh:true writes nothing to the data directory', async () => {
+  const fake = fullRun();
+  const dir = scratch();
+  const before = fs.readdirSync(dir).sort();
+  await getRuntimeSnapshot({
+    refresh: true, now: frozen, dataDir: dir,
+    callerContext: CTX, io: { env: ENV, traycerRun: fake.run },
+  });
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), before, 'live refresh must not write');
+  assert.ok(fake.calls.length > 0, 'live reads actually ran');
 });
 
 Promise.all(pendingTests).then(() => {

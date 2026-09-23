@@ -568,8 +568,9 @@ function remove(routeId) {
 // per-diagnostic notices go to stderr. Without --refresh the snapshot path
 // performs no provider calls, subprocesses, refresh scheduling, or cache
 // writes; --refresh adds only bounded supported Traycer CLI reads.
-// TRAYCER_AGENT_ID/TRAYCER_EPIC_ID are request-local launch identity evidence
-// and are seeded into the caller context as traycer-env facts.
+// Traycer launch-environment identity is request-local evidence about this
+// process; it is seeded into the caller context as traycer-env facts (the
+// variable names themselves live in lib/traycer-adapter.js).
 
 async function snapshot(args) {
   const allowed = new Set(['--json', '--refresh']);

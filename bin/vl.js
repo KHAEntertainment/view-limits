@@ -39,6 +39,7 @@ const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
 const { recommend } = require('../lib/recommend');
 const { makeJevTransport } = require('../lib/jev-openrouter');
 const { traycerEnvCallerContext } = require('../lib/traycer-adapter');
+const { writeReceipt, ackReceipt, formatReceipt, receiptFact, OUTCOME_SUBMITTED, OUTCOME_ABANDONED, OUTCOME_FAILED } = require('../lib/receipts');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 
@@ -234,7 +235,7 @@ function renderInventory(snap, updatedAt) {
   if (!rows.length) lines.push('    (no configured routes)');
   for (const row of rows) lines.push('    ' + renderRoute(row));
 
-  const counts = { healthy: 0, constrained: 0, exhausted: 0, unknown: 0 };
+  const counts = { healthy: 0, constrained: 0, exhausted: 0, unavailable: 0, unknown: 0 };
   let stale = 0;
   for (const row of rows) {
     const s = factValue(row.resource && row.resource.state) || 'unknown';
@@ -242,7 +243,11 @@ function renderInventory(snap, updatedAt) {
     if (row.resource && row.resource.freshness === 'stale') stale += 1;
   }
   lines.push('');
-  lines.push(`  ${counts.healthy} healthy · ${counts.constrained} constrained · ${counts.exhausted} exhausted · ${counts.unknown} unknown${stale ? ` · ${stale} stale` : ''}`);
+  const parts = [`${counts.healthy} healthy`, `${counts.constrained} constrained`, `${counts.exhausted} exhausted`];
+  if (counts.unavailable) parts.push(`${counts.unavailable} unavailable`);
+  parts.push(`${counts.unknown} unknown`);
+  if (stale) parts.push(`${stale} stale`);
+  lines.push(`  ${parts.join(' · ')}`);
   const unobserved = (Array.isArray(snap.routes) ? snap.routes : [])
     .filter((r) => r.configured && r.resource && r.resource.state && r.resource.state.reason === 'no-cached-observation')
     .length;
@@ -451,12 +456,12 @@ function formHtml(ids, nonce) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
     `<title>view-limits setup</title>` +
     `<style>body{font-family:system-ui,sans-serif;max-width:420px;margin:40px auto;padding:0 16px}label{display:block;margin:14px 0 4px;font-weight:600}input{width:100%;padding:8px;box-sizing:border-box;font-family:monospace}button{margin-top:18px;padding:8px 18px}</style>` +
-    `</head><body><h1>view-limits setup</h1><p>Paste each credential below. Values are sent only to this local server (127.0.0.1) and stored in your local vault — never through the agent's chat.</p>` +
+    `</head><body><h1>view-limits credentials</h1><p>Enter the new key for each route below — existing keys stay valid until you submit; opening this form clears nothing.</p><p>Values are sent only to this local server (127.0.0.1) and stored in your local vault — never through the agent's chat.</p>` +
     `<form id="f">${fields}<button type="submit">Save</button></form>` +
-    `<script>document.getElementById('f').addEventListener('submit',async(e)=>{e.preventDefault();const credentials={};` +
+    `<script>document.getElementById('f').addEventListener('submit',async(e)=>{e.preventDefault();if(e.target.dataset.busy)return;e.target.dataset.busy='1';const save=e.target.querySelector('button');if(save)save.disabled=true;try{const credentials={};` +
     reads +
     `const r=await fetch(location.href,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nonce:${JSON.stringify(nonce)},credentials})});` +
-    `if(r.ok){document.body.innerHTML='<h1>Saved</h1><p>Credentials stored. Closing in <span id="n">5</span>s…</p>';let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);}else{document.body.innerHTML='<h1>Error</h1><p>Something went wrong — rerun <code>vl.js setup</code>.</p>';});</script></body></html>`;
+    `if(r.ok){document.body.innerHTML='<h1>Saved</h1><p>Credentials stored. Closing in <span id="n">5</span>s…</p>';let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);}else{document.body.innerHTML='<h1>Error</h1><p>Something went wrong — rerun setup or update.</p>';}}finally{delete e.target.dataset.busy;if(save)save.disabled=false;}});</script></body></html>`;
 }
 
 function openBrowser(url) {
@@ -492,6 +497,10 @@ function serve(port, nonce, ids) {
   preflightVault();
 
   let abandonTimer = null;
+  let settled = false;
+  const dataDirPath = dataDir();
+  let receiptWritten = false;
+
   const server = http.createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET') {
@@ -501,17 +510,38 @@ function serve(port, nonce, ids) {
     }
     if (req.method === 'POST') {
       let body = '';
-      req.on('data', (c) => (body += c));
+      let oversized = false;
+      req.on('data', (c) => {
+        if (oversized) return;
+        body += c;
+        if (body.length > 64 * 1024) {
+          oversized = true;
+          res.writeHead(413);
+          res.end('payload too large');
+          writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'payload too large' });
+          receiptWritten = true;
+          shutdown(0);
+        }
+      });
       req.on('end', () => {
+        if (oversized) return;
+        if (settled) {
+          res.writeHead(409);
+          res.end('already submitted');
+          return;
+        }
+        settled = true;
         let data;
-        try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('bad request'); shutdown(0); return; }
+        try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('bad request'); writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'bad request' }); receiptWritten = true; shutdown(0); return; }
         if (!data || typeof data !== 'object' || Array.isArray(data)) {
           res.writeHead(400);
           res.end('bad request');
+          writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'bad request' });
+          receiptWritten = true;
           shutdown(0);
           return;
         }
-        if (data.nonce !== nonce) { res.writeHead(403); res.end('bad nonce'); shutdown(0); return; }
+        if (data.nonce !== nonce) { res.writeHead(403); res.end('bad nonce'); writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'nonce mismatch' }); receiptWritten = true; shutdown(0); return; }
         const creds = data.credentials && typeof data.credentials === 'object' && !Array.isArray(data.credentials)
           ? data.credentials : {};
         const saved = [];
@@ -535,11 +565,23 @@ function serve(port, nonce, ids) {
             ? 'Verify vault access, then rerun setup or update.'
             : 'Enter a replacement for every route, then rerun setup or update.';
           res.end(`<h1>Credential storage failed</h1><p>Stored: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Could not store: ${failed.map(escapeHtml).join(', ')}.</p><p>${remediation}</p>`);
+          // Write receipt: partial write = submitted (stored routes succeeded),
+          // vault failure = failed.  The all-or-nothing partial-write semantics
+          // are pinned by existing tests (PR #17/#18 review).  For the receipt,
+          // a successful save (even partial) is 'submitted' to signal the
+          // agent that at least some keys changed; a vault write failure is
+          // 'failed'.
+          const receiptOutcome = persistenceFailed ? OUTCOME_FAILED : OUTCOME_SUBMITTED;
+          const receiptRoutes = persistenceFailed ? ids : saved;
+          writeReceipt(dataDirPath, { outcome: receiptOutcome, routeIds: receiptRoutes, detail: persistenceFailed ? 'vault write failure' : null });
+          receiptWritten = true;
           shutdown(1, 200);
           return;
         }
         res.writeHead(200, { 'Content-Type': 'text/html' });
         res.end(`<h1>Saved ${saved.length} credential${saved.length === 1 ? '' : 's'}</h1><p>Routes: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Closing in <span id="n">5</span>s…</p><script>let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);</script>`);
+        writeReceipt(dataDirPath, { outcome: OUTCOME_SUBMITTED, routeIds: saved });
+        receiptWritten = true;
         shutdown(0, 200);
       });
       return;
@@ -554,11 +596,20 @@ function serve(port, nonce, ids) {
 
   function shutdown(code, delay = 0) {
     if (abandonTimer) clearTimeout(abandonTimer);
+    // Write an abandoned receipt only if the form was never submitted.
+    if (!receiptWritten) {
+      writeReceipt(dataDirPath, { outcome: OUTCOME_ABANDONED, routeIds: ids });
+    }
     setTimeout(() => server.close(() => process.exit(code)), delay);
   }
 
   server.listen(port, '127.0.0.1', () => {
-    abandonTimer = setTimeout(() => server.close(() => process.exit(0)), 5 * 60 * 1000);
+    abandonTimer = setTimeout(() => {
+      if (!receiptWritten) {
+        writeReceipt(dataDirPath, { outcome: OUTCOME_ABANDONED, routeIds: ids });
+      }
+      server.close(() => process.exit(0));
+    }, 5 * 60 * 1000);
   });
 }
 
@@ -610,6 +661,7 @@ function parseCredentialArgs(cfg, args) {
       continue;
     }
     if (arg.startsWith('--')) err(`unknown option "${arg}".`);
+    if (!arg.trim()) err('route id must not be empty.');
     if (parsed.routeId) err('only one route can be selected at a time.');
     parsed.routeId = arg;
   }
@@ -818,7 +870,23 @@ function config() {
 
 function sessionStart() {
   const cfg = loadConfig();
-  if (cfg.routes.some((r) => vault.has(r.id))) process.exit(0);
+  const hasCreds = cfg.routes.some((r) => vault.has(r.id));
+  // Surface any fresh credential receipt and ack it (session-start already
+  // performs writes in some paths, so acking here is consistent).
+  const receiptMsg = formatReceipt(receiptFact(dataDir()));
+  if (receiptMsg) {
+    ackReceipt(dataDir());
+    if (hasCreds) {
+      process.stdout.write(JSON.stringify({ systemMessage: 'view-limits: ' + receiptMsg + '.' }));
+    } else {
+      process.stdout.write(JSON.stringify({
+        systemMessage: 'view-limits: ' + receiptMsg + '. ' +
+          'Run /view-limits to refresh, or /view-limits:setup to add more provider keys.',
+      }));
+    }
+    process.exit(0);
+  }
+  if (hasCreds) process.exit(0);
   process.stdout.write(JSON.stringify({
     systemMessage: 'view-limits: no credentials configured yet. Run /view-limits:setup to add your provider keys.',
   }));
@@ -844,7 +912,11 @@ const hasFlag = (n) => args.includes(n);
       }
       if (hasFlag('--json')) return process.stdout.write(JSON.stringify(cache, null, 2) + '\n');
       const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
-      return process.stdout.write(renderInventory(snap, cache.updatedAt) + '\n');
+      let report = renderInventory(snap, cache.updatedAt);
+      // Surface any fresh credential receipt (read-only, no ack).
+      const receiptMsg = formatReceipt(receiptFact(dataDir()));
+      if (receiptMsg) report += '\n  ' + receiptMsg;
+      return process.stdout.write(report + '\n');
     }
     case 'check': return check(args[0]);
     case 'setup': return setup(args);

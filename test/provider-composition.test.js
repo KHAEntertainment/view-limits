@@ -324,6 +324,8 @@ console.log('\nprovider composition — bounded concurrent coalesced refresh (AC
 test('independent live sources run concurrently; identical requests coalesce', async () => {
   const dir = scratch();
   const events = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
   let releaseA;
   const gateA = new Promise((r) => { releaseA = r; });
   const sharedRead = async () => {
@@ -337,16 +339,26 @@ test('independent live sources run concurrently; identical requests coalesce', a
       env: {},
       readTraycer: async () => ({ diagnostics: [] }),
       liveReads: [
-        { key: 'a', read: async () => { events.push('a-start'); await gateA; events.push('a-end'); return {}; } },
-        { key: 'b', read: async () => { events.push('b-start'); releaseA(); await new Promise((r) => setTimeout(r, 15)); events.push('b-end'); return {}; } },
+        { key: 'a', read: async () => {
+          inFlight += 1; if (inFlight > maxInFlight) maxInFlight = inFlight;
+          events.push('a-start'); await gateA; inFlight -= 1; events.push('a-end'); return {};
+        } },
+        { key: 'b', read: async () => {
+          inFlight += 1; if (inFlight > maxInFlight) maxInFlight = inFlight;
+          events.push('b-start'); releaseA(); await new Promise((r) => setTimeout(r, 15)); inFlight -= 1; events.push('b-end'); return {};
+        } },
         { key: 'b', read: async () => { events.push('b-duplicate'); return {}; } },
         { key: 'c', read: sharedRead },
         { key: 'd', read: sharedRead },
       ],
     },
   });
+  // Counter-based proof: both starts observed before either end → true parallel.
+  assert.ok(events.indexOf('a-start') < events.indexOf('b-end'),
+    `a-start must precede b-end: ${events.join(',')}`);
   assert.ok(events.indexOf('b-start') < events.indexOf('a-end'),
-    `sources must overlap — b started before a finished: ${events.join(',')}`);
+    `b-start must precede a-end (overlap): ${events.join(',')}`);
+  assert.ok(maxInFlight >= 2, `peak concurrency ${maxInFlight} proves parallel execution`);
   assert.ok(!events.includes('b-duplicate'), 'identical source key must coalesce to one invocation');
   assert.strictEqual(events.filter((e) => e === 'shared').length, 1,
     'identical read function must coalesce to one invocation');

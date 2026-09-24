@@ -48,7 +48,7 @@ precisely enough to file upstream; none is worked around in this repo.
 | U2 | **No surface injects `TRAYCER_SESSION_ID`** | `caller.sessionId` is `caller-fact-absent` on all three harnesses. Uniform gap. |
 | U3 | **No OS-hostname ↔ Traycer `hostId` mapping exposed** | `callerContext.host` is the OS hostname (`MacBookPro.localdomain`); session/harness/profile rows key on the Traycer host UUID (`96d93dd0-…`). Nothing links them, so a cache-only snapshot cannot reconcile the caller's host with catalog rows. |
 | U4 | **`runConfig.model` reports `kind:"concrete"` for the placeholder slug `"default"`** | Kind and slug disagree semantically: a consumer cannot distinguish a real concrete model from the default placeholder without special-casing the slug. The snapshot carries it verbatim (correct) — the upstream schema should mark the placeholder honestly. |
-| U5 | **`agent profile-rate-limits` is unreliable** | WebSocket frame timeout at 15 s (`E_UNEXPECTED`) observed on the Claude probe for `claude --profile ambient` and `codex --profile ambient` (~21 s wall). Surfaces correctly as `traycer-read-timeout` scoped diagnostics; siblings survive. |
+| U5 | **`agent profile-rate-limits` is unreliable** | WebSocket frame timeout observed on the Claude probe for `claude --profile ambient` and `codex --profile ambient` (~21 s wall). Two timeout values are relevant: the upstream CLI observed a ~15 s WebSocket frame timeout; the repo's adapter deadline is `COMMAND_TIMEOUT_MS=10s` (`lib/traycer-adapter.js`). Surfaces correctly as `traycer-read-timeout` scoped diagnostics; siblings survive. |
 | U6 | **`agent list-harnesses` reports `available:false, availabilityPending:true` for every harness** | Including harnesses that are demonstrably running (they produced the probes). Pending is not unavailable — the adapter correctly normalizes the pair to `unknown('availability-pending')` (`lib/traycer-adapter.js`), and the three-case matrix is regression-pinned in `test/cross-harness-readiness.test.js`. The raw upstream report is the gap. |
 
 ## Known substrate defects (this repo — follow-up PRs, out of scope here)
@@ -63,6 +63,9 @@ precisely enough to file upstream; none is worked around in this repo.
 - **`resource.freshness` is a derived display label, not a contract fact.** It is computed at request time from `freshUntil` vs the clock (`fresh`/`stale`/`unknown`, plain string). The fact-shaped siblings (`state`, `resetAt`, `observedAt`, `freshUntil`, `source`) carry the evidence; `freshness` never qualifies the verbatim `state`. `balance`/`usage`/`error` are whitelisted raw carries (normalized adapter output), intentionally not fact-shaped — a `null` there means "no such evidence in the cache entry", and the companion unknown-reason facts carry the why.
 - **`isEffectiveLastUsed` is not `selectedProfile`.** A catalog's default/last-used marker never fills the caller's session selection; absent a current-session binding, `selectedProfile` stays `unknown('caller-fact-absent')`.
 - **An idle harness has no single effective model.** With multiple agents on one harness, no session is arbitrarily promoted to a harness- or caller-level `effectiveModel`.
+- **Route `source` provenance has two distinct meanings.** In a fact, `source` names the immediate origin of the fact (e.g. `'status.json'` for cached evidence, `'traycer-cli'` for live reads). In a resource entry, `resource.source.value` carries the upstream provider name (e.g. `'kimi'`, `'openrouter'`). These are two distinct fields with different semantics — the fact's `source` is the data provenance pipeline step; the resource's `source` value is the identity of the external provider that supplied the observation. Code changes to unify them would touch `lib/runtime-snapshot.js` (frozen); any proposed change requires an explicit unfreeze decision.
+
+- **Upstream facts may carry the literal string `'unknown'`.** The Traycer CLI returns `authStatus:'unknown'` and `rateLimitStatus:'unknown'` for profiles where the upstream provider cannot determine the state. These are carried as `provenance:'observed'` facts with `value:'unknown'` — the provenance is 'observed' because the CLI did observe and report that value. Consumers must not conflate these with `provenance:'unknown'` facts (which mean "no observation was available"). In short: `'unknown'` with `provenance:'observed'` is an observed upstream answer; `provenance:'unknown'` is the absence of an answer.
 
 ## Verification
 
@@ -70,12 +73,16 @@ precisely enough to file upstream; none is worked around in this repo.
 npm test                      # all files green, incl. test/cross-harness-readiness.test.js
 node --check test/cross-harness-readiness.test.js
 claude plugin validate .      # only the pre-existing CLAUDE.md warning
-git diff e549aaf..HEAD --stat -- lib/gate.js lib/routes.js lib/vault.js lib/refresh-owner.js lib/adapters/ lib/normalize.js lib/cache.js   # prints nothing
+git diff e549aaf..HEAD --stat -- lib/gate.js lib/routes.js lib/vault.js lib/refresh-owner.js lib/adapters/ lib/normalize.js lib/cache.js lib/runtime-sidecar.js lib/traycer-adapter.js lib/runtime-snapshot.js lib/capability-registry.js lib/eligibility.js   # prints nothing
 ```
 
 The cache-only path remains zero-network / zero-subprocess / zero-filesystem-write:
 `CLI cache-only under guard: zero guard events, zero filesystem writes`
 (test/cross-harness-readiness.test.js) runs `bin/vl.js snapshot --json` under
-`test/guard.cjs`, which blocks+logs every fetch/http/net/tls/child_process/
-provider/vault path, and asserts the dataDir tree is byte-identical before
-and after.
+`test/guard.cjs`, which blocks+logs the exec family of calls (fetch, http,
+net, tls, child_process spawn/exec, provider and vault reads). Note that
+`spawn` in `bin/vl.js` is used only for `args[1]==='refresh'` path activation;
+the cache-only snapshot path's zero-subprocess guarantee is independently
+pinned by `test/traycer-cli.test.js`'s stub trap and io-injection counters,
+and the dataDir tree is byte-identical before and after via the `listTree`
+before/after comparison.

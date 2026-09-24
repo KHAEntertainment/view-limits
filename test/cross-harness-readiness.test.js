@@ -431,12 +431,17 @@ test('CLI cache-only under guard: zero guard events, zero filesystem writes', ()
 test('CLI --refresh without Traycer identity: live-reads-unavailable, still zero activity', () => {
   const dir = scratch();
   seedAll(dir);
+  const before = listTree(dir);
   const r = runCli(['snapshot', '--json', '--refresh'], dir, { guard: true, log: true });
   assert.strictEqual(r.status, 0, `exit ${r.status}; stderr=${r.stderr}`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.requestedRefresh, true);
   assert.ok(doc.diagnostics.some((d) => d.code === 'live-reads-unavailable'));
   assert.deepStrictEqual(guardEvents(dir), [], 'refresh without identity must not spawn or write');
+  assert.deepStrictEqual(
+    listTree(dir).filter((p) => !/^guard-events\.log:[0-9a-f]{64}$/.test(p)), before,
+    'refresh-without-identity must not create or modify files under dataDir',
+  );
 });
 
 console.log('\ncross-harness readiness — AC4 live mode: bounded, partial, siblings survive');
@@ -767,6 +772,90 @@ test('vl report renders the snapshot without inference: unknowns stay visible, n
 });
 
 // ============================================================================
+
+console.log('\ncross-harness readiness — unavailable state gets its own count');
+
+test('unavailable state is counted separately from unknown in report summary', () => {
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [
+      { id: 'healthy-route', provider: 'kimi', account: 'a', match: { model: 'kimi' }, ttlSeconds: 120 },
+      { id: 'unavailable-route', provider: 'openrouter', account: 'a', match: { model: 'openrouter' }, ttlSeconds: 120 },
+      { id: 'unknown-route', provider: 'deepseek', account: 'a', match: { model: 'deepseek' }, ttlSeconds: 120 },
+    ],
+    vault: { backend: 'file', service: 'test-unavail' },
+  });
+  const prevData = process.env.CLAUDE_PLUGIN_DATA;
+  const prevKey = process.env.VIEW_LIMITS_MASTER_KEY;
+  process.env.CLAUDE_PLUGIN_DATA = dir;
+  process.env.VIEW_LIMITS_MASTER_KEY = 'unavail-test-key';
+  try {
+    require('../lib/vault').set('healthy-route', 'h');
+    require('../lib/vault').set('unavailable-route', 'u');
+    require('../lib/vault').set('unknown-route', 'k');
+  } finally {
+    if (prevData === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = prevData;
+    if (prevKey === undefined) delete process.env.VIEW_LIMITS_MASTER_KEY; else process.env.VIEW_LIMITS_MASTER_KEY = prevKey;
+  }
+  const now = Date.now();
+  writeJson(dir, 'status.json', {
+    updatedAt: new Date(now).toISOString(),
+    routes: {
+      'healthy-route': {
+        routeId: 'healthy-route', observedAt: new Date(now).toISOString(),
+        freshUntil: new Date(now + 120_000).toISOString(), source: 'kimi',
+        status: { state: 'healthy', windows: [], balance: null, resetAt: null },
+      },
+      'unavailable-route': {
+        routeId: 'unavailable-route', observedAt: new Date(now).toISOString(),
+        freshUntil: new Date(now + 120_000).toISOString(), source: 'openrouter',
+        status: { state: 'unavailable', windows: [], balance: null, resetAt: null },
+      },
+      // unknown-route has no cache entry → unknown.
+    },
+  });
+  const env = { ...process.env, CLAUDE_PLUGIN_DATA: dir, VIEW_LIMITS_MASTER_KEY: 'unavail-test-key' };
+  for (const k of Object.keys(env)) if (k.startsWith('TRAYCER_')) delete env[k];
+  const r = runCli(['report'], dir, { env: { VIEW_LIMITS_MASTER_KEY: 'unavail-test-key' } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  // Unavailable has its own bucket — visible as a distinct count.
+  assert.match(r.stdout, /1 unavailable/, `unavailable must have its own count: ${r.stdout}`);
+  assert.match(r.stdout, /1 healthy/);
+  assert.match(r.stdout, /1 unknown/);
+});
+
+console.log('\ncross-harness readiness — truthfulness invariant sweep');
+
+test('every fact-shaped object in the snapshot conforms to the truthfulness contract', async () => {
+  const dir = scratch();
+  seedAll(dir);
+  const s = await snap(dir, { callerContext: CALLER_CTX });
+  const facts = collectFacts(s);
+  assert.ok(facts.length > 50, `expected 50+ facts, got ${facts.length}`);
+  for (const f of facts) {
+    // Every fact must have a valid provenance.
+    assert.ok(
+      ['observed', 'configured', 'unknown'].includes(f.provenance),
+      `fact has invalid provenance ${f.provenance}: ${JSON.stringify(f)}`,
+    );
+    // A known fact must have a non-null value.
+    if (f.provenance !== 'unknown') {
+      assert.ok(f.value !== null && f.value !== undefined,
+        `known fact has null value: ${JSON.stringify(f)}`);
+    }
+    // An unknown fact must have value null and a reason.
+    if (f.provenance === 'unknown') {
+      assert.strictEqual(f.value, null, `unknown fact has non-null value: ${JSON.stringify(f)}`);
+      assert.ok(typeof f.reason === 'string' && f.reason.length > 0,
+        `unknown fact missing reason: ${JSON.stringify(f)}`);
+    }
+    // No sentinel values masquerading as known.
+    if (f.provenance !== 'unknown' && typeof f.value === 'string') {
+      assert.ok(f.value !== 'unknown' || f.source === 'status.json',
+        `string 'unknown' value with provenance ${f.provenance} at source ${f.source}`);
+    }
+  }
+});
 
 Promise.all(pendingTests).then(() => {
   if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }

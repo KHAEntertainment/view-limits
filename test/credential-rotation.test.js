@@ -10,6 +10,7 @@ const os = require('os');
 const path = require('path');
 const { once } = require('events');
 const { spawn, spawnSync } = require('child_process');
+const vm = require('vm');
 
 const CLI = path.resolve(__dirname, '../bin/vl.js');
 const PRELOAD = path.resolve(__dirname, 'fixtures/credential-failure-preload.cjs');
@@ -290,6 +291,51 @@ const route = (id) => ({ id, provider: 'fake', account: 'test', match: { model: 
     const [successCode] = await once(success.child, 'exit');
     assert.strictEqual(successCode, 0, success.output());
     assert.strictEqual(withVault(ctx, (vault) => vault.get('known-route')), REPLACEMENT);
+  });
+
+  await test('double-click save is client-guarded: second submit fires no request and the guard releases after settle', async () => {
+    if (!loopbackAvailable) { console.log('    (loopback unavailable; client double-submit guard exercised when host permits binding)'); return; }
+    const ctx = scratch('double-click', [route('known-route')]);
+    const port = await freePort();
+    const server = startServer(ctx, port, 'dbl-nonce', 'known-route');
+    try {
+      const form = await waitForServer(port);
+      assert.strictEqual(form.status, 200);
+      const script = form.body.match(/<script>([\s\S]*?)<\/script>/)[1];
+      let handler = null;
+      let fetches = 0;
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const saveButton = { disabled: false };
+      const formEl = { dataset: {}, querySelector: (sel) => (sel === 'button' ? saveButton : null) };
+      const sandbox = {
+        document: {
+          getElementById: (id) => (id === 'f'
+            ? { addEventListener: (type, fn) => { handler = fn; } }
+            : { value: `sk-test-${id}` }),
+          body: {},
+        },
+        window: { close: () => {} },
+        location: { href: `http://127.0.0.1:${port}/` },
+        fetch: async () => { fetches += 1; await gate; return { ok: true }; },
+        setInterval: () => 0,
+        console,
+      };
+      vm.runInNewContext(script, sandbox);
+      assert.ok(typeof handler === 'function', 'submit handler must register');
+      const ev = () => ({ preventDefault() {}, target: formEl });
+      const first = handler(ev());
+      assert.strictEqual(saveButton.disabled, true, 'Save must disable while the request is in flight');
+      const second = handler(ev());
+      assert.strictEqual(fetches, 1, 'a second submit must fire no request while one is in flight');
+      release();
+      await Promise.all([first, second]);
+      assert.strictEqual(fetches, 1, 'no request may fire after settle');
+      assert.strictEqual(saveButton.disabled, false, 'Save must re-enable after settle (failed requests stay retryable)');
+      assert.ok(!('busy' in formEl.dataset), 'the busy guard must release after settle');
+    } finally {
+      server.child.kill('SIGKILL');
+    }
   });
 
   await test('form rejects non-object JSON with safe 400 responses and normal shutdown', async () => {

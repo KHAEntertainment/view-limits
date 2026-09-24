@@ -451,12 +451,12 @@ function formHtml(ids, nonce) {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
     `<title>view-limits setup</title>` +
     `<style>body{font-family:system-ui,sans-serif;max-width:420px;margin:40px auto;padding:0 16px}label{display:block;margin:14px 0 4px;font-weight:600}input{width:100%;padding:8px;box-sizing:border-box;font-family:monospace}button{margin-top:18px;padding:8px 18px}</style>` +
-    `</head><body><h1>view-limits setup</h1><p>Paste each credential below. Values are sent only to this local server (127.0.0.1) and stored in your local vault — never through the agent's chat.</p>` +
+    `</head><body><h1>view-limits credentials</h1><p>Enter the new key for each route below — existing keys stay valid until you submit; opening this form clears nothing.</p><p>Values are sent only to this local server (127.0.0.1) and stored in your local vault — never through the agent's chat.</p>` +
     `<form id="f">${fields}<button type="submit">Save</button></form>` +
-    `<script>document.getElementById('f').addEventListener('submit',async(e)=>{e.preventDefault();const credentials={};` +
+    `<script>document.getElementById('f').addEventListener('submit',async(e)=>{e.preventDefault();if(e.target.dataset.busy)return;e.target.dataset.busy='1';const save=e.target.querySelector('button');if(save)save.disabled=true;try{const credentials={};` +
     reads +
     `const r=await fetch(location.href,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nonce:${JSON.stringify(nonce)},credentials})});` +
-    `if(r.ok){document.body.innerHTML='<h1>Saved</h1><p>Credentials stored. Closing in <span id="n">5</span>s…</p>';let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);}else{document.body.innerHTML='<h1>Error</h1><p>Something went wrong — rerun <code>vl.js setup</code>.</p>';});</script></body></html>`;
+    `if(r.ok){document.body.innerHTML='<h1>Saved</h1><p>Credentials stored. Closing in <span id="n">5</span>s…</p>';let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);}else{document.body.innerHTML='<h1>Error</h1><p>Something went wrong — rerun setup or update.</p>';}}finally{delete e.target.dataset.busy;if(save)save.disabled=false;}});</script></body></html>`;
 }
 
 function openBrowser(url) {
@@ -492,6 +492,7 @@ function serve(port, nonce, ids) {
   preflightVault();
 
   let abandonTimer = null;
+  let settled = false;
   const server = http.createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET') {
@@ -501,8 +502,25 @@ function serve(port, nonce, ids) {
     }
     if (req.method === 'POST') {
       let body = '';
-      req.on('data', (c) => (body += c));
+      let oversized = false;
+      req.on('data', (c) => {
+        if (oversized) return;
+        body += c;
+        if (body.length > 64 * 1024) {
+          oversized = true;
+          res.writeHead(413);
+          res.end('payload too large');
+          shutdown(0);
+        }
+      });
       req.on('end', () => {
+        if (oversized) return;
+        if (settled) {
+          res.writeHead(409);
+          res.end('already submitted');
+          return;
+        }
+        settled = true;
         let data;
         try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('bad request'); shutdown(0); return; }
         if (!data || typeof data !== 'object' || Array.isArray(data)) {

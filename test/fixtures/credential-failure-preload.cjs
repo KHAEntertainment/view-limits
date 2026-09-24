@@ -16,8 +16,12 @@ fs.renameSync = function renameSync(from, to) {
 };
 
 if (process.env.VL_SPAWN_LOG) {
-  childProcess.spawn = function blockedSpawn() {
-    fs.appendFileSync(process.env.VL_SPAWN_LOG, 'spawned\n');
+  childProcess.spawn = function blockedSpawn(command, args) {
+    fs.appendFileSync(process.env.VL_SPAWN_LOG, JSON.stringify({
+      command: String(command),
+      args: (Array.isArray(args) ? args : []).map(String),
+    }) + '\n');
+    if (process.env.VL_SPAWN_STUB) return { unref() {}, on() {}, kill() {} };
     throw new Error('unexpected spawn');
   };
 }

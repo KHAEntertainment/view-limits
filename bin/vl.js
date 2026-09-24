@@ -501,6 +501,27 @@ function serve(port, nonce, ids) {
   const dataDirPath = dataDir();
   let receiptWritten = false;
 
+  // [#C] Publish a receipt truthfully: receiptWritten is set only when the
+  // write actually persisted. A null return (unwritable dataDir) must not
+  // suppress later signals or let shutdown relabel the outcome.
+  function publishReceipt(opts) {
+    const r = writeReceipt(dataDirPath, opts);
+    if (r !== null) receiptWritten = true;
+    return r;
+  }
+
+  // [#C] Credentials were stored but the outcome receipt could not be
+  // published — write a truthful failure signal so the agent sees a failed
+  // receipt instead of receipt-absent. Never an abandoned receipt: the
+  // form DID submit.
+  function publishStorageNotice(routeIds) {
+    return publishReceipt({
+      outcome: OUTCOME_FAILED,
+      routeIds,
+      detail: 'credentials stored; agent receipt publication failed',
+    });
+  }
+
   const server = http.createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'GET') {
@@ -516,11 +537,14 @@ function serve(port, nonce, ids) {
         body += c;
         if (body.length > 64 * 1024) {
           oversized = true;
+          const firstTerminal = !settled;
           settled = true; // [#14] prevent race with shutdown window
           res.writeHead(413);
           res.end('payload too large');
-          writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'payload too large' });
-          receiptWritten = true;
+          // [#B] The first terminal request owns the receipt — a late
+          // oversized POST gets its 413 but never overwrites or re-shuts.
+          if (!firstTerminal) return;
+          publishReceipt({ outcome: OUTCOME_FAILED, routeIds: ids, detail: 'payload too large' });
           shutdown(0);
         }
       });
@@ -533,16 +557,15 @@ function serve(port, nonce, ids) {
         }
         settled = true;
         let data;
-        try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('bad request'); writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'bad request' }); receiptWritten = true; shutdown(0); return; }
+        try { data = JSON.parse(body); } catch { res.writeHead(400); res.end('bad request'); publishReceipt({ outcome: OUTCOME_FAILED, routeIds: ids, detail: 'bad request' }); shutdown(0); return; }
         if (!data || typeof data !== 'object' || Array.isArray(data)) {
           res.writeHead(400);
           res.end('bad request');
-          writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'bad request' });
-          receiptWritten = true;
+          publishReceipt({ outcome: OUTCOME_FAILED, routeIds: ids, detail: 'bad request' });
           shutdown(0);
           return;
         }
-        if (data.nonce !== nonce) { res.writeHead(403); res.end('bad nonce'); writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'nonce mismatch' }); receiptWritten = true; shutdown(0); return; }
+        if (data.nonce !== nonce) { res.writeHead(403); res.end('bad nonce'); publishReceipt({ outcome: OUTCOME_FAILED, routeIds: ids, detail: 'nonce mismatch' }); shutdown(0); return; }
         const creds = data.credentials && typeof data.credentials === 'object' && !Array.isArray(data.credentials)
           ? data.credentials : {};
         const saved = [];
@@ -561,11 +584,6 @@ function serve(port, nonce, ids) {
           }
         }
         if (failed.length) {
-          res.writeHead(persistenceFailed ? 500 : 400, { 'Content-Type': 'text/html' });
-          const remediation = persistenceFailed
-            ? 'Verify vault access, then rerun setup or update.'
-            : 'Enter a replacement for every route, then rerun setup or update.';
-          res.end(`<h1>Credential storage failed</h1><p>Stored: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Could not store: ${failed.map(escapeHtml).join(', ')}.</p><p>${remediation}</p>`);
           // [#1] writeReceipt must never crash.  Use `ids` as fallback when
           // saved is empty (writeReceipt rejects empty arrays).  [#11] On
           // persistence failure, receipt lists the actually-failed routes.
@@ -576,15 +594,37 @@ function serve(port, nonce, ids) {
           const receiptDetail = persistenceFailed
             ? (saved.length > 0 ? `vault write failure; stored credentials for ${saved.join(', ')}` : 'vault write failure')
             : (saved.length === 0 ? 'no credentials supplied' : `no credentials supplied for ${failed.join(', ')}`);
-          writeReceipt(dataDirPath, { outcome: receiptOutcome, routeIds: receiptRoutes, detail: receiptDetail });
-          receiptWritten = true;
+          // [#C] Publish BEFORE the response so the page can state whether
+          // automatic agent notification landed. Credentials that did store
+          // stay stored — a lost publication gets a truthful failure signal,
+          // and when the dataDir is unwritable the page is the only channel.
+          const published = publishReceipt({ outcome: receiptOutcome, routeIds: receiptRoutes, detail: receiptDetail });
+          let notice = '';
+          if (published === null && saved.length > 0) {
+            notice = publishStorageNotice(saved) !== null
+              ? '<p>The automatic agent notification could not be published on the first attempt — a failure notice was recorded instead.</p>'
+              : '<p><strong>Automatic agent notification failed: the data directory is not writable, so no filesystem-backed signal is possible.</strong></p>';
+          }
+          res.writeHead(persistenceFailed ? 500 : 400, { 'Content-Type': 'text/html' });
+          const remediation = persistenceFailed
+            ? 'Verify vault access, then rerun setup or update.'
+            : 'Enter a replacement for every route, then rerun setup or update.';
+          res.end(`<h1>Credential storage failed</h1><p>Stored: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Could not store: ${failed.map(escapeHtml).join(', ')}.</p><p>${remediation}</p>${notice}`);
           shutdown(1, 200);
           return;
         }
+        // [#C] Publish the receipt BEFORE the success page so the page can
+        // state whether automatic agent notification landed. Credentials are
+        // already in the vault — a lost publication is never vault failure.
+        const published = publishReceipt({ outcome: OUTCOME_SUBMITTED, routeIds: saved });
+        let notice = '';
+        if (published === null) {
+          notice = publishStorageNotice(saved) !== null
+            ? '<p>Credentials were stored, but the automatic agent notification could not be published on the first attempt — a failure notice was recorded instead.</p>'
+            : '<p><strong>Credentials were stored, but automatic agent notification failed: the data directory is not writable, so no filesystem-backed signal is possible. Run /view-limits to verify.</strong></p>';
+        }
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`<h1>Saved ${saved.length} credential${saved.length === 1 ? '' : 's'}</h1><p>Routes: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Closing in <span id="n">5</span>s…</p><script>let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);</script>`);
-        writeReceipt(dataDirPath, { outcome: OUTCOME_SUBMITTED, routeIds: saved });
-        receiptWritten = true;
+        res.end(`<h1>Saved ${saved.length} credential${saved.length === 1 ? '' : 's'}</h1><p>Routes: ${saved.map(escapeHtml).join(', ') || 'none'}.</p>${notice}<p>Closing in <span id="n">5</span>s…</p><script>let n=5;setInterval(()=>{n--;const e=document.getElementById('n');if(e)e.textContent=n;if(n<=0)window.close();},1000);</script>`);
         shutdown(0, 200);
       });
       return;
@@ -599,17 +639,19 @@ function serve(port, nonce, ids) {
 
   function shutdown(code, delay = 0) {
     if (abandonTimer) clearTimeout(abandonTimer);
-    // Write an abandoned receipt only if the form was never submitted.
-    if (!receiptWritten) {
-      writeReceipt(dataDirPath, { outcome: OUTCOME_ABANDONED, routeIds: ids });
+    // [#C] Abandoned means no terminal form event ever happened — `settled`,
+    // not `receiptWritten`, so a failed publication never relabels a real
+    // submission as abandoned.
+    if (!settled) {
+      publishReceipt({ outcome: OUTCOME_ABANDONED, routeIds: ids });
     }
     setTimeout(() => server.close(() => process.exit(code)), delay);
   }
 
   server.listen(port, '127.0.0.1', () => {
     abandonTimer = setTimeout(() => {
-      if (!receiptWritten) {
-        writeReceipt(dataDirPath, { outcome: OUTCOME_ABANDONED, routeIds: ids });
+      if (!settled) {
+        publishReceipt({ outcome: OUTCOME_ABANDONED, routeIds: ids });
       }
       server.close(() => process.exit(0));
     }, 5 * 60 * 1000);

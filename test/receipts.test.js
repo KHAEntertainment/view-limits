@@ -142,6 +142,26 @@ async function waitForServer(port) {
   throw new Error('server did not start');
 }
 
+// Spawned in place of vl.js for publication-failure tests: forces
+// fs.renameSync to throw on the next RECEIPT_FAIL_NEXT publishes to
+// credential-receipt.json — a deterministic fs seam inside the serve
+// process (vault writes target other paths and are unaffected).
+function serveDriverSource() {
+  return `'use strict';
+const fs = require('fs');
+const origRename = fs.renameSync;
+let failNext = Number(process.env.RECEIPT_FAIL_NEXT || '0');
+fs.renameSync = (src, dst) => {
+  if (String(dst).endsWith('${RECEIPT_FILE}') && failNext > 0) {
+    failNext -= 1;
+    throw new Error('forced receipt publish failure');
+  }
+  return origRename(src, dst);
+};
+require(process.env.VL_PATH);
+`;
+}
+
 // The server writes the receipt synchronously right after res.end(), but the
 // client's response-end and the server's fs calls race across processes — so
 // poll for the file instead of assuming it exists when the response lands.
@@ -754,6 +774,31 @@ test('writeReceipt never throws on invalid dataDir', () => {
   }
 });
 
+test('boundary-aware scrub preserves ordinary ids containing sk- mid-word', () => {
+  const dir = scratch();
+  const r = writeReceipt(dir, {
+    outcome: OUTCOME_FAILED,
+    routeIds: ['task-runner', 'risk-eval', 'disk-cache', 'desk-main', 'xsk-embedded', 'prod-ghp_abc'],
+    detail: 'x',
+  });
+  assert.deepStrictEqual(r.routeIds, ['task-runner', 'risk-eval', 'disk-cache', 'desk-main'],
+    'ordinary ids with sk- mid-word must survive; boundary tokens must be scrubbed');
+});
+
+test('boundary-aware detail scrub preserves mid-word prose but redacts boundary tokens', () => {
+  const dir = scratch();
+  const r = writeReceipt(dir, {
+    outcome: OUTCOME_FAILED,
+    routeIds: ['task-runner'],
+    detail: 'task-runner sk-abc.def xsk-embedded prod-ghp_abc disk-cache',
+  });
+  assert.ok(r.detail.includes('task-runner'), 'mid-word sk- prose must survive');
+  assert.ok(r.detail.includes('disk-cache'), 'mid-word sk- prose must survive');
+  for (const frag of ['sk-abc.def', 'xsk-embedded', 'ghp_abc']) {
+    assert.ok(!r.detail.includes(frag), `'${frag}' must be redacted from detail`);
+  }
+});
+
 console.log('\nreceipts — [#22] atomic publish: same-directory temp + rename');
 
 test('writeReceipt publishes via a same-directory temp file + rename', () => {
@@ -1185,6 +1230,124 @@ test('failed receipt with detail appears in session-start output', () => {
   // Exact detail string in session-start output.
   assert.match(msg.systemMessage, /vault write failure/, `session-start must include failure detail: ${r.stdout}`);
   assert.match(msg.systemMessage, /credential storage failed for kimi-code-plan/);
+});
+
+console.log('\nreceipts — [#CR-B/C] late oversized POST + publication-failure semantics');
+
+test('serve: oversized POST after a settled POST returns 413 without replacing the first receipt', async () => {
+  if (!await freePort().then(() => true).catch(() => false)) {
+    console.log('    (loopback unavailable; skipped)');
+    return;
+  }
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'test-route', provider: 'fake', account: 'test', match: { model: 'test-route' } }],
+    vault: { backend: 'file', service: 'test-late-413' },
+  });
+  const port = await freePort();
+  const env = cleanEnv(dir, { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' });
+  const child = require('child_process').spawn(process.execPath, [VL, 'serve', String(port), 'test-nonce', 'test-route'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const exitPromise = exitWithTimeout(child);
+
+  await waitForServer(port);
+  const res1 = await request(port, {
+    method: 'POST',
+    body: JSON.stringify({ nonce: 'test-nonce', credentials: { 'test-route': 'sk-test-receipt-key-abc123' } }),
+  });
+  assert.strictEqual(res1.status, 200);
+  // The receipt is published before the 200 page — readable immediately.
+  const receiptFilePath = path.join(dir, RECEIPT_FILE);
+  const firstBytes = fs.readFileSync(receiptFilePath, 'utf8');
+
+  // Late oversized POST inside the 200ms shutdown window: 413 but no write.
+  const res2 = await request(port, { method: 'POST', body: 'x'.repeat(70 * 1024) });
+  assert.strictEqual(res2.status, 413, `late oversized POST must get 413, got ${res2.status}`);
+
+  await exitPromise;
+  const afterBytes = fs.readFileSync(receiptFilePath, 'utf8');
+  assert.strictEqual(afterBytes, firstBytes,
+    'late oversized POST must not overwrite the first (submitted) receipt');
+  const receipt = JSON.parse(afterBytes);
+  assert.strictEqual(receipt.outcome, OUTCOME_SUBMITTED);
+  assert.deepStrictEqual(receipt.routeIds, ['test-route']);
+});
+
+test('serve: failed receipt publication on success writes a truthful failure receipt, never abandoned', async () => {
+  if (!await freePort().then(() => true).catch(() => false)) {
+    console.log('    (loopback unavailable; skipped)');
+    return;
+  }
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'test-route', provider: 'fake', account: 'test', match: { model: 'test-route' } }],
+    vault: { backend: 'file', service: 'test-publish-fallback' },
+  });
+  const driverPath = path.join(dir, 'serve-driver.js');
+  fs.writeFileSync(driverPath, serveDriverSource());
+  const port = await freePort();
+  const env = cleanEnv(dir, {
+    VIEW_LIMITS_MASTER_KEY: 'receipts-test-key', VL_PATH: VL, RECEIPT_FAIL_NEXT: '1',
+  });
+  const child = require('child_process').spawn(process.execPath, [driverPath, 'serve', String(port), 'test-nonce', 'test-route'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const exitPromise = exitWithTimeout(child);
+
+  await waitForServer(port);
+  const res = await request(port, {
+    method: 'POST',
+    body: JSON.stringify({ nonce: 'test-nonce', credentials: { 'test-route': 'sk-test-receipt-key-abc123' } }),
+  });
+  assert.strictEqual(res.status, 200, `POST failed: ${res.body}`);
+  assert.ok(res.body.includes('failure notice was recorded'),
+    `page must state the fallback notice was published: ${res.body}`);
+
+  await exitPromise;
+  const receipt = readReceipt(dir);
+  assert.ok(receipt, 'fallback failure receipt must exist');
+  assert.strictEqual(receipt.outcome, OUTCOME_FAILED,
+    'a submitted form whose submitted receipt failed to publish must surface a FAILED signal, never abandoned');
+  assert.strictEqual(receipt.detail, 'credentials stored; agent receipt publication failed');
+  assert.deepStrictEqual(receipt.routeIds, ['test-route']);
+});
+
+test('serve: unwritable receipt dataDir warns in the page and never relabels as abandoned', async () => {
+  if (!await freePort().then(() => true).catch(() => false)) {
+    console.log('    (loopback unavailable; skipped)');
+    return;
+  }
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'test-route', provider: 'fake', account: 'test', match: { model: 'test-route' } }],
+    vault: { backend: 'file', service: 'test-publish-dead' },
+  });
+  const driverPath = path.join(dir, 'serve-driver.js');
+  fs.writeFileSync(driverPath, serveDriverSource());
+  const port = await freePort();
+  const env = cleanEnv(dir, {
+    VIEW_LIMITS_MASTER_KEY: 'receipts-test-key', VL_PATH: VL, RECEIPT_FAIL_NEXT: '99',
+  });
+  const child = require('child_process').spawn(process.execPath, [driverPath, 'serve', String(port), 'test-nonce', 'test-route'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const exitPromise = exitWithTimeout(child);
+
+  await waitForServer(port);
+  const res = await request(port, {
+    method: 'POST',
+    body: JSON.stringify({ nonce: 'test-nonce', credentials: { 'test-route': 'sk-test-receipt-key-abc123' } }),
+  });
+  assert.strictEqual(res.status, 200, `POST failed: ${res.body}`);
+  assert.ok(res.body.includes('automatic agent notification failed'),
+    `page must warn that no agent notification is possible: ${res.body}`);
+  assert.ok(res.body.includes('not writable'), `page must explain the unwritable dataDir: ${res.body}`);
+
+  await exitPromise;
+  assert.strictEqual(readReceipt(dir), null, 'no receipt may persist when every publish fails');
+  assert.ok(!fs.existsSync(path.join(dir, RECEIPT_FILE)),
+    'no abandoned receipt may be written over a real submission');
 });
 
 console.log('\nreceipts — truthfulness: absent = unknown with reason');

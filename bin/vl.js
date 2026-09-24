@@ -14,6 +14,9 @@
 //   vl.js config                      show effective config (secrets masked).
 //   vl.js snapshot --json [--refresh] normalized runtime snapshot; --refresh
 //                                     adds bounded Traycer CLI live reads.
+//   vl.js recommend --json [--task J]  advisory harness/model/route/profile
+//           [--policy J]               recommendation over configured routes;
+//                                     deterministic + zero-I/O (Jev dormant).
 
 const fs = require('fs');
 const path = require('path');
@@ -23,7 +26,7 @@ const os = require('os');
 const readline = require('readline');
 const { spawn } = require('child_process');
 
-const { loadConfig, dataDir, expandHome } = require('../lib/config');
+const { loadConfig, dataDir, expandHome, deepMerge } = require('../lib/config');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
@@ -33,6 +36,8 @@ const { decide, summarize } = require('../lib/gate');
 const vault = require('../lib/vault');
 const { getAdapter, ADAPTERS } = require('../lib/adapters');
 const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
+const { recommend } = require('../lib/recommend');
+const { makeJevTransport } = require('../lib/jev-openrouter');
 const { traycerEnvCallerContext } = require('../lib/traycer-adapter');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
@@ -717,6 +722,80 @@ async function snapshot(args) {
   process.stdout.write(JSON.stringify(snap, null, 2) + '\n');
 }
 
+// ---- recommend ---------------------------------------------------------------
+//
+// Advisory recommendation over the cache-only snapshot. One configured route
+// becomes one candidate; model/harness/profile/route facts come straight from
+// the snapshot (configured bindings stay configured, observed state stays
+// observed, absent stays unknown — nothing is substituted). The Jev path is
+// present but dormant: the readiness gate evaluates CLOSED on current
+// evidence, so no Jev transport is ever invoked on this path.
+
+async function recommendCmd(args) {
+  const usage = 'usage: vl.js recommend --json [--task <json>] [--policy <json>]';
+  let taskInput = {};
+  let policyInput = {};
+  let sawJson = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--json') { sawJson = true; continue; }
+    if (a === '--task' || a === '--policy') {
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith('--')) err(usage);
+      let parsed;
+      try {
+        parsed = JSON.parse(v);
+      } catch {
+        err(`invalid JSON for ${a}`);
+      }
+      // A non-object document is not a task/policy — merging it would discard
+      // the strict defaults wholesale and silently disable requirement
+      // checks. Reject it rather than fail open.
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        err(`${a} must be a JSON object`);
+      }
+      if (a === '--task') taskInput = parsed;
+      else policyInput = parsed;
+      i += 1;
+      continue;
+    }
+    err(usage);
+  }
+  if (!sawJson) err(usage);
+
+  const cfg = loadConfig();
+  const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
+  const candidates = (Array.isArray(snap.routes) ? snap.routes : [])
+    .filter((r) => r && r.configured)
+    .map((row) => ({
+      id: row.id,
+      model: row.modelBinding,
+      harness: row.harnessBinding,
+      profile: row.account,
+      route: {
+        id: row.id,
+        state: row.resource && row.resource.state,
+        freshUntil: row.resource && row.resource.freshUntil,
+      },
+    }));
+  const policy = deepMerge(
+    { require: { route: true, usableRoute: true } },
+    policyInput,
+  );
+  const result = await recommend({
+    task: taskInput,
+    candidates,
+    policy,
+    caller: snap.caller,
+    // The OpenRouter transport lives in lib/jev-openrouter.js — requireable,
+    // so the wire shape / HTTPS-only / deadline behavior is unit-testable.
+    // It still only ever runs behind an OPEN readiness gate.
+    jev: { config: (cfg && cfg.jev) || {}, io: makeJevTransport(cfg) },
+    now: Date.now(),
+  });
+  process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+}
+
 // ---- config -----------------------------------------------------------------
 
 function config() {
@@ -775,7 +854,8 @@ const hasFlag = (n) => args.includes(n);
     case 'remove': return remove(args[0]);
     case 'config': return config();
     case 'snapshot': return snapshot(args);
+    case 'recommend': return recommendCmd(args);
     default:
-      return err('usage: vl.js gate|refresh|report|check <routeId>|setup [<routeId>]|update [<routeId>]|remove <routeId>|config|snapshot --json [--refresh]|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js gate|refresh|report|check <routeId>|setup [<routeId>]|update [<routeId>]|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
   }
 })();

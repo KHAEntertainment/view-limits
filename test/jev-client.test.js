@@ -190,6 +190,28 @@ test('model present with structured-output support → verified', async () => {
   }
 });
 
+test('F6: a catalog timeout reports jev-catalog-timeout, distinct from unreachable; TimeoutError classifies as timeout', async () => {
+  const timedOut = () => { const e = new Error('deadline'); e.timedOut = true; return e; };
+  let r = await verifyModelSupport({
+    config: { model: 'm', catalogUrl: 'u' },
+    io: { fetchCatalog: async () => { throw timedOut(); } },
+  });
+  assert.strictEqual(r.status, 'unverified');
+  assert.strictEqual(r.reason, 'jev-catalog-timeout');
+  assert.ok(JEV_REASONS.includes('jev-catalog-timeout'));
+  // AbortSignal.timeout() throws name:'TimeoutError' — same classification.
+  const abortErr = new Error('The operation timed out');
+  abortErr.name = 'TimeoutError';
+  r = await verifyModelSupport({
+    config: { model: 'm', catalogUrl: 'u' },
+    io: { fetchCatalog: async () => { throw abortErr; } },
+  });
+  assert.strictEqual(r.reason, 'jev-catalog-timeout');
+  // And the classifier request maps a TimeoutError throw to jev-timeout.
+  const r2 = await classify({ task: {}, config: CONFIG, io: { request: async () => { throw abortErr; } } });
+  assert.strictEqual(r2.reason, 'jev-timeout');
+});
+
 Promise.all(pendingTests).then(() => {
   if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
   console.log('\nall jev-client tests passed');

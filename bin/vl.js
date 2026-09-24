@@ -37,6 +37,7 @@ const vault = require('../lib/vault');
 const { getAdapter, ADAPTERS } = require('../lib/adapters');
 const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
 const { recommend } = require('../lib/recommend');
+const { makeJevTransport } = require('../lib/jev-openrouter');
 const { traycerEnvCallerContext } = require('../lib/traycer-adapter');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
@@ -741,13 +742,20 @@ async function recommendCmd(args) {
     if (a === '--task' || a === '--policy') {
       const v = args[i + 1];
       if (v === undefined || v.startsWith('--')) err(usage);
+      let parsed;
       try {
-        const parsed = JSON.parse(v);
-        if (a === '--task') taskInput = parsed;
-        else policyInput = parsed;
+        parsed = JSON.parse(v);
       } catch {
         err(`invalid JSON for ${a}`);
       }
+      // A non-object document is not a task/policy — merging it would discard
+      // the strict defaults wholesale and silently disable requirement
+      // checks. Reject it rather than fail open.
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        err(`${a} must be a JSON object`);
+      }
+      if (a === '--task') taskInput = parsed;
+      else policyInput = parsed;
       i += 1;
       continue;
     }
@@ -779,61 +787,13 @@ async function recommendCmd(args) {
     candidates,
     policy,
     caller: snap.caller,
-    jev: { config: (cfg && cfg.jev) || {}, io: jevIo(cfg) },
+    // The OpenRouter transport lives in lib/jev-openrouter.js — requireable,
+    // so the wire shape / HTTPS-only / deadline behavior is unit-testable.
+    // It still only ever runs behind an OPEN readiness gate.
+    jev: { config: (cfg && cfg.jev) || {}, io: makeJevTransport(cfg) },
     now: Date.now(),
   });
   process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-}
-
-// The real Jev transport — wired but dormant. It only exists when `jev` is
-// explicitly configured (model + baseUrl); even then it is invoked solely
-// when the readiness gate evaluates OPEN. All classifier traffic is an
-// OpenRouter-compatible chat-completions request; the catalog read is the
-// public models endpoint used for model/structured-output verification.
-function jevIo(cfg) {
-  const j = cfg && typeof cfg === 'object' && cfg.jev && typeof cfg.jev === 'object' ? cfg.jev : null;
-  if (!j || typeof j.baseUrl !== 'string' || !j.baseUrl ||
-      typeof j.model !== 'string' || !j.model) return {};
-  return {
-    request: async (requestDoc, { timeoutMs, apiKey, baseUrl }) => {
-      const key = apiKey || (typeof j.apiKeyEnv === 'string' && j.apiKeyEnv
-        ? process.env[j.apiKeyEnv] : undefined);
-      const res = await fetch(`${String(baseUrl).replace(/\/+$/, '')}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(key ? { authorization: `Bearer ${key}` } : {}),
-        },
-        body: JSON.stringify({
-          model: requestDoc.model,
-          messages: [{
-            role: 'user',
-            content: JSON.stringify({
-              instructions: requestDoc.instructions,
-              criteria: requestDoc.criteria,
-              state: requestDoc.state,
-            }),
-          }],
-          response_format: requestDoc.responseFormat,
-        }),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      const text = await res.text();
-      // Chat-completions wraps the classifier document in message content;
-      // anything else is passed through and fails schema validation honestly.
-      try {
-        const parsed = JSON.parse(text);
-        const content = parsed && parsed.choices && parsed.choices[0] &&
-          parsed.choices[0].message && parsed.choices[0].message.content;
-        if (typeof content === 'string') return { statusCode: res.status, body: content };
-      } catch { /* fall through to raw body */ }
-      return { statusCode: res.status, body: text };
-    },
-    fetchCatalog: async (url) => {
-      const res = await fetch(url);
-      return res.json();
-    },
-  };
 }
 
 // ---- config -----------------------------------------------------------------

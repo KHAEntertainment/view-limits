@@ -10,6 +10,8 @@
 // advisory boundary, AC7 registry decoupling, determinism.
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 
 const { recommend } = require('../lib/recommend');
 const { evaluate } = require('../lib/eligibility');
@@ -535,6 +537,168 @@ test('recommend with no candidates → recommendation null, empty buckets, still
   assert.strictEqual(r.jev.status, 'dormant');
   assert.strictEqual(r.schemaVersion, 1);
   assert.strictEqual(r.advisoryOnly, true);
+});
+
+console.log('\nrecommend — PR-17 fix-batch regressions (findings 1–3, 7, 8)');
+
+test('F1: a missing readiness item is blocking — an incomplete checklist can never open the gate', () => {
+  // (a) empty evidence → all eleven required ids synthesized blocking.
+  const empty = evaluateReadiness({ items: [], modelVerified: true });
+  assert.strictEqual(empty.open, false, 'empty items must not open');
+  assert.strictEqual(empty.notPass.length, 11);
+  assert.ok(empty.notPass.every((i) => i.reason === 'readiness-item-absent'));
+  // (b) a 6-item subset (items 5–10, all PASS) still closes.
+  const subset = evaluateReadiness({
+    items: ALL_PASS.filter((i) => i.id >= 5 && i.id <= 10), modelVerified: true,
+  });
+  assert.strictEqual(subset.open, false);
+  assert.deepStrictEqual(subset.notPass.map((i) => i.id), [1, 2, 3, 4, 11]);
+  // (c) one item dropped from a full PASS set still closes, as blocking.
+  const oneDropped = evaluateReadiness({
+    items: ALL_PASS.filter((i) => i.id !== 7), modelVerified: true,
+  });
+  assert.strictEqual(oneDropped.open, false);
+  assert.deepStrictEqual(oneDropped.notPass.map((i) => i.id), [7]);
+  assert.strictEqual(oneDropped.notPass[0].verdict, 'blocking');
+  // (d) the only opening path: all eleven PASS + model verified.
+  assert.strictEqual(evaluateReadiness({ items: ALL_PASS, modelVerified: true }).open, true);
+});
+
+test('F1: an empty injected evidence set cannot trigger model-verification I/O', async () => {
+  // Pre-fix, items:[] produced notPass.length === 0 and let recommend()
+  // attempt catalog verification on an unproven gate.
+  let catalogCalls = 0;
+  const t = recordingTransport({ statusCode: 200, body: JSON.stringify(JEV_OK) });
+  const r = await recommend({
+    task: {}, candidates: baseCandidates(), policy: {}, caller: CALLER,
+    readiness: [],
+    jev: {
+      config: { model: 'm', catalogUrl: 'u' },
+      io: {
+        request: t.fn,
+        fetchCatalog: async () => { catalogCalls += 1; return { data: [{ id: 'm', structured_outputs: true }] }; },
+      },
+    },
+    now: NOW,
+  });
+  assert.strictEqual(catalogCalls, 0, 'catalog verification ran on an unproven gate');
+  assert.strictEqual(r.readiness.open, false);
+  assert.strictEqual(r.jev.status, 'dormant');
+  assert.strictEqual(t.calls.length, 0);
+});
+
+test('F2: a non-object policy fails closed — strict route requirements stay on', async () => {
+  // A route whose state cannot be proven usable must be UNRESOLVED (never
+  // eligible) even when the policy argument is malformed — the strict
+  // default ({require:{route:true,usableRoute:true}}) applies, not {}.
+  const cands = [{
+    id: 'unknown-route', model: 'kimi', harness: 'claude', profile: 'p',
+    route: { id: 'unknown-route', state: 'unknown', freshUntil: FRESH },
+  }];
+  for (const bad of [null, 42, [], 'x', undefined]) {
+    const r = await recommend({
+      task: { kind: 'code' }, candidates: cands, policy: bad, caller: CALLER, now: NOW,
+    });
+    assert.strictEqual(r.candidates.scored.length, 0,
+      `policy=${String(bad)} must not produce a scored candidate`);
+    const und = r.candidates.undecided.find((c) => c.candidateId === 'unknown-route');
+    assert.ok(und, `policy=${String(bad)}: unknown-state route must land in undecided`);
+    assert.ok(und.reasons.some((x) => x.code === 'route-state-unproven'));
+    assert.strictEqual(r.recommendation, null);
+  }
+  // An explicit {} remains a deliberate "no requirements" caller choice.
+  const permissive = await recommend({
+    task: { kind: 'code' }, candidates: cands, policy: {}, caller: CALLER, now: NOW,
+  });
+  assert.strictEqual(permissive.candidates.scored.length, 1);
+});
+
+test('F3: duplicate candidate ids are rejected outright — parameters can never be attributed to a same-id sibling', async () => {
+  // Chosen semantics: EVERY candidate sharing an id is rejected
+  // 'candidate-id-duplicate' without eligibility evaluation — the id can
+  // never name two candidates, so attribution cannot cross objects.
+  const a = {
+    id: 'x', model: 'kimi', harness: 'claude', profile: 'A-profile',
+    route: { id: 'x', state: 'exhausted', freshUntil: FRESH },
+  };
+  const b = {
+    id: 'x', model: 'deepseek', harness: 'codex', profile: 'B-profile',
+    route: { id: 'x', state: 'healthy', freshUntil: FRESH },
+  };
+  const r = await recommend({
+    task: { kind: 'code' }, candidates: [a, b], policy: {}, caller: CALLER, now: NOW,
+  });
+  const recs = r.candidates.rejected.filter((c) => c.candidateId === 'x');
+  assert.strictEqual(recs.length, 2, 'both colliding candidates must be rejected');
+  assert.ok(recs.every((c) => c.reasons.some((x) => x.code === 'candidate-id-duplicate')));
+  assert.strictEqual(r.candidates.scored.length, 0);
+  assert.strictEqual(r.recommendation, null);
+  // An explicit id colliding with a generated fallback id is also a dup.
+  const r2 = await recommend({
+    task: { kind: 'code' },
+    candidates: [{ ...baseCandidates()[0], id: 'candidate-1' }, { ...baseCandidates()[1], id: undefined }],
+    policy: {}, caller: CALLER, now: NOW,
+  });
+  assert.strictEqual(r2.candidates.scored.length, 0);
+  assert.strictEqual(r2.candidates.rejected.length, 2);
+  // A Jev suggestion of the duplicated id is rejected with the same code.
+  const t = recordingTransport({
+    statusCode: 200, body: JSON.stringify({ ...JEV_OK, confidence: 1, suggestedCandidateId: 'x' }),
+  });
+  const r3 = await recommend({
+    task: { kind: 'code' }, candidates: [a, b], policy: {}, caller: CALLER,
+    readiness: ALL_PASS, modelVerification: true, jev: OPEN_JEV(t.fn), now: NOW,
+  });
+  assert.strictEqual(r3.jev.suggestion.disposition, 'rejected');
+  assert.strictEqual(r3.jev.suggestion.code, 'jev-suggestion-ineligible');
+  assert.ok(r3.jev.suggestion.reasons.some((x) => x.code === 'candidate-id-duplicate'));
+});
+
+test('F3: unique ids keep exact attribution — recommendation parameters come from the scored object', async () => {
+  const r = await recommend({
+    task: { kind: 'code' }, candidates: baseCandidates(), policy: {}, caller: CALLER, now: NOW,
+  });
+  assert.strictEqual(r.recommendation.candidateId, 'kimi-code-plan');
+  assert.strictEqual(r.recommendation.parameters.model.value, 'kimi');
+  assert.strictEqual(r.recommendation.parameters.profile.value, 'code-plan');
+  assert.strictEqual(r.recommendation.parameters.route.state.value, 'healthy');
+});
+
+test('F7: prototype-chain tier values stay unresolved — no NaN can enter a score', async () => {
+  const cands = [
+    { ...baseCandidates()[0], costTier: 'constructor', speedTier: 'fast' },
+    { ...baseCandidates()[1], costTier: 'low', speedTier: 'toString' },
+  ];
+  const r = await recommend({
+    task: { kind: 'code' }, candidates: cands,
+    policy: { preferences: { cost: 'minimize', speed: 'fast' } },
+    caller: CALLER, now: NOW,
+  });
+  const byCost = r.candidates.scored.find((c) => c.candidateId === 'kimi-code-plan');
+  const bySpeed = r.candidates.scored.find((c) => c.candidateId === 'deepseek-direct');
+  assert.strictEqual(byCost.dimensions.costSpeed.status, 'unresolved');
+  assert.strictEqual(byCost.dimensions.costSpeed.contribution, 0);
+  assert.ok(byCost.unresolved.some((u) => u.code === 'cost-signal-unproven'));
+  assert.strictEqual(bySpeed.dimensions.costSpeed.status, 'unresolved');
+  assert.strictEqual(bySpeed.dimensions.costSpeed.contribution, 0);
+  assert.ok(bySpeed.unresolved.some((u) => u.code === 'speed-signal-unproven'));
+  // The ranking stays total and finite — walk every score in the output.
+  for (const c of r.candidates.scored) {
+    assert.ok(Number.isFinite(c.score), `NaN score on ${c.candidateId}`);
+    for (const d of Object.values(c.dimensions)) {
+      assert.ok(Number.isFinite(d.contribution), `NaN contribution on ${c.candidateId}`);
+    }
+  }
+  assert.ok(Number.isFinite(r.recommendation.score));
+});
+
+test('F8: every readiness evidence ref resolves to a real row in docs/jev-readiness.md', () => {
+  const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'jev-readiness.md'), 'utf8');
+  for (const item of READINESS_ITEMS) {
+    assert.ok(item.evidence.startsWith('docs/jev-readiness.md'), `${item.id}: ref drifted off the doc`);
+    assert.ok(item.evidence.includes(`item ${item.id}`), `${item.id}: locator must name the row`);
+    assert.ok(new RegExp(`\\|\\s*${item.id}\\s*\\|`).test(doc), `gate table row ${item.id} missing from the doc`);
+  }
 });
 
 Promise.all(pendingTests).then(() => {

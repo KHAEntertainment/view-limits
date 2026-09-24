@@ -13,9 +13,10 @@ see the PR body for the verbatim result).
 
 | Module | Role |
 |--------|------|
-| `lib/jev-readiness.js` | The eleven-item readiness gate as data + a pure evaluator. Fail-closed: any non-PASS item (or unrecognized verdict) keeps the gate closed. |
+| `lib/jev-readiness.js` | The eleven-item readiness gate as data + a pure evaluator. Fail-closed both directions: any non-PASS item (or unrecognized verdict) keeps the gate closed, and any required item id **absent** from an injected evidence set is synthesized `{verdict:'blocking', reason:'readiness-item-absent'}` — a torn-out checklist can never read as complete. |
 | `lib/task-profile.js` | Typed, model-agnostic task profile: task kind, exploration, specification, reasoning, risk, autonomy, verification, execution style. Fact-shaped dimensions; Jev response schema validation lives here so prompt and validator share one vocabulary. |
 | `lib/jev-client.js` | The complete Jev path: deterministic classifier request, model/structured-output catalog verification, response validation, confidence floor. All transports injected; no I/O of its own; **no fabricated default model or endpoint**. |
+| `lib/jev-openrouter.js` | The OpenRouter wire adapter: translates the transport-neutral request document into a chat-completions call (`response_format:{type:'json_schema',json_schema:{name,schema}}`). HTTPS-only construction (a non-https baseUrl yields no transport), `redirect:'error'` on every fetch, and a deadline on the catalog read including the body. |
 | `lib/score-candidates.js` | Deterministic six-dimension scoring over eligible candidates. Pure (no clock — `now` is a parameter, no I/O, no randomness). Unresolved dimensions contribute zero weight and stay visible. |
 | `lib/recommend.js` | The advisory API: gate → profile → eligibility → scoring → ranked result with rationale and alternatives. |
 
@@ -57,6 +58,11 @@ vl recommend --json [--task '<json>'] [--policy '<json>']
 
 One configured route becomes one candidate (facts carried verbatim from the
 cache-only snapshot). Default policy requires a proven, usable route
-identity; `--policy` deep-merges over it. Output is a single JSON document.
-The path is zero-I/O: proven under `test/guard.cjs` in
+identity; `--policy` deep-merges over it — a non-object `--task`/`--policy`
+document is rejected outright, and at the library level a non-object policy
+falls back to the same strict default rather than dropping requirement
+checks. Candidate ids must be unique: every candidate sharing an id is
+rejected `candidate-id-duplicate` before eligibility, so recommendation
+parameters always come from the exact object that was scored. Output is a
+single JSON document. The path is zero-I/O: proven under `test/guard.cjs` in
 `test/recommend-cli.test.js`.

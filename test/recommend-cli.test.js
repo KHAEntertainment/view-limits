@@ -161,6 +161,44 @@ test('unknown flag / bad --task JSON → exit 1, usage or error on stderr', () =
   assert.match(r.stderr, /invalid JSON/);
 });
 
+test('F2: non-object --task/--policy JSON → exit 1 and NO recommendation document', () => {
+  const dir = scratch();
+  seedStatus(dir);
+  for (const [flag, value] of [
+    ['--policy', 'null'], ['--policy', '[]'], ['--policy', '42'],
+    ['--task', 'null'], ['--task', '[]'], ['--task', '42'],
+  ]) {
+    const r = runRecommend(['--json', flag, value], dir);
+    assert.strictEqual(r.status, 1, `${flag} ${value} must exit non-zero (got ${r.status})`);
+    assert.match(r.stderr, /JSON object/, `${flag} ${value}: stderr=${r.stderr}`);
+    assert.strictEqual(r.stdout.trim(), '', 'a malformed doc must never produce a recommendation');
+  }
+});
+
+test('F2: explicit object --policy still merges ({} = deliberate no-requirements)', () => {
+  const dir = scratch();
+  seedStatus(dir);
+  const r = runRecommend(['--json', '--policy', '{}'], dir);
+  assert.strictEqual(r.status, 0, `exit ${r.status}; stderr=${r.stderr}`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.recommendation.candidateId, 'kimi-code-plan');
+  // And the strict default (no --policy) keeps unknown-state routes
+  // undecided, not eligible — routes with no cached observation are
+  // 'route-state-unproven', never scored.
+  const r2 = runRecommend(['--json'], dir);
+  assert.strictEqual(r2.status, 0);
+  const doc2 = JSON.parse(r2.stdout);
+  assert.ok(
+    doc2.candidates.undecided.some(
+      (c) => c.reasons && c.reasons.some((x) => x.code === 'route-state-unproven'),
+    ),
+    'unobserved configured routes must land in undecided under the strict default',
+  );
+  assert.ok(doc2.candidates.scored.every(
+    (c) => c.candidateId === 'kimi-code-plan',
+  ), 'only the proven-healthy route may be scored');
+});
+
 test('dispatch case present; usage line mentions recommend', () => {
   const dir = scratch();
   const bad = spawnSync(process.execPath, [VL, 'no-such-command'], {

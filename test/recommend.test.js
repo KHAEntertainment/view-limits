@@ -377,6 +377,26 @@ test('cost/speed preferences: unproven signal → unresolved; proven tiers rank 
   assert.ok(mini.unresolved.some((u) => u.code === 'cost-signal-unproven'));
 });
 
+test('cost+speed both unproven → both reasons accumulate (no early return masking)', async () => {
+  // [#3] Pin the both-reasons fix: when cost AND speed are both requested
+  // but unproven, BOTH reason codes must appear — not just the first.
+  const policy = { require: { route: true, usableRoute: true }, preferences: { cost: 'minimize', speed: 'maximize' } };
+  const cands = [
+    { id: 'no-cost-speed', model: 'claude-sonnet-4', harness: 'claude', profile: 'p',
+      route: { id: 'r1', state: 'healthy', freshUntil: FRESH },
+      // No costTier or speedTier → both unproven
+    },
+  ];
+  const r = await recommend({ task: { kind: 'code' }, candidates: cands, policy, caller: CALLER, now: NOW });
+  const c = r.candidates.scored.find((x) => x.candidateId === 'no-cost-speed');
+  assert.strictEqual(c.dimensions.costSpeed.status, 'unresolved');
+  assert.strictEqual(c.dimensions.costSpeed.contribution, 0);
+  const costReason = c.dimensions.costSpeed.reasons.find((x) => x.code === 'cost-signal-unproven');
+  const speedReason = c.dimensions.costSpeed.reasons.find((x) => x.code === 'speed-signal-unproven');
+  assert.ok(costReason, 'cost-signal-unproven reason must be present');
+  assert.ok(speedReason, 'speed-signal-unproven reason must be present');
+});
+
 test('review independence: required + proven-different family scores; unproven family unresolved', async () => {
   const policy = { review: { requireDifferentFamily: true, subject: { model: 'kimi-k2' } } };
   // claude-model candidate: anthropic vs moonshot → different

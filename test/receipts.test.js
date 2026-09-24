@@ -128,18 +128,6 @@ async function waitForServer(port) {
   throw new Error('server did not start');
 }
 
-function startServer(dir, port, nonce, routeIds) {
-  const env = cleanEnv(dir, { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' });
-  const child = require('child_process').spawn(process.execPath, [VL, 'serve', String(port), nonce, ...routeIds], {
-    env, stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', (chunk) => (stdout += chunk));
-  child.stderr.on('data', (chunk) => (stderr += chunk));
-  return { child, output: () => stdout + stderr };
-}
-
 const SECRET_SENTINELS = ['sk-test-receipt-key-abc123', 'tok-should-not-appear', 'REPLACEMENT_SECRET'];
 
 function assertNoSecrets(text) {
@@ -207,17 +195,21 @@ test('writeReceipt with OUTCOME_ABANDONED and OUTCOME_FAILED', () => {
   assert.strictEqual(r.detail, 'vault write failure');
 });
 
-test('invalid outcome throws', () => {
+test('invalid outcome returns null (never throws)', () => {
   const dir = scratch();
-  assert.throws(() => writeReceipt(dir, { outcome: 'invalid', routeIds: ['r'] }));
-  assert.throws(() => writeReceipt(dir, { outcome: null, routeIds: ['r'] }));
+  assert.strictEqual(writeReceipt(dir, { outcome: 'invalid', routeIds: ['r'] }), null);
+  assert.strictEqual(writeReceipt(dir, { outcome: null, routeIds: ['r'] }), null);
 });
 
-test('invalid routeIds throws', () => {
+test('invalid routeIds returns null (never throws)', () => {
   const dir = scratch();
-  assert.throws(() => writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: [] }));
-  assert.throws(() => writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: [''] }));
-  assert.throws(() => writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: [123] }));
+  // [#13] Empty array now produces a receipt with ['redacted'] placeholder.
+  const emptyResult = writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: [] });
+  assert.ok(emptyResult, 'empty routeIds → receipt with redacted placeholder');
+  assert.deepStrictEqual(emptyResult.routeIds, ['redacted']);
+  // Truly invalid inputs return null.
+  assert.strictEqual(writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: [''] }), null);
+  assert.strictEqual(writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: [123] }), null);
 });
 
 console.log('\nreceipts — formatReceipt and receiptFact');
@@ -483,6 +475,134 @@ test('session-start surfaces receipt and acks it (second run has no receipt)', (
   assert.strictEqual(r2.stdout, '', `second session-start should produce no output: ${r2.stdout}`);
 });
 
+console.log('\nreceipts — [#1] crash regression: empty/blank credentials must not crash');
+
+test('serve: empty credentials object → clean exit, failed receipt, zero vault writes', async () => {
+  if (!await freePort().then(() => true).catch(() => false)) {
+    console.log('    (loopback unavailable; skipped)');
+    return;
+  }
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'test-route', provider: 'fake', account: 'test', match: { model: 'test-route' } }],
+    vault: { backend: 'file', service: 'test-empty-creds' },
+  });
+  const port = await freePort();
+  const env = cleanEnv(dir, { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' });
+  let stderrOut = '';
+  const child = require('child_process').spawn(process.execPath, [VL, 'serve', String(port), 'test-nonce', 'test-route'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stderr.on('data', (chunk) => { stderrOut += chunk; });
+
+  await waitForServer(port);
+  const res = await request(port, {
+    method: 'POST',
+    body: JSON.stringify({ nonce: 'test-nonce', credentials: {} }),
+  });
+  assert.strictEqual(res.status, 400, 'empty credentials → 400');
+  assertNoSecrets(res.body);
+
+  const code = await new Promise((resolve) => child.on('exit', resolve));
+  assert.strictEqual(code, 1, 'must exit 1 (clean shutdown, no crash)');
+  assert.ok(!stderrOut.includes('TypeError'), `must not crash with TypeError: ${stderrOut}`);
+  assert.ok(!stderrOut.includes('at '), `must not produce a stack trace: ${stderrOut}`);
+
+  const receipt = readReceipt(dir);
+  assert.ok(receipt, 'failed receipt must be written');
+  assert.strictEqual(receipt.outcome, OUTCOME_FAILED);
+  assert.deepStrictEqual(receipt.routeIds, ['test-route']);
+  assertNoSecrets(JSON.stringify(receipt));
+});
+
+test('serve: whitespace-only credential → clean exit, failed receipt, zero vault writes', async () => {
+  if (!await freePort().then(() => true).catch(() => false)) {
+    console.log('    (loopback unavailable; skipped)');
+    return;
+  }
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'test-route', provider: 'fake', account: 'test', match: { model: 'test-route' } }],
+    vault: { backend: 'file', service: 'test-whitespace' },
+  });
+  const port = await freePort();
+  const env = cleanEnv(dir, { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' });
+  let stderrOut = '';
+  const child = require('child_process').spawn(process.execPath, [VL, 'serve', String(port), 'test-nonce', 'test-route'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stderr.on('data', (chunk) => { stderrOut += chunk; });
+
+  await waitForServer(port);
+  const res = await request(port, {
+    method: 'POST',
+    body: JSON.stringify({ nonce: 'test-nonce', credentials: { 'test-route': '   ' } }),
+  });
+  assert.strictEqual(res.status, 400, 'whitespace-only → 400');
+
+  const code = await new Promise((resolve) => child.on('exit', resolve));
+  assert.strictEqual(code, 1, 'must exit 1 (clean shutdown, no crash)');
+  assert.ok(!stderrOut.includes('TypeError'), `must not crash: ${stderrOut}`);
+
+  const receipt = readReceipt(dir);
+  assert.ok(receipt, 'failed receipt must be written');
+  assert.strictEqual(receipt.outcome, OUTCOME_FAILED);
+  assert.strictEqual(receipt.detail, 'no credentials supplied');
+  assert.deepStrictEqual(receipt.routeIds, ['test-route']);
+});
+
+test('serve: missing credentials key → clean exit, failed receipt', async () => {
+  if (!await freePort().then(() => true).catch(() => false)) {
+    console.log('    (loopback unavailable; skipped)');
+    return;
+  }
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'test-route', provider: 'fake', account: 'test', match: { model: 'test-route' } }],
+    vault: { backend: 'file', service: 'test-missing-key' },
+  });
+  const port = await freePort();
+  const env = cleanEnv(dir, { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' });
+  let stderrOut = '';
+  const child = require('child_process').spawn(process.execPath, [VL, 'serve', String(port), 'test-nonce', 'test-route'], {
+    env, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stderr.on('data', (chunk) => { stderrOut += chunk; });
+
+  await waitForServer(port);
+  const res = await request(port, {
+    method: 'POST',
+    body: JSON.stringify({ nonce: 'test-nonce' }),
+  });
+  assert.strictEqual(res.status, 400, 'missing credentials → 400');
+
+  const code = await new Promise((resolve) => child.on('exit', resolve));
+  assert.strictEqual(code, 1, 'must exit 1');
+  assert.ok(!stderrOut.includes('TypeError'), `must not crash: ${stderrOut}`);
+
+  const receipt = readReceipt(dir);
+  assert.ok(receipt, 'failed receipt must be written');
+  assert.strictEqual(receipt.outcome, OUTCOME_FAILED);
+  assert.strictEqual(receipt.detail, 'no credentials supplied');
+  assert.deepStrictEqual(receipt.routeIds, ['test-route']);
+});
+
+test('serve: scrub + redact: ghp_/xoxb-/Bearer tokens → absent from receipt', () => {
+  const dir = scratch();
+  const receipt = writeReceipt(dir, {
+    outcome: OUTCOME_FAILED,
+    routeIds: ['ghp_abc123xyz', 'xoxb-secret-token', 'safe-route', 'AKIA1234567890ABCDEF'],
+    detail: 'stored Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig and ghp_abc123',
+  });
+  assert.ok(receipt, 'receipt must be written');
+  assertNoSecrets(JSON.stringify(receipt));
+  assert.ok(receipt.routeIds.includes('safe-route'), 'safe route preserved');
+  assert.ok(!receipt.routeIds.some((id) => id.startsWith('ghp_') || id.startsWith('xoxb') || id.startsWith('AKIA')),
+    'token-shaped ids must be scrubbed');
+  assert.ok(receipt.detail.includes('[REDACTED]'), 'Bearer token must be redacted');
+  assert.ok(!receipt.detail.includes('eyJhbGciOiJIUzI1NiJ9'), 'JWT must be redacted');
+});
+
 console.log('\nreceipts — integration: server writes receipt on submit');
 
 test('serve: successful POST writes submitted receipt', async () => {
@@ -495,16 +615,6 @@ test('serve: successful POST writes submitted receipt', async () => {
     routes: [{ id: 'test-route', provider: 'fake', account: 'test', match: { model: 'test-route' } }],
     vault: { backend: 'file', service: 'test-integration' },
   });
-  const prevData = process.env.CLAUDE_PLUGIN_DATA;
-  const prevKey = process.env.VIEW_LIMITS_MASTER_KEY;
-  process.env.CLAUDE_PLUGIN_DATA = dir;
-  process.env.VIEW_LIMITS_MASTER_KEY = 'receipts-test-key';
-  try {
-    require('../lib/vault');
-  } finally {
-    if (prevData === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = prevData;
-    if (prevKey === undefined) delete process.env.VIEW_LIMITS_MASTER_KEY; else process.env.VIEW_LIMITS_MASTER_KEY = prevKey;
-  }
 
   const port = await freePort();
   const env = cleanEnv(dir, { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' });
@@ -602,7 +712,7 @@ test('serve: 413 oversized body writes a failed receipt', async () => {
   assert.deepStrictEqual(receipt.routeIds, ['test-route']);
 });
 
-test('serve: 409 double-submit writes exactly ONE receipt (first outcome preserved)', async () => {
+test('serve: 409 double-submit writes exactly ONE receipt (first outcome preserved, immutable)', async () => {
   if (!await freePort().then(() => true).catch(() => false)) {
     console.log('    (loopback unavailable; skipped)');
     return;
@@ -627,6 +737,13 @@ test('serve: 409 double-submit writes exactly ONE receipt (first outcome preserv
   });
   assert.strictEqual(res1.status, 200);
 
+  // [#2] Capture receipt file bytes + mtime after first write — pin immutability.
+  const receiptFilePath = path.join(dir, RECEIPT_FILE);
+  const firstBytes = fs.readFileSync(receiptFilePath, 'utf8');
+  const firstMtimeMs = fs.statSync(receiptFilePath).mtimeMs;
+  const firstReceipt = JSON.parse(firstBytes);
+  const firstTimestamp = firstReceipt.timestamp;
+
   // Second POST — should get 409 (already submitted).
   const res2 = await request(port, {
     method: 'POST',
@@ -637,40 +754,56 @@ test('serve: 409 double-submit writes exactly ONE receipt (first outcome preserv
   await new Promise((resolve) => child.on('exit', resolve));
   await new Promise((resolve) => setTimeout(resolve, 100));
 
-  // Exactly ONE receipt — the first submission's outcome.
-  const receipt = readReceipt(dir);
-  assert.ok(receipt, 'receipt must exist');
+  // Exactly ONE receipt — file bytes and mtime unchanged (no duplicate write).
+  const afterBytes = fs.readFileSync(receiptFilePath, 'utf8');
+  const afterMtimeMs = fs.statSync(receiptFilePath).mtimeMs;
+  assert.strictEqual(afterBytes, firstBytes, 'receipt file must be byte-identical after 409 (no duplicate write)');
+  assert.strictEqual(afterMtimeMs, firstMtimeMs, 'receipt file mtime must be unchanged after 409');
+  const receipt = JSON.parse(afterBytes);
   assert.strictEqual(receipt.outcome, OUTCOME_SUBMITTED, 'first outcome is submitted');
+  assert.strictEqual(receipt.timestamp, firstTimestamp, 'timestamp must be from first write only');
   assert.deepStrictEqual(receipt.routeIds, ['test-route']);
   assertNoSecrets(JSON.stringify(receipt));
 });
 
 console.log('\nreceipts — idempotence: stale receipt consumed once');
 
-test('report surfaces receipt once; expired receipt is not repeated', () => {
+test('receiptFact transitions from observed to unknown when receipt expires', () => {
   const dir = scratch();
-  writeJson(dir, 'config.json', {
-    routes: [{ id: 'test-route', provider: 'fake', account: 'test', match: { model: 'test-route' } }],
-    vault: { backend: 'file', service: 'test-idempotent' },
-  });
   // Write a receipt with very short TTL.
   writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: ['test-route'] });
-  const receiptPath = path.join(dir, RECEIPT_FILE);
-  const doc = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
-  doc.freshUntil = new Date(Date.now() + 50).toISOString(); // 50ms TTL
-  fs.writeFileSync(receiptPath, JSON.stringify(doc));
+  const rp = path.join(dir, RECEIPT_FILE);
+  const doc = JSON.parse(fs.readFileSync(rp, 'utf8'));
+  doc.freshUntil = new Date(Date.now() - 1000).toISOString(); // already expired
+  fs.writeFileSync(rp, JSON.stringify(doc));
 
-  // Read immediately — should be present.
-  const f1 = receiptFact(dir);
-  assert.strictEqual(f1.provenance, 'observed', 'receipt must be observable before TTL');
+  // receiptFact must return unknown for expired receipt.
+  const f = receiptFact(dir);
+  assert.strictEqual(f.provenance, 'unknown', 'expired receipt → unknown provenance');
+  assert.strictEqual(f.reason, 'receipt-absent', 'expired receipt → receipt-absent reason');
+  assert.strictEqual(f.value, null);
+});
 
-  // Wait for expiry.
-  const r = readReceipt(dir);
-  // It might still be fresh (50ms is short but race-prone). Force-expire.
-  doc.freshUntil = new Date(Date.now() - 1000).toISOString();
-  fs.writeFileSync(receiptPath, JSON.stringify(doc));
-  const r2 = readReceipt(dir);
-  assert.strictEqual(r2, null, 'expired receipt must be absent');
+test('readReceipt returns null for garbage freshUntil (fail-closed)', () => {
+  const dir = scratch();
+  writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: ['test-route'] });
+  const rp = path.join(dir, RECEIPT_FILE);
+  const doc = JSON.parse(fs.readFileSync(rp, 'utf8'));
+  doc.freshUntil = 'garbage';
+  fs.writeFileSync(rp, JSON.stringify(doc));
+
+  assert.strictEqual(readReceipt(dir), null, 'unparseable freshUntil must fail closed');
+});
+
+test('readReceipt returns null for missing freshUntil (fail-closed)', () => {
+  const dir = scratch();
+  writeReceipt(dir, { outcome: OUTCOME_SUBMITTED, routeIds: ['test-route'] });
+  const rp = path.join(dir, RECEIPT_FILE);
+  const doc = JSON.parse(fs.readFileSync(rp, 'utf8'));
+  delete doc.freshUntil;
+  fs.writeFileSync(rp, JSON.stringify(doc));
+
+  assert.strictEqual(readReceipt(dir), null, 'missing freshUntil must fail closed');
 });
 
 console.log('\nreceipts — truthfulness: absent = unknown with reason');

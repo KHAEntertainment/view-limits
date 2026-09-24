@@ -516,6 +516,7 @@ function serve(port, nonce, ids) {
         body += c;
         if (body.length > 64 * 1024) {
           oversized = true;
+          settled = true; // [#14] prevent race with shutdown window
           res.writeHead(413);
           res.end('payload too large');
           writeReceipt(dataDirPath, { outcome: OUTCOME_FAILED, routeIds: ids, detail: 'payload too large' });
@@ -528,7 +529,7 @@ function serve(port, nonce, ids) {
         if (settled) {
           res.writeHead(409);
           res.end('already submitted');
-          return;
+          return; // [#2] no receipt — first submission already wrote its outcome
         }
         settled = true;
         let data;
@@ -565,15 +566,13 @@ function serve(port, nonce, ids) {
             ? 'Verify vault access, then rerun setup or update.'
             : 'Enter a replacement for every route, then rerun setup or update.';
           res.end(`<h1>Credential storage failed</h1><p>Stored: ${saved.map(escapeHtml).join(', ') || 'none'}.</p><p>Could not store: ${failed.map(escapeHtml).join(', ')}.</p><p>${remediation}</p>`);
-          // Write receipt: partial write = submitted (stored routes succeeded),
-          // vault failure = failed.  The all-or-nothing partial-write semantics
-          // are pinned by existing tests (PR #17/#18 review).  For the receipt,
-          // a successful save (even partial) is 'submitted' to signal the
-          // agent that at least some keys changed; a vault write failure is
-          // 'failed'.
-          const receiptOutcome = persistenceFailed ? OUTCOME_FAILED : OUTCOME_SUBMITTED;
-          const receiptRoutes = persistenceFailed ? ids : saved;
-          writeReceipt(dataDirPath, { outcome: receiptOutcome, routeIds: receiptRoutes, detail: persistenceFailed ? 'vault write failure' : null });
+          // [#1] writeReceipt must never crash.  Use `ids` as fallback when
+          // saved is empty (writeReceipt rejects empty arrays).  [#11] On
+          // persistence failure, receipt lists the actually-failed routes.
+          const receiptOutcome = persistenceFailed ? OUTCOME_FAILED : (saved.length > 0 ? OUTCOME_SUBMITTED : OUTCOME_FAILED);
+          const receiptRoutes = persistenceFailed ? (failed.length > 0 ? failed : ids) : (saved.length > 0 ? saved : ids);
+          const receiptDetail = persistenceFailed ? 'vault write failure' : (saved.length === 0 ? 'no credentials supplied' : null);
+          writeReceipt(dataDirPath, { outcome: receiptOutcome, routeIds: receiptRoutes, detail: receiptDetail });
           receiptWritten = true;
           shutdown(1, 200);
           return;
@@ -906,15 +905,17 @@ const hasFlag = (n) => args.includes(n);
     case 'report': {
       const cfg = loadConfig();
       const cache = readCache();
+      // [#7] Surface any fresh credential receipt even on first-run (no creds).
+      const receiptMsg = formatReceipt(receiptFact(dataDir()));
       if (!cfg.routes.some((r) => vault.has(r.id))) {
         process.stdout.write(noCredentialMessage());
+        if (receiptMsg) process.stdout.write('  ' + receiptMsg + '\n');
         return;
       }
       if (hasFlag('--json')) return process.stdout.write(JSON.stringify(cache, null, 2) + '\n');
       const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
       let report = renderInventory(snap, cache.updatedAt);
       // Surface any fresh credential receipt (read-only, no ack).
-      const receiptMsg = formatReceipt(receiptFact(dataDir()));
       if (receiptMsg) report += '\n  ' + receiptMsg;
       return process.stdout.write(report + '\n');
     }

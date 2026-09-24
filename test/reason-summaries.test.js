@@ -1,9 +1,15 @@
 'use strict';
 // Reason-code summary completeness test — Issue #13.
 //
-// Verifies that every declared reason code across all modules has a
-// human-readable summary in REASON_SUMMARIES. Also verifies the dynamic
-// profile.*-invalid codes are covered for every dimension.
+// [#8] Verifies that every declared reason code in the coupled registries
+// (ALL_DECLARED_REASONS from score-candidates.js, JEV_REASONS from
+// jev-client.js, profile.*-invalid dimensions from task-profile.js) has a
+// human-readable summary in REASON_SUMMARIES.  Frozen-module codes
+// (traycer-adapter.js, runtime-snapshot.js) are hand-included in
+// ALL_DECLARED_REASONS since those modules do not export registries.
+//
+// VERDICTS (eligible/ineligible/unresolved from eligibility.js) are verdict
+// VALUES, not reason codes — they are explicitly excluded from this check.
 
 const assert = require('assert');
 
@@ -57,8 +63,28 @@ test('every summary value is a non-empty string', () => {
 
 test('REASON_SUMMARIES contains no duplicate keys (object literal is naturally unique, but verify count)', () => {
   const keys = Object.keys(REASON_SUMMARIES);
-  // There should be at least 60 unique reason codes across all modules.
-  assert.ok(keys.length >= 60, `expected 60+ reason summaries, got ${keys.length}`);
+  // [#8] At least 65 unique reason codes across all coupled modules.
+  assert.ok(keys.length >= 65, `expected 65+ reason summaries, got ${keys.length}`);
+});
+
+test('traycer-adapter frozen-module reason codes are covered', () => {
+  const frozenCodes = [
+    'traycer-field-absent', 'traycer-field-unconforming',
+    'availability-pending', 'harness-catalog-absent', 'native-usage-unobserved',
+  ];
+  for (const code of frozenCodes) {
+    assert.ok(REASON_SUMMARIES[code], `frozen-module code '${code}' missing summary`);
+  }
+});
+
+test('runtime-snapshot frozen-module reason codes are covered', () => {
+  const frozenCodes = [
+    'no-cached-observation', 'cached-field-absent',
+    'cached-state-absent', 'model-evidence-absent', 'model-comparison-unavailable',
+  ];
+  for (const code of frozenCodes) {
+    assert.ok(REASON_SUMMARIES[code], `frozen-module code '${code}' missing summary`);
+  }
 });
 
 if (failures) {

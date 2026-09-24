@@ -849,10 +849,16 @@ test('every fact-shaped object in the snapshot conforms to the truthfulness cont
       assert.ok(typeof f.reason === 'string' && f.reason.length > 0,
         `unknown fact missing reason: ${JSON.stringify(f)}`);
     }
-    // No sentinel values masquerading as known.
-    if (f.provenance !== 'unknown' && typeof f.value === 'string') {
-      assert.ok(f.value !== 'unknown' || f.source === 'status.json',
-        `string 'unknown' value with provenance ${f.provenance} at source ${f.source}`);
+    // [#5] Truthfulness: a provenance:'unknown' fact must have null value.
+    // For observed/configured facts, the value is an opaque verbatim carry
+    // from upstream — the string 'unknown' is a valid observed value (e.g.
+    // authStatus:'unknown' from traycer-cli).  Only the provenance+shape
+    // contract is checked, not value content.  A fabricated sentinel like
+    // {value:'exhausted', provenance:'unknown'} is caught by the null-value
+    // check above.
+    if (f.provenance === 'unknown') {
+      assert.strictEqual(f.value, null,
+        `unknown fact must have null value, got ${JSON.stringify(f.value)}: ${JSON.stringify(f)}`);
     }
   }
 });

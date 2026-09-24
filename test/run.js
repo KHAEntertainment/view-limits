@@ -20,9 +20,15 @@ if (!files.length) {
 let failed = 0;
 for (const f of files) {
   console.log(`\n=== ${f} ===`);
-  const r = spawnSync(process.execPath, [path.join(testDir, f)], { stdio: 'inherit' });
+  // [#4] Per-file timeout: hung async tests must fail the suite, not silently
+  // disappear.  60s is generous for fixture tests; anything longer is a hang.
+  const r = spawnSync(process.execPath, [path.join(testDir, f)], { stdio: 'inherit', timeout: 60_000 });
   if (r.error) {
-    console.error(`  spawn error: ${r.error.message}`);
+    if (r.error.code === 'ETIMEDOUT') {
+      console.error(`  TIMEOUT after 60s — test file hung (likely deadlocked async test)`);
+    } else {
+      console.error(`  spawn error: ${r.error.message}`);
+    }
     failed += 1;
     continue;
   }

@@ -175,16 +175,26 @@ test('F2: non-object --task/--policy JSON → exit 1 and NO recommendation docum
   }
 });
 
-test('F2: explicit object --policy still merges ({} = deliberate no-requirements)', () => {
+test('F2: explicit object --policy deep-merges ({} keeps strict requirements)', () => {
   const dir = scratch();
   seedStatus(dir);
   const r = runRecommend(['--json', '--policy', '{}'], dir);
   assert.strictEqual(r.status, 0, `exit ${r.status}; stderr=${r.stderr}`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.recommendation.candidateId, 'kimi-code-plan');
-  // And the strict default (no --policy) keeps unknown-state routes
-  // undecided, not eligible — routes with no cached observation are
-  // 'route-state-unproven', never scored.
+  // The CLI deep-merges --policy over the strict default, so {} overrides
+  // nothing: unobserved routes stay 'route-state-unproven', never scored.
+  assert.ok(
+    doc.candidates.undecided.some(
+      (c) => c.reasons && c.reasons.some((x) => x.code === 'route-state-unproven'),
+    ),
+    '--policy {} must keep strict requirements: unobserved routes stay undecided',
+  );
+  assert.ok(doc.candidates.scored.every(
+    (c) => c.candidateId === 'kimi-code-plan',
+  ), 'only the proven-healthy route may be scored under --policy {}');
+  // The strict default (no --policy) behaves identically — unknown-state
+  // routes are undecided, not eligible.
   const r2 = runRecommend(['--json'], dir);
   assert.strictEqual(r2.status, 0);
   const doc2 = JSON.parse(r2.stdout);

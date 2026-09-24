@@ -9,3 +9,10 @@ argument-hint: [route-id]
 Relay the output above verbatim. If a form URL is shown, tell the user to paste
 the new key there (never in chat), then run `/view-limits` to refresh. Update
 never imports a native credential; it always requests a replacement.
+
+After the user submits credentials through the form, the next `/view-limits`
+report or session-start will mention the outcome: successful storage shows
+'credentials rotated for <routes> at <time>'; failed storage shows
+'credential storage failed for <routes> at <time>: <reason>'. This
+confirmation appears automatically without extra prompting; it expires
+after 10 minutes.

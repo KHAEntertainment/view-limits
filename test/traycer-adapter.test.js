@@ -727,6 +727,92 @@ test('refresh:true writes nothing to the data directory', async () => {
   assert.ok(fake.calls.length > 0, 'live reads actually ran');
 });
 
+console.log('\ntraycer adapter — boolFact non-boolean containment');
+
+test('boolFact: true and false are observed booleans', async () => {
+  const AGENTS_BOOL = {
+    caller: { agentId: AGENT_ID }, scope: 'user',
+    agents: [{
+      id: AGENT_ID, parentId: null, hostId: HOST_ID, isLocal: true,
+      surface: 'gui', harnessId: 'claude', isSelf: true, title: 'Probe',
+      active: true, folderPaths: [], isWorktree: true,
+      runConfig: { model: { kind: 'concrete', slug: 'test' } },
+    }],
+  };
+  const fake = fullRun({ 'agent list --json': { code: 0, stdout: ndjson([resultOk(AGENTS_BOOL)]), stderr: '' } });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  const self = out.sessions.find((s) => s.key.agentId === AGENT_ID);
+  assert.strictEqual(self.active.provenance, 'observed');
+  assert.strictEqual(self.active.value, true);
+  assert.strictEqual(self.isSelf.provenance, 'observed');
+  assert.strictEqual(self.isSelf.value, true);
+  assert.strictEqual(self.isLocal.provenance, 'observed');
+  assert.strictEqual(self.isLocal.value, true);
+  assert.strictEqual(self.isWorktree.provenance, 'observed');
+  assert.strictEqual(self.isWorktree.value, true);
+});
+
+test('boolFact: numeric 0 and string "false" degrade to traycer-field-unconforming', async () => {
+  const AGENTS_NON_BOOL = {
+    caller: { agentId: AGENT_ID }, scope: 'user',
+    agents: [{
+      id: AGENT_ID, parentId: null, hostId: HOST_ID, isLocal: 0,
+      surface: 'gui', harnessId: 'claude', isSelf: 'false', title: 'Probe',
+      active: '', folderPaths: [], isWorktree: 'no',
+      runConfig: { model: { kind: 'concrete', slug: 'test' } },
+    }],
+  };
+  const fake = fullRun({ 'agent list --json': { code: 0, stdout: ndjson([resultOk(AGENTS_NON_BOOL)]), stderr: '' } });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  const self = out.sessions.find((s) => s.key.agentId === AGENT_ID);
+  assert.strictEqual(self.active.provenance, 'unknown');
+  assert.strictEqual(self.active.reason, 'traycer-field-unconforming');
+  assert.strictEqual(self.isSelf.provenance, 'unknown');
+  assert.strictEqual(self.isSelf.reason, 'traycer-field-unconforming');
+  assert.strictEqual(self.isLocal.provenance, 'unknown');
+  assert.strictEqual(self.isLocal.reason, 'traycer-field-unconforming');
+  assert.strictEqual(self.isWorktree.provenance, 'unknown');
+  assert.strictEqual(self.isWorktree.reason, 'traycer-field-unconforming');
+});
+
+test('boolFact: null/undefined degrade to traycer-field-absent', async () => {
+  const AGENTS_ABSENT = {
+    caller: { agentId: AGENT_ID }, scope: 'user',
+    agents: [{
+      id: AGENT_ID, parentId: null, hostId: HOST_ID,
+      surface: 'gui', harnessId: 'claude', title: 'Probe',
+      folderPaths: [],
+      runConfig: { model: { kind: 'concrete', slug: 'test' } },
+      // isSelf, isLocal, isWorktree, active all missing
+    }],
+  };
+  const fake = fullRun({ 'agent list --json': { code: 0, stdout: ndjson([resultOk(AGENTS_ABSENT)]), stderr: '' } });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  const self = out.sessions.find((s) => s.key.agentId === AGENT_ID);
+  assert.strictEqual(self.active.provenance, 'unknown');
+  assert.strictEqual(self.active.reason, 'traycer-field-absent');
+  assert.strictEqual(self.isSelf.provenance, 'unknown');
+  assert.strictEqual(self.isSelf.reason, 'traycer-field-absent');
+  assert.strictEqual(self.isLocal.provenance, 'unknown');
+  assert.strictEqual(self.isLocal.reason, 'traycer-field-absent');
+  assert.strictEqual(self.isWorktree.provenance, 'unknown');
+  assert.strictEqual(self.isWorktree.reason, 'traycer-field-absent');
+});
+
+test('boolFact: availabilityPending non-boolean (string) degrades to unconforming', async () => {
+  const fake = fullRun({
+    'agent list-harnesses --json': { code: 0, stdout: ndjson([resultOk({
+      harnesses: [
+        { id: 'claude', label: 'Claude Code', available: true, availabilityPending: 'yes' },
+      ],
+    })]), stderr: '' },
+  });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  const claude = out.harnesses.find((h) => h.key.harness === 'claude');
+  assert.strictEqual(claude.availabilityPending.provenance, 'unknown');
+  assert.strictEqual(claude.availabilityPending.reason, 'traycer-field-unconforming');
+});
+
 Promise.all(pendingTests).then(() => {
   if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
   console.log('\nall traycer-adapter tests passed');

@@ -616,6 +616,14 @@ const route = (id) => ({ id, provider: 'fake', account: 'test', match: { model: 
     assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), REPLACEMENT);
   });
 
+  await test('empty string argument is rejected honestly', async () => {
+    const ctx = scratch('empty-arg', [route('known-route')]);
+    const empty = run(ctx, ['update', '']);
+    assert.strictEqual(empty.status, 1);
+    assert.match(empty.stderr, /route id must not be empty/);
+    assertResultSecretsHidden(empty);
+  });
+
   await test('multi-route setup reports only successful and failed route ids', async () => {
     const ctx = scratch('multi-setup', [route('route-one'), route('route-two')], {
       importMap: {

@@ -50,6 +50,20 @@ bypasses eligibility — `lib/eligibility.js` verdicts are identical with Jev
 applied, failed, or absent, and a Jev-suggested candidate is re-checked
 through the same evaluator.
 
+### Test-fixture cross-references
+
+| Behavioral claim | Test file | Key test(s) |
+|------------------|-----------|-------------|
+| Gate CLOSED on current evidence | `test/recommend.test.js` | `gate stays closed on merged evidence` |
+| Jev network path never invoked when gate is closed | `test/recommend.test.js` | `deterministic fallback without Jev` |
+| Hard eligibility overrides Jev suggestion | `test/recommend.test.js` | `Jev suggestion re-checked through eligibility` |
+| Candidate id uniqueness enforced | `test/recommend.test.js` | `duplicate candidate ids rejected` |
+| Unresolved dimensions contribute zero weight | `test/recommend.test.js` | `scored candidates carry unresolved evidence` |
+| Deterministic output (same inputs → byte-identical) | `test/recommend.test.js` | `recommend output is deterministic` |
+| Zero-I/O recommend CLI | `test/recommend-cli.test.js` | `CLI recommend under guard.cjs` |
+| Scoring six dimensions | `test/recommend.test.js` | `eligible candidates scored on six dimensions` |
+| Policy deep-merges with strict default | `test/recommend-cli.test.js` | `F2: explicit object --policy deep-merges` |
+
 ## CLI
 
 ```sh
@@ -66,3 +80,23 @@ rejected `candidate-id-duplicate` before eligibility, so recommendation
 parameters always come from the exact object that was scored. Output is a
 single JSON document. The path is zero-I/O: proven under `test/guard.cjs` in
 `test/recommend-cli.test.js`.
+
+### Policy-input asymmetry
+
+Policy semantics differ by layer:
+
+- **CLI layer** (`vl.js recommend`): the `--policy` flag deep-merges the
+  caller-supplied JSON over the strict default
+  `{ require: { route: true, usableRoute: true } }`. An explicit `{}`
+  overrides nothing, so route checks remain enabled. A non-object value
+  (`null`, array, number) is rejected outright.
+- **Library layer** (`recommend()` function): passing `policy: {}` is the
+  deliberate no-requirements choice — `{}` adds nothing to the strict
+  default, but the intent is a conscious caller override. A non-object
+  policy (absent, `null`, `[]`, `42`) falls back to the strict default
+  at this layer too.
+
+This split is tested in `test/recommend-cli.test.js` (`F2: explicit object
+--policy deep-merges` for the CLI behavior) and `test/recommend.test.js`
+(`F2: a non-object policy fails closed`, which also pins the library `{}`
+semantics).

@@ -73,10 +73,12 @@ function diagCodes(s) {
 }
 
 // Collect every fact-shaped object in the snapshot for invariant sweeps.
+// [#18] Collect on shape ('value' in root) WITHOUT validating or requiring
+// provenance — the sweep's assertions reject invalid/missing provenance, so
+// this collector must not pre-filter or invalid facts escape undetected.
 function collectFacts(root, out = []) {
   if (!root || typeof root !== 'object') return out;
-  if (!Array.isArray(root) && 'value' in root && 'provenance' in root &&
-      ['observed', 'configured', 'unknown'].includes(root.provenance)) {
+  if (!Array.isArray(root) && 'value' in root) {
     out.push(root);
     return out;
   }
@@ -84,6 +86,39 @@ function collectFacts(root, out = []) {
     if (v && typeof v === 'object') collectFacts(v, out);
   }
   return out;
+}
+
+// The per-fact truthfulness contract, shared by the snapshot sweep and the
+// self-check — the self-check must exercise this same routine or it proves
+// nothing about the real contract.
+function assertFactContract(f) {
+  // Every fact must have a valid provenance.
+  assert.ok(
+    ['observed', 'configured', 'unknown'].includes(f.provenance),
+    `fact has invalid provenance ${f.provenance}: ${JSON.stringify(f)}`,
+  );
+  // A known fact must have a non-null value.
+  if (f.provenance !== 'unknown') {
+    assert.ok(f.value !== null && f.value !== undefined,
+      `known fact has null value: ${JSON.stringify(f)}`);
+  }
+  // An unknown fact must have value null and a reason.
+  if (f.provenance === 'unknown') {
+    assert.strictEqual(f.value, null, `unknown fact has non-null value: ${JSON.stringify(f)}`);
+    assert.ok(typeof f.reason === 'string' && f.reason.length > 0,
+      `unknown fact missing reason: ${JSON.stringify(f)}`);
+  }
+  // [#5] Truthfulness: a provenance:'unknown' fact must have null value.
+  // For observed/configured facts, the value is an opaque verbatim carry
+  // from upstream — the string 'unknown' is a valid observed value (e.g.
+  // authStatus:'unknown' from traycer-cli).  Only the provenance+shape
+  // contract is checked, not value content.  A fabricated sentinel like
+  // {value:'exhausted', provenance:'unknown'} is caught by the null-value
+  // check above.
+  if (f.provenance === 'unknown') {
+    assert.strictEqual(f.value, null,
+      `unknown fact must have null value, got ${JSON.stringify(f.value)}: ${JSON.stringify(f)}`);
+  }
 }
 
 // ---- shared fixture ----------------------------------------------------------
@@ -431,12 +466,17 @@ test('CLI cache-only under guard: zero guard events, zero filesystem writes', ()
 test('CLI --refresh without Traycer identity: live-reads-unavailable, still zero activity', () => {
   const dir = scratch();
   seedAll(dir);
+  const before = listTree(dir);
   const r = runCli(['snapshot', '--json', '--refresh'], dir, { guard: true, log: true });
   assert.strictEqual(r.status, 0, `exit ${r.status}; stderr=${r.stderr}`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.requestedRefresh, true);
   assert.ok(doc.diagnostics.some((d) => d.code === 'live-reads-unavailable'));
   assert.deepStrictEqual(guardEvents(dir), [], 'refresh without identity must not spawn or write');
+  assert.deepStrictEqual(
+    listTree(dir).filter((p) => !/^guard-events\.log:[0-9a-f]{64}$/.test(p)), before,
+    'refresh-without-identity must not create or modify files under dataDir',
+  );
 });
 
 console.log('\ncross-harness readiness — AC4 live mode: bounded, partial, siblings survive');
@@ -767,6 +807,90 @@ test('vl report renders the snapshot without inference: unknowns stay visible, n
 });
 
 // ============================================================================
+
+console.log('\ncross-harness readiness — unavailable state gets its own count');
+
+test('unavailable state is counted separately from unknown in report summary', () => {
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [
+      { id: 'healthy-route', provider: 'kimi', account: 'a', match: { model: 'kimi' }, ttlSeconds: 120 },
+      { id: 'unavailable-route', provider: 'openrouter', account: 'a', match: { model: 'openrouter' }, ttlSeconds: 120 },
+      { id: 'unknown-route', provider: 'deepseek', account: 'a', match: { model: 'deepseek' }, ttlSeconds: 120 },
+    ],
+    vault: { backend: 'file', service: 'test-unavail' },
+  });
+  const prevData = process.env.CLAUDE_PLUGIN_DATA;
+  const prevKey = process.env.VIEW_LIMITS_MASTER_KEY;
+  process.env.CLAUDE_PLUGIN_DATA = dir;
+  process.env.VIEW_LIMITS_MASTER_KEY = 'unavail-test-key';
+  try {
+    require('../lib/vault').set('healthy-route', 'h');
+    require('../lib/vault').set('unavailable-route', 'u');
+    require('../lib/vault').set('unknown-route', 'k');
+  } finally {
+    if (prevData === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = prevData;
+    if (prevKey === undefined) delete process.env.VIEW_LIMITS_MASTER_KEY; else process.env.VIEW_LIMITS_MASTER_KEY = prevKey;
+  }
+  const now = Date.now();
+  writeJson(dir, 'status.json', {
+    updatedAt: new Date(now).toISOString(),
+    routes: {
+      'healthy-route': {
+        routeId: 'healthy-route', observedAt: new Date(now).toISOString(),
+        freshUntil: new Date(now + 120_000).toISOString(), source: 'kimi',
+        status: { state: 'healthy', windows: [], balance: null, resetAt: null },
+      },
+      'unavailable-route': {
+        routeId: 'unavailable-route', observedAt: new Date(now).toISOString(),
+        freshUntil: new Date(now + 120_000).toISOString(), source: 'openrouter',
+        status: { state: 'unavailable', windows: [], balance: null, resetAt: null },
+      },
+      // unknown-route has no cache entry → unknown.
+    },
+  });
+  const env = { ...process.env, CLAUDE_PLUGIN_DATA: dir, VIEW_LIMITS_MASTER_KEY: 'unavail-test-key' };
+  for (const k of Object.keys(env)) if (k.startsWith('TRAYCER_')) delete env[k];
+  const r = runCli(['report'], dir, { env: { VIEW_LIMITS_MASTER_KEY: 'unavail-test-key' } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  // Unavailable has its own bucket — visible as a distinct count.
+  assert.match(r.stdout, /1 unavailable/, `unavailable must have its own count: ${r.stdout}`);
+  assert.match(r.stdout, /1 healthy/);
+  assert.match(r.stdout, /1 unknown/);
+});
+
+console.log('\ncross-harness readiness — truthfulness invariant sweep');
+
+test('truthfulness sweep self-check: invalid and missing provenance are detected', () => {
+  // [#18] The sweep can only catch bad facts if collectFacts gathers on
+  // shape alone. Prove it collects both invalid and missing provenance, and
+  // that the shared contract routine — the same one the real sweep runs —
+  // rejects them.
+  const testDoc = {
+    good: { value: 'healthy', provenance: 'observed', source: 'test', observedAt: null, freshUntil: null, reason: null },
+    observedUnknown: { value: 'unknown', provenance: 'observed', source: 'test', observedAt: null, freshUntil: null, reason: null },
+    badProvenance: { value: 'fabricated', provenance: 'fabricated', source: 'test', observedAt: null, freshUntil: null, reason: null },
+    missingProvenance: { value: 'fabricated', source: 'test', observedAt: null, freshUntil: null, reason: null },
+  };
+  const facts = collectFacts(testDoc);
+  assert.strictEqual(facts.length, 4, 'all value-shaped objects must be collected (shape-based)');
+  assert.doesNotThrow(() => assertFactContract(facts[0]), 'a valid observed fact must pass');
+  assert.doesNotThrow(() => assertFactContract(facts[1]),
+    'the documented observed value "unknown" must pass');
+  assert.throws(() => assertFactContract(facts[2]), /invalid provenance/,
+    'provenance "fabricated" must be rejected by the sweep contract');
+  assert.throws(() => assertFactContract(facts[3]), /invalid provenance/,
+    'a missing provenance must be rejected by the sweep contract');
+});
+
+test('every fact-shaped object in the snapshot conforms to the truthfulness contract', async () => {
+  const dir = scratch();
+  seedAll(dir);
+  const s = await snap(dir, { callerContext: CALLER_CTX });
+  const facts = collectFacts(s);
+  assert.ok(facts.length > 50, `expected 50+ facts, got ${facts.length}`);
+  for (const f of facts) assertFactContract(f);
+});
 
 Promise.all(pendingTests).then(() => {
   if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }

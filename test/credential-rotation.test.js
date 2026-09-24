@@ -389,6 +389,187 @@ const route = (id) => ({ id, provider: 'fake', account: 'test', match: { model: 
     assert.strictEqual(withVault(ctx, (vault) => vault.get('route-two')), OLD);
   });
 
+  await test('update arguments select exactly the requested route(s) for the form', async () => {
+    const ctx = scratch('update-args', [route('route-a'), route('route-b'), route('route-c')]);
+    const spawnLog = path.join(ctx.dir, 'spawn.log');
+    const env = {
+      NODE_OPTIONS: `--require=${PRELOAD}`,
+      VL_SPAWN_LOG: spawnLog,
+      VL_SPAWN_STUB: '1',
+    };
+    const serveIds = () => {
+      if (!fs.existsSync(spawnLog)) return [];
+      return fs.readFileSync(spawnLog, 'utf8').split('\n').filter(Boolean)
+        .map((line) => JSON.parse(line))
+        .filter((e) => path.basename(e.args[0] || '') === 'vl.js' && e.args[1] === 'serve')
+        .map((e) => e.args.slice(4));
+    };
+
+    const single = run(ctx, ['update', 'route-b'], { env });
+    assert.strictEqual(single.status, 0, single.stderr);
+    assert.match(single.stderr, /credential form: http:\/\/127\.0\.0\.1:\d+/);
+    assert.deepStrictEqual(serveIds(), [['route-b']]);
+    assertResultSecretsHidden(single);
+
+    withVault(ctx, (vault) => {
+      vault.set('route-a', OLD);
+      vault.set('route-c', OLD);
+    });
+    fs.rmSync(spawnLog, { force: true });
+    const all = run(ctx, ['update'], { env });
+    assert.strictEqual(all.status, 0, all.stderr);
+    assert.match(all.stderr, /updating credentials for: route-a, route-c/);
+    assert.deepStrictEqual(serveIds(), [['route-a', 'route-c']]);
+    assertResultSecretsHidden(all);
+
+    const empty = scratch('update-empty', [route('route-a')]);
+    const emptyLog = path.join(empty.dir, 'spawn.log');
+    const none = run(empty, ['update'], { env: { ...env, VL_SPAWN_LOG: emptyLog } });
+    assert.strictEqual(none.status, 0, none.stderr);
+    assert.match(none.stderr, /no credentials to update/);
+    assert.ok(!fs.existsSync(emptyLog), 'no credential form must be spawned');
+  });
+
+  await test('update argument errors fail honestly before any form or vault write', async () => {
+    const ctx = scratch('update-arg-errors', [route('route-a'), route('route-b')]);
+    const spawnLog = path.join(ctx.dir, 'spawn.log');
+    const env = {
+      NODE_OPTIONS: `--require=${PRELOAD}`,
+      VL_SPAWN_LOG: spawnLog,
+      VL_SPAWN_STUB: '1',
+    };
+
+    const unknown = run(ctx, ['update', 'route-x'], { env });
+    assert.strictEqual(unknown.status, 1);
+    assert.match(unknown.stderr, /unknown route "route-x" \(known: route-a, route-b\)/);
+    assert.ok(!fs.existsSync(spawnLog), 'an unknown route must not open the all-routes form');
+    assert.ok(!fs.existsSync(path.join(ctx.dir, 'secrets')), 'no vault write on failure');
+    assertResultSecretsHidden(unknown);
+
+    const multiple = run(ctx, ['update', 'route-a', 'route-b'], { env });
+    assert.strictEqual(multiple.status, 1);
+    assert.match(multiple.stderr, /only one route can be selected at a time/);
+    assert.ok(!fs.existsSync(spawnLog));
+    assertResultSecretsHidden(multiple);
+
+    const keyless = run(ctx, ['update', '--key', 'sk-test-unused'], { env });
+    assert.strictEqual(keyless.status, 1);
+    assert.match(keyless.stderr, /--key requires a route id/);
+    assert.ok(!fs.existsSync(spawnLog));
+    assertResultSecretsHidden(keyless);
+  });
+
+  await test('served form script parses and the page carries rotate semantics and auto-close contract', async () => {
+    if (!loopbackAvailable) { console.log('    (loopback unavailable; markup exercised when host permits binding)'); return; }
+    const ctx = scratch('form-markup', [route('route-one'), route('route-two')]);
+    withVault(ctx, (vault) => vault.set('route-one', OLD));
+
+    const port = await freePort();
+    const server = startServer(ctx, port, 'nonce-markup', 'route-one');
+    const page = await waitForServer(port);
+    assert.strictEqual(page.status, 200);
+    assert.match(page.body, /<input id="route-one" type="password"/);
+    assert.ok(!page.body.includes('route-two'), 'form must only contain the requested route');
+    assert.match(page.body, /existing keys stay valid until you submit/);
+    assert.match(page.body, /opening this form clears nothing/);
+
+    const script = page.body.match(/<script>([\s\S]*?)<\/script>/);
+    assert.ok(script, 'form must embed a submit handler');
+    new Function(script[1]);
+    assert.match(script[1], /method:'POST'/);
+    assert.match(script[1], /nonce/);
+    assert.match(script[1], /Closing in <span id="n">5<\/span>/);
+    assert.match(script[1], /window\.close\(\)/);
+
+    const saved = await request(port, {
+      method: 'POST',
+      body: JSON.stringify({ nonce: 'nonce-markup', credentials: { 'route-one': REPLACEMENT } }),
+    });
+    assert.strictEqual(saved.status, 200);
+    assert.match(saved.body, /Closing in <span id="n">5<\/span>/);
+    assert.match(saved.body, /window\.close\(\)/);
+    assertSecretsHidden(saved.body);
+    const [code] = await once(server.child, 'exit');
+    assert.strictEqual(code, 0, server.output());
+    assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), REPLACEMENT);
+  });
+
+  await test('a second submission after save is refused and never rewrites the vault', async () => {
+    if (!loopbackAvailable) { console.log('    (loopback unavailable; double-submit lifecycle exercised when host permits binding)'); return; }
+    const ctx = scratch('form-double-submit', [route('route-one')]);
+    withVault(ctx, (vault) => vault.set('route-one', OLD));
+
+    let sawConflict = false;
+    for (let attempt = 0; attempt < 3 && !sawConflict; attempt += 1) {
+      const port = await freePort();
+      const server = startServer(ctx, port, `nonce-${attempt}`, 'route-one');
+      await waitForServer(port);
+      const first = await request(port, {
+        method: 'POST',
+        body: JSON.stringify({ nonce: `nonce-${attempt}`, credentials: { 'route-one': REPLACEMENT } }),
+      });
+      assert.strictEqual(first.status, 200);
+      let second = null;
+      try {
+        second = await request(port, {
+          method: 'POST',
+          body: JSON.stringify({ nonce: `nonce-${attempt}`, credentials: { 'route-one': HEADLESS } }),
+        });
+      } catch (error) {
+        assert.ok(error && (error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET'),
+          `second submit failed with an unexpected error: ${error && error.message}`);
+      }
+      const [code] = await once(server.child, 'exit');
+      assert.strictEqual(code, 0, server.output());
+      assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), REPLACEMENT);
+      if (second) {
+        sawConflict = true;
+        assert.strictEqual(second.status, 409);
+        assert.match(second.body, /already submitted/);
+        assertSecretsHidden(second.body);
+      }
+    }
+    assert.ok(sawConflict, 'an in-window double submit must be refused with 409');
+  });
+
+  await test('wrong-method and oversized submissions fail safely with zero vault writes', async () => {
+    if (!loopbackAvailable) { console.log('    (loopback unavailable; method/size guards exercised when host permits binding)'); return; }
+    const ctx = scratch('form-guards', [route('route-one')]);
+    withVault(ctx, (vault) => vault.set('route-one', OLD));
+
+    const port = await freePort();
+    const server = startServer(ctx, port, 'nonce-methods', 'route-one');
+    await waitForServer(port);
+    for (const method of ['PUT', 'DELETE']) {
+      const response = await request(port, { method, body: '{}' });
+      assert.strictEqual(response.status, 405);
+      assert.strictEqual(response.headers['cache-control'], 'no-store');
+      assertSecretsHidden(response.body);
+    }
+    assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), OLD);
+    const saved = await request(port, {
+      method: 'POST',
+      body: JSON.stringify({ nonce: 'nonce-methods', credentials: { 'route-one': REPLACEMENT } }),
+    });
+    assert.strictEqual(saved.status, 200);
+    const [code] = await once(server.child, 'exit');
+    assert.strictEqual(code, 0, server.output());
+    assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), REPLACEMENT);
+
+    const bigPort = await freePort();
+    const big = startServer(ctx, bigPort, 'nonce-big', 'route-one');
+    await waitForServer(bigPort);
+    const oversized = await request(bigPort, {
+      method: 'POST',
+      body: JSON.stringify({ nonce: 'nonce-big', credentials: { 'route-one': 'x'.repeat(80 * 1024) } }),
+    });
+    assert.strictEqual(oversized.status, 413);
+    assertSecretsHidden(oversized.body);
+    const [bigCode] = await once(big.child, 'exit');
+    assert.strictEqual(bigCode, 0, big.output());
+    assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), REPLACEMENT);
+  });
+
   await test('multi-route setup reports only successful and failed route ids', async () => {
     const ctx = scratch('multi-setup', [route('route-one'), route('route-two')], {
       importMap: {

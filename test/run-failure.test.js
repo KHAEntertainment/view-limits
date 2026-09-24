@@ -48,5 +48,22 @@ test('injected test killed by SIGTERM makes runner exit 1', () => {
   assert.strictEqual(r.status, 1, `runner must exit 1 when a test is killed by signal; got ${r.status}`);
 });
 
+// Meta-test on the harness itself: a hung test file must fail the suite via
+// run.js's per-file spawn timeout — the gate is only real if it is pinned.
+// The copied runner's timeout is shortened so this test is deterministic.
+test('a hanging test file makes the runner exit 1 with TIMEOUT (hang-fails-suite pin)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-runner-'));
+  const src = fs.readFileSync(RUNNER, 'utf8');
+  const patched = src.replace('timeout: 60_000', 'timeout: 750');
+  assert.notStrictEqual(patched, src, 'runner source must contain the 60s timeout literal');
+  fs.writeFileSync(path.join(dir, 'run.js'), patched);
+  fs.writeFileSync(path.join(dir, 'a.test.js'), 'process.exit(0)');
+  fs.writeFileSync(path.join(dir, 'z.test.js'), 'setInterval(() => {}, 1000)');
+  const r = spawnSync(process.execPath, [path.join(dir, 'run.js')],
+    { encoding: 'utf8', timeout: 15000 });
+  assert.strictEqual(r.status, 1, `runner must exit 1 when a test file hangs; got ${r.status}`);
+  assert.match(r.stderr, /TIMEOUT/, `hang must be reported as TIMEOUT: ${r.stderr}`);
+});
+
 if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
 console.log('\nall runner failure tests passed');

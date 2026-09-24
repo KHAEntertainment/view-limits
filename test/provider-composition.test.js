@@ -489,8 +489,9 @@ test('vl report --json keeps the raw cache document (v1 JSON compatibility)', ()
   const parsed = JSON.parse(r.stdout);
   assert.deepStrictEqual(parsed, cacheDoc, 'report --json is the raw status.json document — full precision');
   assert.ok(!('caller' in parsed) && !('schemaVersion' in parsed), 'not the snapshot envelope');
-  // [#15] Byte-pin: --json output is the raw cache doc — byte-identical to
-  // the status.json content (ignoring trailing newline differences).
+  // [#15] Semantic pin: --json is the unchanged-from-base raw cache
+  // document with no new envelope — equal to status.json after JSON
+  // serialization, NOT byte-identical to the on-disk bytes.
   const rawStatus = require('fs').readFileSync(require('path').join(dir, 'status.json'), 'utf8').trim();
   assert.strictEqual(JSON.stringify(JSON.parse(r.stdout)), JSON.stringify(JSON.parse(rawStatus)),
     'report --json must be semantically equal to status.json');

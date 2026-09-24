@@ -1,21 +1,40 @@
 'use strict';
 // Reason-code summary completeness test — Issue #13.
 //
-// [#8] Verifies that every declared reason code in the coupled registries
-// (ALL_DECLARED_REASONS from score-candidates.js, JEV_REASONS from
-// jev-client.js, profile.*-invalid dimensions from task-profile.js) has a
-// human-readable summary in REASON_SUMMARIES.  Frozen-module codes
-// (traycer-adapter.js, runtime-snapshot.js) are hand-included in
-// ALL_DECLARED_REASONS since those modules do not export registries.
+// [#8] Every reason code in the coupled LIVE registries must have a
+// human-readable summary in REASON_SUMMARIES. The registries are exported
+// by the modules that emit the codes and are used at the emission sites —
+// adding a code to a live registry without a summary fails this suite:
+//   REASON_ORDER / SCORE_FALLBACK_REASONS — score-candidates.js
+//   JEV_REASONS                            — jev-client.js
+//   TASK_PROFILE_REASONS + profile.*-invalid (via DIMENSION_ORDER) — task-profile.js
+//   RECOMMEND_REASONS                      — recommend.js
+//   READINESS_REASONS                      — jev-readiness.js
+//   RECEIPT_REASONS                        — receipts.js
+//
+// CURATED_FROZEN_REASON_CODES is a HAND-MAINTAINED snapshot of fact-reason
+// literals in the frozen modules (traycer-adapter.js, runtime-snapshot.js,
+// capability-registry.js). Frozen files cannot export registries, so this
+// list is curated coverage, not live/categorical — a new frozen-module
+// literal reaches it only through review. Diagnostic codes are out of
+// scope: runtime-snapshot/runtime-sidecar self-summarize via
+// DIAG_SUMMARIES, and eligibility.js self-summarizes its verdict reasons
+// internally.
 //
 // VERDICTS (eligible/ineligible/unresolved from eligibility.js) are verdict
 // VALUES, not reason codes — they are explicitly excluded from this check.
 
 const assert = require('assert');
 
-const { ALL_DECLARED_REASONS, REASON_SUMMARIES } = require('../lib/score-candidates');
+const {
+  allDeclaredReasons, REASON_SUMMARIES, REASON_ORDER,
+  SCORE_FALLBACK_REASONS, CURATED_FROZEN_REASON_CODES,
+} = require('../lib/score-candidates');
 const { JEV_REASONS } = require('../lib/jev-client');
-const { DIMENSION_ORDER } = require('../lib/task-profile');
+const { DIMENSION_ORDER, TASK_PROFILE_REASONS } = require('../lib/task-profile');
+const { RECOMMEND_REASONS } = require('../lib/recommend');
+const { READINESS_REASONS } = require('../lib/jev-readiness');
+const { RECEIPT_REASONS } = require('../lib/receipts');
 
 let failures = 0;
 function test(name, fn) {
@@ -23,34 +42,55 @@ function test(name, fn) {
   catch (e) { failures += 1; console.log(`  ✗ ${name}\n    ${e.stack || e.message}`); }
 }
 
+function missingSummaries(codes) {
+  return codes.filter((code) => {
+    const s = REASON_SUMMARIES[code];
+    return !s || typeof s !== 'string' || s.length === 0;
+  });
+}
+
 console.log('reason-summaries — completeness');
 
-test('every declared reason code has a non-empty summary', () => {
-  const missing = [];
-  for (const code of ALL_DECLARED_REASONS) {
-    const summary = REASON_SUMMARIES[code];
-    if (!summary || typeof summary !== 'string' || summary.length === 0) {
-      missing.push(code);
-    }
-  }
-  assert.deepStrictEqual(missing, [], `reason codes missing summaries: ${missing.join(', ')}`);
+test('every code in the coupled live registries + curated frozen list has a non-empty summary', () => {
+  assert.deepStrictEqual(missingSummaries(allDeclaredReasons()), [],
+    'declared reason codes missing summaries — every emitted code needs one');
 });
 
-test('every JEV_REASONS code is covered', () => {
-  const missing = [];
-  for (const code of JEV_REASONS) {
-    if (!REASON_SUMMARIES[code]) missing.push(code);
-  }
-  assert.deepStrictEqual(missing, [], `JEV reason codes missing summaries: ${missing.join(', ')}`);
-});
+for (const [label, codes] of [
+  ['score-candidates REASON_ORDER', REASON_ORDER],
+  ['score-candidates SCORE_FALLBACK_REASONS', Object.values(SCORE_FALLBACK_REASONS)],
+  ['jev-client JEV_REASONS', JEV_REASONS],
+  ['task-profile TASK_PROFILE_REASONS', Object.values(TASK_PROFILE_REASONS)],
+  ['recommend RECOMMEND_REASONS', Object.values(RECOMMEND_REASONS)],
+  ['jev-readiness READINESS_REASONS', Object.values(READINESS_REASONS)],
+  ['receipts RECEIPT_REASONS', Object.values(RECEIPT_REASONS)],
+  ['CURATED_FROZEN_REASON_CODES (hand-maintained, not live-coupled)', CURATED_FROZEN_REASON_CODES],
+]) {
+  test(`every ${label} code is covered`, () => {
+    assert.deepStrictEqual(missingSummaries(codes), [],
+      `${label} codes missing summaries`);
+  });
+}
 
 test('every profile.*-invalid dimension code is covered', () => {
-  const missing = [];
-  for (const dim of DIMENSION_ORDER) {
-    const code = `profile.${dim}-invalid`;
-    if (!REASON_SUMMARIES[code]) missing.push(code);
+  assert.deepStrictEqual(
+    missingSummaries(DIMENSION_ORDER.map((dim) => `profile.${dim}-invalid`)),
+    [], 'profile dimension codes missing summaries',
+  );
+});
+
+test('allDeclaredReasons composes every live registry (nothing hand-mirrored)', () => {
+  const declared = new Set(allDeclaredReasons());
+  for (const codes of [
+    REASON_ORDER, Object.values(SCORE_FALLBACK_REASONS), JEV_REASONS,
+    Object.values(TASK_PROFILE_REASONS), Object.values(RECOMMEND_REASONS),
+    Object.values(READINESS_REASONS), Object.values(RECEIPT_REASONS),
+    CURATED_FROZEN_REASON_CODES,
+  ]) {
+    for (const code of codes) {
+      assert.ok(declared.has(code), `declared list must include '${code}'`);
+    }
   }
-  assert.deepStrictEqual(missing, [], `profile dimension codes missing summaries: ${missing.join(', ')}`);
 });
 
 test('every summary value is a non-empty string', () => {
@@ -61,30 +101,10 @@ test('every summary value is a non-empty string', () => {
   assert.deepStrictEqual(bad, [], `codes with bad summaries: ${bad.join(', ')}`);
 });
 
-test('REASON_SUMMARIES contains no duplicate keys (object literal is naturally unique, but verify count)', () => {
+test('REASON_SUMMARIES covers at least the declared set (no duplicate keys; count check)', () => {
   const keys = Object.keys(REASON_SUMMARIES);
-  // [#8] At least 65 unique reason codes across all coupled modules.
-  assert.ok(keys.length >= 65, `expected 65+ reason summaries, got ${keys.length}`);
-});
-
-test('traycer-adapter frozen-module reason codes are covered', () => {
-  const frozenCodes = [
-    'traycer-field-absent', 'traycer-field-unconforming',
-    'availability-pending', 'harness-catalog-absent', 'native-usage-unobserved',
-  ];
-  for (const code of frozenCodes) {
-    assert.ok(REASON_SUMMARIES[code], `frozen-module code '${code}' missing summary`);
-  }
-});
-
-test('runtime-snapshot frozen-module reason codes are covered', () => {
-  const frozenCodes = [
-    'no-cached-observation', 'cached-field-absent',
-    'cached-state-absent', 'model-evidence-absent', 'model-comparison-unavailable',
-  ];
-  for (const code of frozenCodes) {
-    assert.ok(REASON_SUMMARIES[code], `frozen-module code '${code}' missing summary`);
-  }
+  assert.ok(keys.length >= allDeclaredReasons().length,
+    `expected summaries for all ${allDeclaredReasons().length} declared codes, got ${keys.length}`);
 });
 
 if (failures) {

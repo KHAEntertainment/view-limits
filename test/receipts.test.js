@@ -22,7 +22,6 @@ const {
 
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const VL = path.join(PLUGIN_ROOT, 'bin', 'vl.js');
-const GUARD = path.join(__dirname, 'guard.cjs');
 
 let failures = 0;
 const pendingTests = [];
@@ -80,11 +79,9 @@ function cleanEnv(dir, extra = {}) {
   return env;
 }
 
-function runCli(args, dir, { guard = false, env = {}, timeoutMs = 8000 } = {}) {
-  const childEnv = cleanEnv(dir, env);
-  if (guard) childEnv.NODE_OPTIONS = `--require=${GUARD}`;
+function runCli(args, dir, { env = {}, timeoutMs = 8000 } = {}) {
   return spawnSync(process.execPath, [VL, ...args], {
-    env: childEnv, encoding: 'utf8', timeout: timeoutMs,
+    env: cleanEnv(dir, env), encoding: 'utf8', timeout: timeoutMs,
   });
 }
 
@@ -504,6 +501,57 @@ test('session-start surfaces receipt and acks it (second run has no receipt)', (
   assert.strictEqual(r2.stdout, '', `second session-start should produce no output: ${r2.stdout}`);
 });
 
+console.log('\nreceipts — [#7] zero-credential branches still surface receipts');
+
+test('report with no stored credentials surfaces fresh receipt detail and writes nothing', () => {
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'kimi-code-plan', provider: 'kimi', account: 'code-plan', match: { model: 'kimi' }, ttlSeconds: 180 }],
+    vault: { backend: 'file', service: 'test-zero-cred-report' },
+  });
+  writeReceipt(dir, {
+    outcome: OUTCOME_SUBMITTED, routeIds: ['kimi-code-plan'],
+    detail: 'no credentials supplied for kimi-code-plan',
+  });
+  const before = listTree(dir);
+  const r = runCli(['report'], dir, { env: { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('credentials rotated'), `expected receipt line in report: ${r.stdout}`);
+  assert.ok(r.stdout.includes('no credentials supplied for kimi-code-plan'),
+    `receipt detail must surface on the zero-credential path: ${r.stdout}`);
+  // Report never acks — the dataDir tree must be identical.
+  assert.deepStrictEqual(listTree(dir), before,
+    'report must not write to dataDir even on the zero-credential path');
+});
+
+test('session-start with no stored credentials surfaces receipt + setup hint, acks, and does not repeat', () => {
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'kimi-code-plan', provider: 'kimi', account: 'code-plan', match: { model: 'kimi' }, ttlSeconds: 180 }],
+    vault: { backend: 'file', service: 'test-zero-cred-ack' },
+  });
+  writeReceipt(dir, {
+    outcome: OUTCOME_SUBMITTED, routeIds: ['kimi-code-plan'],
+    detail: 'no credentials supplied for kimi-code-plan',
+  });
+  const r1 = runCli(['session-start'], dir, { env: { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' } });
+  assert.strictEqual(r1.status, 0, r1.stderr);
+  const msg1 = JSON.parse(r1.stdout);
+  assert.ok(msg1.systemMessage.includes('credentials rotated'), `receipt must surface: ${r1.stdout}`);
+  assert.ok(msg1.systemMessage.includes('no credentials supplied for kimi-code-plan'),
+    `receipt detail must surface: ${r1.stdout}`);
+  assert.ok(msg1.systemMessage.includes('/view-limits:setup'), `setup hint expected: ${r1.stdout}`);
+  assert.ok(!fs.existsSync(path.join(dir, RECEIPT_FILE)), 'session-start must ack the receipt');
+
+  const r2 = runCli(['session-start'], dir, { env: { VIEW_LIMITS_MASTER_KEY: 'receipts-test-key' } });
+  assert.strictEqual(r2.status, 0, r2.stderr);
+  const msg2 = JSON.parse(r2.stdout);
+  assert.ok(!msg2.systemMessage.includes('credentials rotated'),
+    `second run must not repeat the receipt: ${r2.stdout}`);
+  assert.ok(msg2.systemMessage.includes('no credentials configured yet'),
+    `second run shows only the normal setup hint: ${r2.stdout}`);
+});
+
 console.log('\nreceipts — [#1] crash regression: empty/blank credentials must not crash');
 
 test('serve: empty credentials object → clean exit, failed receipt, zero vault writes', async () => {
@@ -654,6 +702,56 @@ test('route ids with embedded token prefixes are scrubbed (substring match, not 
   });
   assert.deepStrictEqual(allScrubbed.routeIds, ['redacted']);
   assertNoSecrets(JSON.stringify(allScrubbed));
+});
+
+test('detail scrub consumes the whole token — dotted/base64 suffixes never survive', () => {
+  const dir = scratch();
+  const r = writeReceipt(dir, {
+    outcome: OUTCOME_FAILED,
+    routeIds: ['kimi-code-plan'],
+    detail: 'failed sk-abc.def ghp_xyz.123 sk-live_abcDEF123=.+/+=',
+  });
+  assert.strictEqual(r.detail, 'failed [REDACTED] [REDACTED] [REDACTED]');
+  for (const frag of ['.def', '.123', '+/+=', 'abcDEF123']) {
+    assert.ok(!r.detail.includes(frag), `suffix '${frag}' must not survive in detail`);
+  }
+});
+
+test('bare JWT in detail is scrubbed without a Bearer marker', () => {
+  const dir = scratch();
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJl';
+  const r = writeReceipt(dir, {
+    outcome: OUTCOME_FAILED, routeIds: ['kimi-code-plan'],
+    detail: `token ${jwt} leaked`,
+  });
+  assert.ok(!r.detail.includes(jwt), 'bare JWT must not survive in detail');
+  assert.ok(!r.detail.includes('eyJhbGciOiJIUzI1NiJ9'), 'JWT header segment must not survive');
+  assert.ok(r.detail.includes('[REDACTED]'));
+});
+
+test('bare-JWT route id is filtered from routeIds AND scrubbed from detail and rendered output', () => {
+  const dir = scratch();
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJl';
+  const r = writeReceipt(dir, {
+    outcome: OUTCOME_SUBMITTED,
+    routeIds: [jwt, 'kimi-code-plan'],
+    detail: `no credentials supplied for ${jwt}`, // as serve() builds it
+  });
+  assert.deepStrictEqual(r.routeIds, ['kimi-code-plan'], 'JWT-shaped route id must be filtered');
+  assert.ok(!r.detail.includes(jwt), 'JWT route id must not survive in detail');
+  const rendered = formatReceipt(r);
+  assert.ok(!rendered.includes(jwt), 'JWT must not appear in rendered receipt');
+  assert.ok(rendered.includes('kimi-code-plan'), 'safe route id preserved in output');
+});
+
+test('writeReceipt never throws on invalid dataDir', () => {
+  for (const bad of [null, undefined, '', 0, {}, []]) {
+    let out;
+    assert.doesNotThrow(() => {
+      out = writeReceipt(bad, { outcome: OUTCOME_SUBMITTED, routeIds: ['kimi-code-plan'] });
+    }, `writeReceipt(${JSON.stringify(bad)}) must not throw`);
+    assert.strictEqual(out, null, `writeReceipt(${JSON.stringify(bad)}) must return null`);
+  }
 });
 
 console.log('\nreceipts — [#22] atomic publish: same-directory temp + rename');

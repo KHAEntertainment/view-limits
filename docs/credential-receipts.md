@@ -11,13 +11,18 @@ agent without extra prompting.
 
 1. **Write:** The detached form server (`vl.js serve`) writes a receipt when:
    - A POST submission succeeds → `outcome: 'submitted'`
-   - A POST submission partially succeeds (all-or-nothing pinned by PR #17/#18)
-     with vault write failure → `outcome: 'failed'` naming the failed routes;
-     `detail` names any routes that were stored
+   - A POST submission reaches the vault but a write fails → `outcome:
+     'failed'` naming the failed routes; `detail` names any routes that were
+     stored
    - A POST submission stores some routes but others were submitted empty →
      `outcome: 'submitted'` naming the stored routes; `detail` names the
-     routes that still need credentials
+     routes that still need credentials (partial success is real, kept
+     behavior — each route saves independently)
    - The server shuts down without receiving a POST → `outcome: 'abandoned'`
+   - **No receipt** when the server fails before a form session begins (bad
+     arguments, vault preflight failure, port bind failure): no session
+     completed, so there is no completion/abandon event to record. Absence
+     stays `unknown` (`receipt-absent`) rather than a fabricated failure.
 
 2. **Read:** `vl.js report` reads the receipt file (read-only, no ack). If the
    receipt exists and is within its 10-minute TTL, it is appended as a line in
@@ -40,8 +45,11 @@ agent without extra prompting.
   and optional `detail`.
 - **Security:** The receipt contains no secret material. Route ids containing
   token-shaped prefixes (`sk-`, `tok-`, `ghp_`, `xoxb-`, `AKIA`, …) anywhere in
-  the id are scrubbed. The `detail` field is scrubbed of any token-shaped
-  substrings. The receipt file is written only by the form server
+  the id, or shaped like a bare JWT, are scrubbed. The `detail` field is
+  scrubbed of known token prefixes, `Bearer <token>` forms, and bare JWT
+  (base64url three-segment) shapes — shipped detail call sites are fixed
+  literals, so the scrub is scoped to token shapes rather than a generic
+  high-entropy heuristic. The receipt file is written only by the form server
   (a local-only CLI flow), never by report/refresh/gate (the hot path).
 - **Atomicity:** The receipt is published via a same-directory temp file +
   rename, so readers never observe a torn write.
@@ -50,9 +58,9 @@ agent without extra prompting.
 
 | Code | Meaning |
 |------|---------|
-| `submitted` | Credentials were successfully stored in the vault. |
+| `submitted` | Credentials were stored in the vault — either all requested routes, or a partial set where `detail` names the routes that still need credentials. |
 | `abandoned` | The form was closed without a POST submission. |
-| `failed` | The vault write failed (credential storage error). |
+| `failed` | The submission did not complete: a request/validation failure (`bad request`, `nonce mismatch`, `payload too large`, `no credentials supplied`) or a vault persistence failure. |
 
 ## Truthfulness contract
 

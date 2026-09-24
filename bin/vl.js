@@ -569,9 +569,13 @@ function serve(port, nonce, ids) {
           // [#1] writeReceipt must never crash.  Use `ids` as fallback when
           // saved is empty (writeReceipt rejects empty arrays).  [#11] On
           // persistence failure, receipt lists the actually-failed routes.
+          // [#16] Mixed submissions stay honest: the receipt names what was
+          // stored and what still needs credentials — no invented atomicity.
           const receiptOutcome = persistenceFailed ? OUTCOME_FAILED : (saved.length > 0 ? OUTCOME_SUBMITTED : OUTCOME_FAILED);
           const receiptRoutes = persistenceFailed ? (failed.length > 0 ? failed : ids) : (saved.length > 0 ? saved : ids);
-          const receiptDetail = persistenceFailed ? 'vault write failure' : (saved.length === 0 ? 'no credentials supplied' : null);
+          const receiptDetail = persistenceFailed
+            ? (saved.length > 0 ? `vault write failure; stored credentials for ${saved.join(', ')}` : 'vault write failure')
+            : (saved.length === 0 ? 'no credentials supplied' : `no credentials supplied for ${failed.join(', ')}`);
           writeReceipt(dataDirPath, { outcome: receiptOutcome, routeIds: receiptRoutes, detail: receiptDetail });
           receiptWritten = true;
           shutdown(1, 200);

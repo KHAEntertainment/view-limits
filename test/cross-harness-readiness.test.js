@@ -73,10 +73,12 @@ function diagCodes(s) {
 }
 
 // Collect every fact-shaped object in the snapshot for invariant sweeps.
+// [#18] Collect on shape ('value' in root) WITHOUT validating or requiring
+// provenance — the sweep's assertions reject invalid/missing provenance, so
+// this collector must not pre-filter or invalid facts escape undetected.
 function collectFacts(root, out = []) {
   if (!root || typeof root !== 'object') return out;
-  if (!Array.isArray(root) && 'value' in root && 'provenance' in root &&
-      ['observed', 'configured', 'unknown'].includes(root.provenance)) {
+  if (!Array.isArray(root) && 'value' in root) {
     out.push(root);
     return out;
   }
@@ -84,6 +86,39 @@ function collectFacts(root, out = []) {
     if (v && typeof v === 'object') collectFacts(v, out);
   }
   return out;
+}
+
+// The per-fact truthfulness contract, shared by the snapshot sweep and the
+// self-check — the self-check must exercise this same routine or it proves
+// nothing about the real contract.
+function assertFactContract(f) {
+  // Every fact must have a valid provenance.
+  assert.ok(
+    ['observed', 'configured', 'unknown'].includes(f.provenance),
+    `fact has invalid provenance ${f.provenance}: ${JSON.stringify(f)}`,
+  );
+  // A known fact must have a non-null value.
+  if (f.provenance !== 'unknown') {
+    assert.ok(f.value !== null && f.value !== undefined,
+      `known fact has null value: ${JSON.stringify(f)}`);
+  }
+  // An unknown fact must have value null and a reason.
+  if (f.provenance === 'unknown') {
+    assert.strictEqual(f.value, null, `unknown fact has non-null value: ${JSON.stringify(f)}`);
+    assert.ok(typeof f.reason === 'string' && f.reason.length > 0,
+      `unknown fact missing reason: ${JSON.stringify(f)}`);
+  }
+  // [#5] Truthfulness: a provenance:'unknown' fact must have null value.
+  // For observed/configured facts, the value is an opaque verbatim carry
+  // from upstream — the string 'unknown' is a valid observed value (e.g.
+  // authStatus:'unknown' from traycer-cli).  Only the provenance+shape
+  // contract is checked, not value content.  A fabricated sentinel like
+  // {value:'exhausted', provenance:'unknown'} is caught by the null-value
+  // check above.
+  if (f.provenance === 'unknown') {
+    assert.strictEqual(f.value, null,
+      `unknown fact must have null value, got ${JSON.stringify(f.value)}: ${JSON.stringify(f)}`);
+  }
 }
 
 // ---- shared fixture ----------------------------------------------------------
@@ -826,41 +861,35 @@ test('unavailable state is counted separately from unknown in report summary', (
 
 console.log('\ncross-harness readiness — truthfulness invariant sweep');
 
+test('truthfulness sweep self-check: invalid and missing provenance are detected', () => {
+  // [#18] The sweep can only catch bad facts if collectFacts gathers on
+  // shape alone. Prove it collects both invalid and missing provenance, and
+  // that the shared contract routine — the same one the real sweep runs —
+  // rejects them.
+  const testDoc = {
+    good: { value: 'healthy', provenance: 'observed', source: 'test', observedAt: null, freshUntil: null, reason: null },
+    observedUnknown: { value: 'unknown', provenance: 'observed', source: 'test', observedAt: null, freshUntil: null, reason: null },
+    badProvenance: { value: 'fabricated', provenance: 'fabricated', source: 'test', observedAt: null, freshUntil: null, reason: null },
+    missingProvenance: { value: 'fabricated', source: 'test', observedAt: null, freshUntil: null, reason: null },
+  };
+  const facts = collectFacts(testDoc);
+  assert.strictEqual(facts.length, 4, 'all value-shaped objects must be collected (shape-based)');
+  assert.doesNotThrow(() => assertFactContract(facts[0]), 'a valid observed fact must pass');
+  assert.doesNotThrow(() => assertFactContract(facts[1]),
+    'the documented observed value "unknown" must pass');
+  assert.throws(() => assertFactContract(facts[2]), /invalid provenance/,
+    'provenance "fabricated" must be rejected by the sweep contract');
+  assert.throws(() => assertFactContract(facts[3]), /invalid provenance/,
+    'a missing provenance must be rejected by the sweep contract');
+});
+
 test('every fact-shaped object in the snapshot conforms to the truthfulness contract', async () => {
   const dir = scratch();
   seedAll(dir);
   const s = await snap(dir, { callerContext: CALLER_CTX });
   const facts = collectFacts(s);
   assert.ok(facts.length > 50, `expected 50+ facts, got ${facts.length}`);
-  for (const f of facts) {
-    // Every fact must have a valid provenance.
-    assert.ok(
-      ['observed', 'configured', 'unknown'].includes(f.provenance),
-      `fact has invalid provenance ${f.provenance}: ${JSON.stringify(f)}`,
-    );
-    // A known fact must have a non-null value.
-    if (f.provenance !== 'unknown') {
-      assert.ok(f.value !== null && f.value !== undefined,
-        `known fact has null value: ${JSON.stringify(f)}`);
-    }
-    // An unknown fact must have value null and a reason.
-    if (f.provenance === 'unknown') {
-      assert.strictEqual(f.value, null, `unknown fact has non-null value: ${JSON.stringify(f)}`);
-      assert.ok(typeof f.reason === 'string' && f.reason.length > 0,
-        `unknown fact missing reason: ${JSON.stringify(f)}`);
-    }
-    // [#5] Truthfulness: a provenance:'unknown' fact must have null value.
-    // For observed/configured facts, the value is an opaque verbatim carry
-    // from upstream — the string 'unknown' is a valid observed value (e.g.
-    // authStatus:'unknown' from traycer-cli).  Only the provenance+shape
-    // contract is checked, not value content.  A fabricated sentinel like
-    // {value:'exhausted', provenance:'unknown'} is caught by the null-value
-    // check above.
-    if (f.provenance === 'unknown') {
-      assert.strictEqual(f.value, null,
-        `unknown fact must have null value, got ${JSON.stringify(f.value)}: ${JSON.stringify(f)}`);
-    }
-  }
+  for (const f of facts) assertFactContract(f);
 });
 
 Promise.all(pendingTests).then(() => {

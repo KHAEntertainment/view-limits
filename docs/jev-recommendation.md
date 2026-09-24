@@ -62,7 +62,7 @@ through the same evaluator.
 | Deterministic output (same inputs → byte-identical) | `test/recommend.test.js` | `recommend output is deterministic` |
 | Zero-I/O recommend CLI | `test/recommend-cli.test.js` | `CLI recommend under guard.cjs` |
 | Scoring six dimensions | `test/recommend.test.js` | `eligible candidates scored on six dimensions` |
-| Policy deep-merges with strict default | `test/recommend.test.js` | `explicit policy deep-merges` |
+| Policy deep-merges with strict default | `test/recommend-cli.test.js` | `F2: explicit object --policy deep-merges` |
 
 ## CLI
 
@@ -83,17 +83,20 @@ single JSON document. The path is zero-I/O: proven under `test/guard.cjs` in
 
 ### Policy-input asymmetry
 
-There is a deliberate semantic difference between an **omitted** policy and
-an **explicit empty** policy:
+Policy semantics differ by layer:
 
-- **Omitted (undefined):** falls back to the strict default
-  `{ require: { route: true, usableRoute: true } }`. This is the
-  fail-closed behavior: the caller did not express a preference, so we
-  require the hardest proven facts.
-- **Explicit `{}`:** treated as a deliberate "no requirements" choice. The
-  deep-merge with the strict default yields the same strict default (since
-  `{}` adds nothing), but the intent is the caller consciously choosing to
-  override — and in library usage with a non-object policy (e.g. `null`,
-  `[]`, `42`), the strict default applies instead.
+- **CLI layer** (`vl.js recommend`): the `--policy` flag deep-merges the
+  caller-supplied JSON over the strict default
+  `{ require: { route: true, usableRoute: true } }`. An explicit `{}`
+  overrides nothing, so route checks remain enabled. A non-object value
+  (`null`, array, number) is rejected outright.
+- **Library layer** (`recommend()` function): passing `policy: {}` is the
+  deliberate no-requirements choice — `{}` adds nothing to the strict
+  default, but the intent is a conscious caller override. A non-object
+  policy (absent, `null`, `[]`, `42`) falls back to the strict default
+  at this layer too.
 
-This asymmetry is tested in `test/recommend.test.js` (`explicit policy deep-merges`).
+This split is tested in `test/recommend-cli.test.js` (`F2: explicit object
+--policy deep-merges` for the CLI behavior) and `test/recommend.test.js`
+(`F2: a non-object policy fails closed`, which also pins the library `{}`
+semantics).

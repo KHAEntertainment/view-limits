@@ -12,7 +12,11 @@ agent without extra prompting.
 1. **Write:** The detached form server (`vl.js serve`) writes a receipt when:
    - A POST submission succeeds → `outcome: 'submitted'`
    - A POST submission partially succeeds (all-or-nothing pinned by PR #17/#18)
-     with vault write failure → `outcome: 'failed'`
+     with vault write failure → `outcome: 'failed'` naming the failed routes;
+     `detail` names any routes that were stored
+   - A POST submission stores some routes but others were submitted empty →
+     `outcome: 'submitted'` naming the stored routes; `detail` names the
+     routes that still need credentials
    - The server shuts down without receiving a POST → `outcome: 'abandoned'`
 
 2. **Read:** `vl.js report` reads the receipt file (read-only, no ack). If the
@@ -24,17 +28,23 @@ agent without extra prompting.
    repeating.
 
 4. **Expiry:** If no consumer reads the receipt within 10 minutes, it expires
-   and is treated as absent. This provides an automatic idempotence guarantee.
+   and is treated as absent. This bounds the notification lifetime.
+   `vl.js report` reads the receipt without acknowledging it (so repeated
+   reports within the TTL do repeat the notification). `vl.js session-start`
+   acknowledgment is what prevents further display after consumption.
 
 ## Receipt file
 
 - **Location:** `<dataDir>/credential-receipt.json`
 - **Format:** JSON object with `outcome`, `routeIds`, `timestamp`, `freshUntil`,
   and optional `detail`.
-- **Security:** The receipt contains no secret material. Route ids prefixed with
-  `sk-` or `tok-` are scrubbed. The `detail` field is scrubbed of any
-  `sk-*` patterns. The receipt file is written only by the form server
+- **Security:** The receipt contains no secret material. Route ids containing
+  token-shaped prefixes (`sk-`, `tok-`, `ghp_`, `xoxb-`, `AKIA`, …) anywhere in
+  the id are scrubbed. The `detail` field is scrubbed of any token-shaped
+  substrings. The receipt file is written only by the form server
   (a local-only CLI flow), never by report/refresh/gate (the hot path).
+- **Atomicity:** The receipt is published via a same-directory temp file +
+  rename, so readers never observe a torn write.
 
 ## Outcome codes
 

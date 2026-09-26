@@ -218,8 +218,10 @@ function renderInventory(snap, updatedAt) {
   const harnesses = Array.isArray(snap.harnesses) ? snap.harnesses : [];
   const sessions = Array.isArray(snap.sessions) ? snap.sessions : [];
   const profiles = Array.isArray(snap.profiles) ? snap.profiles : [];
+  const poolReason = (snap.diagnostics || []).find((d) => d.code === 'runtime-pool-cache-empty');
   if (!harnesses.length && !sessions.length && !profiles.length) {
     lines.push('    (no runtime harness/session/profile facts)');
+    if (poolReason) lines.push(`    reason: ${poolReason.summary}`);
   }
   for (const h of harnesses) lines.push('    ' + renderHarness(h));
   for (const s of sessions) lines.push('    ' + renderSession(s));
@@ -253,6 +255,7 @@ function renderInventory(snap, updatedAt) {
     .length;
   if (unobserved) lines.push(`  ${unobserved} configured route(s) have no cached observation — /view-limits refreshes routes with stored keys and provider config (/view-limits:setup)`);
   for (const d of snap.diagnostics || []) {
+    if (d === poolReason) continue;
     lines.push(`  notice [${d.scope || 'snapshot'}] ${d.code} — ${d.summary}`);
   }
   lines.push(`  cache updated ${updatedAt || 'never'}`);

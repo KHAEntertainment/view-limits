@@ -5,6 +5,28 @@ the credit / rate-limit status of its coding-plan accounts before dispatching
 sub-agents, and blocks dispatch to models whose account is exhausted. Built for
 multi-harness orchestration (Traycer and similar ADEs).
 
+## Session continuity
+
+**Epic ID: `f969ebca-201d-4beb-bad5-620d1a5f0d7e`**
+
+The v2 work (runtime snapshot, Traycer adapter, eligibility, Jev
+recommendation, credential receipts) was planned and tracked as a Traycer epic.
+Traycer has been failing to reload an epic into a new ADE session even though the
+artifacts are intact on disk — so **treat this ID as the entry point**, not the
+ADE's own reload. To pick the work back up:
+
+```sh
+# list the epic's artifacts (plans, reviews, tickets, handoffs)
+ls ~/.traycer/epics/f969ebca-201d-4beb-bad5-620d1a5f0d7e/artifacts/
+```
+
+Key entry points: `backlog-state-2026-09-25` (route health + GLM on-hold
+decision), `v2-delivery-plan`, `v2-delivery-handoff`, `pr20-review-2d49b59`
+(final independent review), `tickets/`.
+
+Live open work is tracked as GitHub issues on this repo — check `gh issue list`
+before starting anything new.
+
 ## Architecture
 
 - `lib/` — **transport-neutral core** (no Claude hook APIs):

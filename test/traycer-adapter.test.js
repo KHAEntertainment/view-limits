@@ -340,6 +340,35 @@ test('timeout → traycer-read-timeout scoped to the failed read; siblings survi
   assert.ok(out.profiles.some((p) => p.key.provider === 'claude-code'), 'sibling profile facts survive');
 });
 
+test('a slow CLI subprocess is killed at the read deadline and leaves capacity unknown', async () => {
+  const dir = scratch();
+  const cli = path.join(dir, 'slow-traycer');
+  fs.writeFileSync(cli, `#!/usr/bin/env node
+setTimeout(() => process.stdout.write(JSON.stringify({
+  type: 'result', status: 'ok', data: {}, timestamp: '${TS_RESULT}'
+}) + '\\n'), 200);
+`, { mode: 0o700 });
+  try {
+    const out = await readTraycerRuntime({
+      callerContext: CTX,
+      env: { ...ENV, TRAYCER_CLI: cli, PATH: process.env.PATH },
+      timeoutMs: 60,
+    });
+    assert.deepStrictEqual(diagList(out), [
+      'traycer-read-timeout@sessions',
+      'traycer-read-timeout@harnesses',
+      'traycer-read-timeout@profiles:claude',
+      'traycer-read-timeout@profiles:codex',
+      'traycer-read-timeout@profiles:opencode',
+    ]);
+    assert.strictEqual(out.caller, null);
+    assert.deepStrictEqual(out.harnesses, []);
+    assert.deepStrictEqual(out.profiles, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('malformed agents output → sessions diag only; profiles/harnesses unaffected', async () => {
   const fake = fullRun({
     'agent list --json': { code: 0, stdout: ndjson([progress('x'), 'this is not json']), stderr: '' },

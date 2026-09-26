@@ -7,6 +7,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawnSync } = require('child_process');
 
 const { getRuntimeSnapshot, SNAPSHOT_SCHEMA_VERSION } = require('../lib/runtime-snapshot');
 const { parseStrictIsoTimestamp } = require('../lib/gate');
@@ -246,11 +247,54 @@ test('corrupt sidecar roots degrade to unknown', async () => {
   }
 });
 
-test('absent sidecar is not an error — sections empty, no diagnostic', async () => {
+test('absent sidecar explains the empty cache-only harness pool without live reads', async () => {
   const dir = scratch();
-  const s = await snap(dir);
+  let liveCalls = 0;
+  const s = await snap(dir, { io: { readTraycer: async () => { liveCalls += 1; return {}; } } });
   assert.deepStrictEqual(s.sessions, []);
+  assert.deepStrictEqual(s.harnesses, []);
+  assert.deepStrictEqual(s.profiles, []);
+  assert.strictEqual(liveCalls, 0);
+  const reason = s.diagnostics.find((d) => d.code === 'runtime-pool-cache-empty');
+  assert.deepStrictEqual(reason, {
+    code: 'runtime-pool-cache-empty',
+    scope: 'harness-pool',
+    summary: 'No cached harness, session, or profile facts are available in runtime.json. This report is cache-only; run `vl snapshot --json --refresh` in a Traycer session with caller IDs to inspect live facts (it does not warm this report).',
+  });
   assert.ok(!diagCodes(s).some((c) => c.startsWith('runtime-sidecar')));
+});
+
+test('report shows the cache-only reason beside an empty harness pool', () => {
+  const dir = scratch();
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'fixture-route', provider: 'openrouter', account: 'fixture', match: { model: 'fixture' } }],
+    vault: { backend: 'file', service: 'test' },
+  });
+  const env = { ...process.env, CLAUDE_PLUGIN_DATA: dir, VIEW_LIMITS_MASTER_KEY: 'offline-report-test-key' };
+  const cwd = path.resolve(__dirname, '..');
+  try {
+    const credential = spawnSync(process.execPath, ['-e', "require('./lib/vault').set('fixture-route', 'test-token')"],
+      { cwd, env, encoding: 'utf8' });
+    assert.strictEqual(credential.status, 0, credential.stderr || String(credential.error));
+    const report = spawnSync(process.execPath, ['bin/vl.js', 'report'], { cwd, env, encoding: 'utf8' });
+    assert.strictEqual(report.status, 0, report.stderr || String(report.error));
+    assert.ok(report.stdout.includes(
+      '  harness pool:\n    (no runtime harness/session/profile facts)\n    reason: No cached harness, session, or profile facts are available in runtime.json. This report is cache-only; run `vl snapshot --json --refresh` in a Traycer session with caller IDs to inspect live facts (it does not warm this report).\n',
+    ), report.stdout);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cached harness facts suppress the empty-pool reason', async () => {
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1,
+    harnesses: [{ key: { host: 'h', harness: 'claude', surface: 'gui' } }],
+  });
+  const s = await snap(dir);
+  assert.strictEqual(s.harnesses.length, 1);
+  assert.ok(!diagCodes(s).includes('runtime-pool-cache-empty@harness-pool'));
 });
 
 test('unreadable sidecar (non-ENOENT) → runtime-sidecar-corrupt, not silent absence', async () => {
@@ -608,6 +652,10 @@ console.log('\nruntime snapshot — completeness ladder');
 
 test('complete requires zero unknown facts and zero diagnostics', async () => {
   const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1,
+    harnesses: [{ key: { host: 'h', harness: 'claude', surface: 'tui' } }],
+  });
   writeJson(dir, 'config.json', {
     routes: [{ id: 'only-route', provider: 'kimi', account: 'main', match: { model: 'kimi', harness: 'cli' } }],
   });

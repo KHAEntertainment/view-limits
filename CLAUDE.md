@@ -27,6 +27,33 @@ decision), `v2-delivery-plan`, `v2-delivery-handoff`, `pr20-review-2d49b59`
 Live open work is tracked as GitHub issues on this repo — check `gh issue list`
 before starting anything new.
 
+### Secondary fallback — the session that closed out the epic
+
+**Claude session: `4bdedd32-797d-452e-86c4-fad89a611b65`** (captured 2026-09-25)
+
+If Traycer's epic reload is unusable, this transcript is the next-best record of
+how the v2 work landed. **It is a transcript to read, not a session to resume** —
+that session is closed.
+
+```sh
+# read it directly (3 MB of jsonl)
+less ~/.claude/projects/-Users-bbrenner--traycer-worktrees-khaentertainment--view-limits-autobuild-baseline-cache-refresh/4bdedd32-797d-452e-86c4-fad89a611b65.jsonl
+
+# or resume it in Claude Code
+claude --resume 4bdedd32-797d-452e-86c4-fad89a611b65
+```
+
+To find the *current* session instead of this stale one, list the transcripts by
+recency — the live session is the file being appended to right now:
+
+```sh
+ls -lt ~/.claude/projects/*autobuild-baseline-cache-refresh*/*.jsonl | head
+```
+
+Note that this pointer goes stale the moment that session ends; the epic ID
+above is the durable entry point, and the GitHub issues are the durable backlog.
+
+
 ## Architecture
 
 - `lib/` — **transport-neutral core** (no Claude hook APIs):

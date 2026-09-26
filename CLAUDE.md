@@ -39,8 +39,13 @@ node bin/vl.js check <routeId>  # live-check one route (JSON)
 - **Keep `lib/` transport-neutral** — no Claude hook APIs in core; `bin/`, hooks,
   commands, and skills are the only Claude-specific surface (so the same library
   can later serve an MCP / other-harness interface).
-- **Bump the version on every change** — `.claude-plugin/plugin.json` `version`,
-  then `claude plugin update view-limits` (restart required to apply).
+- **Bump the version on every change that ships plugin behavior** — anything
+  under `lib/`, `bin/`, `hooks/`, `commands/`, or `skills/`, plus `README.md`
+  and `docs/`. Bump `.claude-plugin/plugin.json` `version`, then
+  `claude plugin update view-limits` (restart required to apply).
+  **Do not bump for tooling-only changes** — `.gitignore`, `.ignore`, CI config,
+  `test/` alone, or repo housekeeping. A bump there costs a reinstall and a
+  restart while changing nothing the plugin does at runtime.
 - **GitHub:** push to `KHAEntertainment` only, never `Clarit-AI` (a different
   project uses that account). `origin` is pinned to
   `https://github.com/KHAEntertainment/view-limits.git`.

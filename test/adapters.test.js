@@ -163,9 +163,17 @@ function unknownWithoutCapacity(status) {
   test('healthy balance = credits − usage, cap notated', () => {
     assert.strictEqual(st.state, 'healthy');
     assert.ok(Math.abs(st.balance.available - 7.78) < Number.EPSILON * 10);
-    assert.strictEqual(st.balance.spent.daily, 0);
+    // usage_daily/weekly are observed always-zero on real accounts with
+    // nonzero monthly spend; they are no longer surfaced as authoritative
+    // metrics (Issue #22). monthly is corroborated by total_usage movement.
+    assert.strictEqual(st.balance.spent.daily, undefined);
+    assert.strictEqual(st.balance.spent.weekly, undefined);
+    assert.strictEqual(st.balance.spent.monthly, 0.0047);
     assert.strictEqual(st.balance.limit.amount, 20);
-    assert.strictEqual(st.balance.limit.reset, 'monthly');
+    // Categorical periods (e.g. "monthly") belong in `period`, not `reset` —
+    // `reset` is for ISO instants only.
+    assert.strictEqual(st.balance.limit.reset, null);
+    assert.strictEqual(st.balance.limit.period, 'monthly');
   });
   const orNoCap = async (url) => {
     const body = url.includes('/credits')
@@ -201,11 +209,12 @@ function unknownWithoutCapacity(status) {
 
   const orNonfinite = async (url) => response(url.includes('/credits')
     ? { data: { total_credits: 'Infinity', total_usage: 1 } }
-    : { data: { usage_weekly: 2 } });
+    : { data: { usage_monthly: 2 } });
   st = await run(openrouter, orNonfinite);
   test('nonfinite credit operands keep capacity unknown while retaining usage', () => {
     unknownWithoutCapacity(st);
-    assert.deepStrictEqual(st.detail.usage, { currency: 'USD', weekly: 2 });
+    // Only usage_monthly is surfaced (Issue #22).
+    assert.deepStrictEqual(st.detail.usage, { currency: 'USD', monthly: 2 });
   });
 
   const orKeyFailure = async (url) => {
@@ -222,18 +231,49 @@ function unknownWithoutCapacity(status) {
 
   const orCreditsFailure = async (url) => {
     if (url.includes('/credits')) return response({ error: 'credits unavailable' }, 503);
-    return response({ data: { usage_weekly: 2.5, is_free_tier: false } });
+    return response({ data: { usage_monthly: 2.5, is_free_tier: false } });
   };
   st = await run(openrouter, orCreditsFailure);
   test('key usage survives credits failure without fabricating capacity or zero fields', () => {
     unknownWithoutCapacity(st);
-    assert.deepStrictEqual(st.detail.usage, { currency: 'USD', weekly: 2.5 });
+    // Only `usage_monthly` is surfaced (Issue #22). weekly/daily would be
+    // observed-as-zero noise; absence is correct.
+    assert.deepStrictEqual(st.detail.usage, { currency: 'USD', monthly: 2.5 });
     assert.strictEqual(st.detail.is_free_tier, false);
+    assert.ok(!('weekly' in st.detail.usage));
     assert.ok(!('daily' in st.detail.usage));
   });
 
   st = await run(openrouter, async () => response({ data: [] }));
   test('malformed nonempty endpoint containers are unknown', () => unknownWithoutCapacity(st));
+
+  // Issue #22 — corroboration: a live-shape fixture with all-zero usage
+  // surfaces NO spent at all, never a confident "spent $0.00 today" line.
+  const orAllZeroUsage = async (url) => {
+    const body = url.includes('/credits')
+      ? { data: { total_credits: 220, total_usage: 212.22 } }
+      : { data: { limit: 20, limit_reset: 'monthly', usage_daily: 0, usage_weekly: 0, usage_monthly: 0, is_free_tier: false } };
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  };
+  st = await run(openrouter, orAllZeroUsage);
+  test('all-zero usage windows surface no spent (no fabricated zeros)', () => {
+    assert.strictEqual(st.balance.spent, undefined);
+    assert.strictEqual(st.detail.usage, undefined);
+  });
+
+  // Issue #22 — corroboration: a real ISO timestamp in `limit_reset`
+  // belongs in `reset`, not `period`.
+  const orIsoReset = async (url) => {
+    const body = url.includes('/credits')
+      ? { data: { total_credits: 220, total_usage: 212.22 } }
+      : { data: { limit: 20, limit_reset: '2026-09-30T00:00:00Z', usage_daily: 0, usage_weekly: 0, usage_monthly: 0.0047, is_free_tier: false } };
+    return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+  };
+  st = await run(openrouter, orIsoReset);
+  test('parseable ISO limit_reset lands in `reset`; `period` stays null', () => {
+    assert.strictEqual(st.balance.limit.reset, '2026-09-30T00:00:00.000Z');
+    assert.strictEqual(st.balance.limit.period, null);
+  });
 
   if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }
   console.log('\nall adapter tests passed');

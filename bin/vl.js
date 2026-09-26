@@ -344,7 +344,7 @@ function renderRoute(row) {
     }
     if (balance.limit && typeof balance.limit === 'object' && !Array.isArray(balance.limit)) {
       const cap = formatMoney(balance.limit.amount, balance.currency);
-      if (cap) quota += ` · ${cap} ${balance.limit.reset || 'period'} cap`;
+      if (cap) quota += ` · ${cap} ${balance.limit.period || balance.limit.reset || 'period'} cap`;
     }
   }
   else if (res.usage && typeof res.usage === 'object' && !Array.isArray(res.usage)) {

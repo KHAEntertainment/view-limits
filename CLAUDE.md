@@ -90,11 +90,25 @@ node bin/vl.js check <routeId>  # live-check one route (JSON)
   can later serve an MCP / other-harness interface).
 - **Bump the version on every change that ships plugin behavior** — anything
   under `lib/`, `bin/`, `hooks/`, `commands/`, or `skills/`, plus `README.md`
-  and `docs/`. Bump `.claude-plugin/plugin.json` `version`, then
-  `claude plugin update view-limits` (restart required to apply).
+  and `docs/`. Bump `.claude-plugin/plugin.json` `version` — it is the only
+  version of record (`package.json` carries none; `test/version.test.js`
+  enforces this).
   **Do not bump for tooling-only changes** — `.gitignore`, `.ignore`, CI config,
-  `test/` alone, or repo housekeeping. A bump there costs a reinstall and a
-  restart while changing nothing the plugin does at runtime.
+  `test/` alone, `CLAUDE.md`, or repo housekeeping. A bump there cuts a release
+  and costs a reinstall and a restart while changing nothing the plugin does at
+  runtime.
+- **A bump ships in three steps — merging it is not enough:**
+  1. Merge to `main`. `.github/workflows/tag-on-bump.yml` tags the merge commit
+     `v<version>` and publishes a GitHub release. Published tags are immutable:
+     never reuse a version; if the workflow fails because the tag exists, bump
+     again.
+  2. Open a PR in `KHAEntertainment/marketplace` setting the `view-limits`
+     entry's `source.ref` in `.claude-plugin/marketplace.json` to the new tag,
+     and update its row in the README pinning table. That repo's
+     `verify-catalog` check confirms the tag resolves. Until this merges, users
+     stay on the previous pin.
+  3. After it merges: `claude plugin marketplace update kha-marketplace`, then
+     `claude plugin update view-limits@kha-marketplace` (restart required).
 - **GitHub:** push to `KHAEntertainment` only, never `Clarit-AI` (a different
   project uses that account). `origin` is pinned to
   `https://github.com/KHAEntertainment/view-limits.git`.

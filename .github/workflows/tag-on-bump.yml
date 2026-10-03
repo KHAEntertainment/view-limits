@@ -1,0 +1,99 @@
+name: Tag on version bump
+
+# `.claude-plugin/plugin.json` is the single source of truth for the plugin
+# version. When main carries a version that has no `v<version>` tag yet, tag
+# that commit and publish a GitHub release. The `kha-marketplace` catalog pins
+# `source.ref` to one of these tags, so a new tag alone ships nothing — the
+# catalog pin must be bumped too.
+#
+# Rules:
+#   - tag missing            → create annotated tag at HEAD + release
+#   - tag already at HEAD    → no-op (re-run)
+#   - tag elsewhere, version
+#     unchanged in this push → no-op (docs/tooling commit after a release)
+#   - tag elsewhere, version
+#     changed in this push   → fail: published tags are immutable, bump again
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tag-on-bump
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - id: plan
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          file=.claude-plugin/plugin.json
+          current=$(jq -r '.version // empty' "$file")
+          if ! printf '%s' "$current" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::$file version '$current' is missing or not semver; refusing to tag."
+            exit 1
+          fi
+          tag="v$current"
+
+          # Version before this push: the push's `before` commit when it is a
+          # real commit, else HEAD^ (workflow_dispatch, first push).
+          base=""
+          if [ -n "${BEFORE:-}" ] && ! printf '%s' "$BEFORE" | grep -Eq '^0+$' \
+             && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            base="$BEFORE"
+          elif git rev-parse -q --verify HEAD^ >/dev/null; then
+            base="HEAD^"
+          fi
+          previous=""
+          if [ -n "$base" ]; then
+            previous=$(git show "$base:$file" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)
+          fi
+
+          action=create
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            at=$(git rev-list -n1 "$tag")
+            if [ "$at" = "$(git rev-parse HEAD)" ]; then
+              action=none
+              echo "$tag already points at HEAD; nothing to do."
+            elif [ "$previous" != "$current" ]; then
+              echo "::error::$file changed to $current, but $tag already exists at $at. Published tags are immutable; bump to a new version."
+              exit 1
+            else
+              action=none
+              echo "Version unchanged ($current) and already released as $tag; nothing to do."
+            fi
+          fi
+
+          echo "previous: ${previous:-<none>}  current: $current  action: $action"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+
+      - name: Create annotated tag
+        if: steps.plan.outputs.action == 'create'
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "refs/tags/$TAG"
+
+      - name: Create GitHub release
+        if: steps.plan.outputs.action == 'create'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes

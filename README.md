@@ -113,4 +113,8 @@ node bin/vl.js refresh            # live smoke test
 
 ## Version
 
-v0.1.14
+The version of record is `.claude-plugin/plugin.json` → `version`. Every bump
+merged to `main` is tagged `v<version>` and published as a
+[GitHub release](https://github.com/KHAEntertainment/view-limits/releases) by
+`.github/workflows/tag-on-bump.yml`. For a local checkout, run
+`git describe --tags`.

@@ -398,9 +398,17 @@ async function check(routeId) {
   if (!route) err(`unknown route "${routeId}" (known: ${cfg.routes.map((r) => r.id).join(', ')})`);
   const token = vault.get(route.id);
   if (!token) err(`no credential for "${routeId}" — run: vl.js setup`);
-  const st = await getAdapter(route.provider).fetchStatus(
-    cfg.providers[route.provider], token, { threshold: cfg.gate.constrainedThreshold },
-  );
+  let st;
+  try {
+    st = await getAdapter(route.provider).fetchStatus(
+      cfg.providers[route.provider], token, { threshold: cfg.gate.constrainedThreshold },
+    );
+  } catch (e) {
+    // One line, no stack: provider bodies can carry newlines.
+    const msg = String((e && e.message) || e).replace(/\s+/g, ' ').trim();
+    const hint = e && e.status === 401 ? ` (rotate via /view-limits:update ${routeId})` : '';
+    err(`check ${routeId} failed: ${msg}${hint}`);
+  }
   process.stdout.write(JSON.stringify(st, null, 2) + '\n');
 }
 

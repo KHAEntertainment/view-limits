@@ -1,6 +1,6 @@
 {
   "name": "view-limits",
-  "version": "0.1.0",
+  "private": true,
   "description": "Check coding-plan credit and rate-limit status across providers before dispatching sub-agents.",
   "license": "MIT",
   "type": "commonjs",

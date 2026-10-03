@@ -123,5 +123,8 @@ node bin/vl.js check <routeId>  # live-check one route (JSON)
 - **Kimi** — `/coding/v1/usages` returns `usage` (weekly) + `limits[]` (5h); no
   monthly. Needs a `sk-kimi-*` Coding Plan key (not a Moonshot `sk-*` key).
 - **GLM** — `/api/monitor/usage/quota/limit` returns `data.limits[]`; base URL is
-  `https://api.z.ai` (international). Fixture-only until live-verified.
+  `https://api.z.ai` (international). Auth (`Bearer`) and the error envelope are
+  live-verified (2026-10-03): failures are HTTP 200 + `{code, msg, success:false}`
+  — 1000/1001 auth, 500 "no coding plan". The `limits[]` fields are still
+  fixture-only (needs an active plan; Issue #1).
 - **DeepSeek** — `/user/balance` → `is_available` + `balance_infos[]`.

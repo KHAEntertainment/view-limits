@@ -122,6 +122,44 @@ function unknownWithoutCapacity(status) {
     assert.strictEqual(st.windows[0].remaining, 70);
   });
 
+  // Live api.z.ai error envelopes, captured verbatim 2026-10-03. All three
+  // arrive as HTTP 200, so httpJson does not throw; the adapter must.
+  const rejection = async (body) => {
+    try { await run(glm, body); } catch (e) { return e; }
+    return null;
+  };
+  let e = await rejection({ code: 1000, msg: 'Authentication Failed', success: false });
+  test('live code 1000 (bad key) is an auth failure', () => {
+    assert.ok(e, 'expected a throw');
+    assert.strictEqual(e.status, 401);
+    assert.strictEqual(e.message, 'Z.ai auth failed (code 1000: Authentication Failed)');
+  });
+  e = await rejection({ code: 1001, msg: 'Authentication parameter not received in Header, unable to authenticate', success: false });
+  test('live code 1001 (no auth header) is an auth failure', () => {
+    assert.ok(e, 'expected a throw');
+    assert.strictEqual(e.status, 401);
+    assert.match(e.message, /^Z\.ai auth failed \(code 1001: Authentication parameter not received/);
+  });
+  e = await rejection({ code: 500, msg: '当前用户不存在coding plan', success: false });
+  test('live code 500 (lapsed plan) surfaces a translated reason, not an auth failure', () => {
+    assert.ok(e, 'expected a throw');
+    assert.strictEqual(e.status, undefined);
+    assert.strictEqual(e.message, 'Z.ai code 500: no active coding plan on this account');
+  });
+  e = await rejection({ code: 9999, msg: 'something new', success: false });
+  test('unknown failure code keeps the provider message verbatim', () => {
+    assert.strictEqual(e && e.message, 'Z.ai code 9999: something new');
+  });
+  e = await rejection({ success: false });
+  test('failure envelope without code or msg still throws', () => {
+    assert.strictEqual(e && e.message, 'Z.ai no code: no message');
+  });
+  st = await run(glm, { code: 200, success: true, data: { limits: [{ type: 'TOKENS_LIMIT', percentage: 25 }] } });
+  test('success envelope still parses limits', () => {
+    assert.strictEqual(st.state, 'healthy');
+    assert.strictEqual(st.windows[0].remaining, 75);
+  });
+
   console.log('deepseek');
   st = await run(deepseek, { is_available: true, balance_infos: [{ currency: 'CNY', total_balance: '10.00' }] });
   test('healthy with balance', () => {

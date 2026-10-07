@@ -1,8 +1,8 @@
 # view-limits
 
 A Claude Code plugin that shows an orchestrator agent the credit / rate-limit
-status of its coding-plan accounts **before** dispatching sub-agents, and blocks
-dispatch to models whose account is exhausted.
+status of its coding-plan accounts **before** dispatching sub-agents, with an
+optional gate for models whose account is exhausted.
 
 Built for multi-harness orchestration (Traycer and similar ADEs), where one
 orchestrator fans work out across models on different provider accounts.
@@ -16,15 +16,14 @@ orchestrator fans work out across models on different provider accounts.
 - **`/view-limits:update [route-id]`** — rotate existing keys: opens the form for
   configured routes, or one route, e.g. `/view-limits:update kimi-code-plan`.
   Rotation always requests a replacement; it never reimports a native key.
-- A **`PreToolUse` hook** fires on sub-agent dispatch (`Agent`/`Task`, Traycer
-  `create_agent`/`configure_agent`/`fork_agent`), resolves the model to a
-  route/account, and **denies** only a *freshly + unambiguously* exhausted route —
-  otherwise it injects a one-line status.
+- An optional **`PreToolUse` hook** resolves sub-agent dispatch (`Agent`/`Task`,
+  Traycer `create_agent`/`configure_agent`/`fork_agent`) to a route/account. It is
+  off by default; advisory and deny modes are available under [Hooks](#hooks).
 
 The hook is **network-free and fail-open**: it reads a cached status file
 synchronously, never the provider API, so unknown/stale/unmapped state can never
-cause a false-positive block. A `SessionStart` hook warms the cache and nudges
-"set up credentials" on first run.
+cause a false-positive block. SessionStart cache refresh is also off by default.
+The separate first-run credential notice stays enabled.
 
 Refreshes publish `status.json` by replacing it with a complete file; a failed
 write leaves the previous cache intact. Manual, SessionStart and gate-triggered
@@ -84,6 +83,46 @@ view-limits does not generate master keys.
 
 Non-secret config lives in `~/.claude/plugins/data/*/config.json` (endpoints,
 routes, TTLs, thresholds). `node bin/vl.js config` shows it (secrets masked).
+
+## Hooks
+
+Add these non-secret settings to the view-limits plugin's
+`~/.claude/plugins/data/*/config.json` (the directory exported as
+`CLAUDE_PLUGIN_DATA`). Standalone CLI use falls back to
+`~/.view-limits/config.json`. These are the defaults:
+
+```json
+{
+  "gate": { "mode": "off", "injectContext": false },
+  "refreshOnSessionStart": false
+}
+```
+
+| Setting | Behavior |
+|---|---|
+| `gate.mode: "off"` | Every dispatch matcher exits 0 silently, without reading status or scheduling refresh. |
+| `gate.mode: "advisory"` | Never denies. With `injectContext: true`, adds context only for a fresh, unambiguously exhausted route: “prefer another plan.” |
+| `gate.mode: "deny"` | Preserves dispatch blocking for fresh, unambiguously exhausted routes. Stale, unknown, unmapped, and ambiguous routes remain allowed. |
+| `gate.injectContext: false` | No allow path writes `additionalContext`, including advisory mode. Set to `true` to opt in; context suggests preferring another plan rather than waiting for a reset. |
+| `refreshOnSessionStart: false` | The async SessionStart refresh exits 0 silently before accessing credentials, providers, or refresh locks. Set to `true` to warm the cache on session start. |
+
+Traycer Model Routing tries interchangeable models when a model is unavailable.
+A gate denial prevents dispatch from reaching that routing, so the gate defaults
+to off. Leave it off when Model Routing handles failover. To enable advice, use
+`"mode": "advisory"` and `"injectContext": true`; to opt in to the previous gate
+behavior, use `"mode": "deny"` (and enable context separately if wanted).
+
+Each intrusive hook reads config synchronously. Missing or unreadable config,
+invalid JSON, a non-object config or gate, and invalid mode values fail open as
+`off`. Boolean settings enable behavior only for the JSON value `true`;
+missing or malformed values become `false`. `vl.js config` shows the effective
+values of all three settings.
+
+Enabled gates still schedule a detached refresh when status is stale, subject
+to `gate.refreshLockSeconds`. `/view-limits` and `/view-limits:update` keep their
+on-demand refresh workflow regardless of these settings. The separate
+`session-start` notice hook still reports first-run guidance and credential
+receipts.
 
 ## Architecture
 

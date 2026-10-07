@@ -65,11 +65,13 @@ function readStdin() {
 // ---- gate -------------------------------------------------------------------
 
 async function gate() {
+  const cfg = loadConfig();
+  if (cfg.gate.mode === 'off') process.exit(0);
+
   const input = await readStdin();
   let evt;
   try { evt = JSON.parse(input); } catch { process.exit(0); } // no/invalid input → no gate
 
-  const cfg = loadConfig();
   const ctx = dispatchContext(evt);
   if (!ctx.model) process.exit(0); // no/invalid model identity → fail open
 
@@ -121,8 +123,9 @@ function unknownStatus(detail) {
   return { state: 'unknown', windows: [], balance: null, resetAt: null, detail };
 }
 
-async function refresh(quiet) {
+async function refresh(quiet, fromSessionStart = false) {
   const cfg = loadConfig();
+  if (fromSessionStart && !cfg.refreshOnSessionStart) return;
   const configured = cfg.routes.filter((r) => cfg.providers[r.provider] && vault.has(r.id));
   if (!configured.length) {
     if (!quiet) process.stdout.write(noCredentialMessage());
@@ -917,6 +920,7 @@ function config() {
     })),
     providers: Object.fromEntries(Object.entries(cfg.providers).map(([k, v]) => [k, v.baseUrl])),
     gate: cfg.gate,
+    refreshOnSessionStart: cfg.refreshOnSessionStart,
     importMap: cfg.importMap,
   };
   process.stdout.write(JSON.stringify(out, null, 2) + '\n');
@@ -958,7 +962,7 @@ const hasFlag = (n) => args.includes(n);
 (async () => {
   switch (cmd) {
     case 'gate': return gate();
-    case 'refresh': return refresh(hasFlag('--quiet'));
+    case 'refresh': return refresh(hasFlag('--quiet'), hasFlag('--session-start'));
     case 'report': {
       const cfg = loadConfig();
       const cache = readCache();

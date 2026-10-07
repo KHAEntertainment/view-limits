@@ -5,7 +5,12 @@
 
 const assert = require('assert');
 
-const { decide } = require('../lib/gate');
+const { decide: gateDecision } = require('../lib/gate');
+
+// The existing cache/freshness matrix exercises the explicitly opted-in gate.
+function decide(input) {
+  return gateDecision({ config: { gate: { mode: 'deny', injectContext: true } }, ...input });
+}
 
 let failures = 0;
 function test(name, fn) {

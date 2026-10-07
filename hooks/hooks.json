@@ -1,5 +1,5 @@
 {
-  "description": "Gate sub-agent dispatch on coding-plan availability. The PreToolUse hook reads a cached status file synchronously (never network) and blocks only on a fresh, unambiguous exhausted signal for the exact route. The SessionStart hook warms the cache.",
+  "description": "Optional coding-plan dispatch gate and SessionStart cache refresh, both off by default. The gate reads cached status synchronously (never network); deny mode blocks only a fresh, unambiguous exhausted route. The session-start notice stays enabled.",
   "hooks": {
     "PreToolUse": [
       {
@@ -20,7 +20,7 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "refresh", "--quiet"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "refresh", "--quiet", "--session-start"],
             "async": true,
             "timeout": 30
           }

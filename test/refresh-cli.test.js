@@ -10,7 +10,9 @@ const cli = path.resolve(__dirname, '../bin/vl.js');
 const preload = path.join(__dirname, 'fixtures/refresh-cli-preload.cjs');
 const env = { PATH: process.env.PATH, HOME: dir, CLAUDE_PLUGIN_DATA: dir, NODE_OPTIONS: `--require=${preload}` };
 const route = { id: 'kimi-code-plan', provider: 'kimi', match: { model: 'kimi' }, ttlSeconds: 123 };
-fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ routes: [route] }));
+fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+  routes: [route], gate: { mode: 'deny', injectContext: true }, refreshOnSessionStart: true,
+}));
 const old = { updatedAt: '2000-01-01T00:00:00Z', routes: { 'kimi-code-plan': {
   freshUntil: '2000-01-01T00:00:00Z', status: { state: 'healthy' },
 }, invalidNull: null, invalidArray: [], invalidPrimitive: 3 } };
@@ -52,7 +54,7 @@ async function kill(child) {
     assert.doesNotMatch(manual.stdout, /invalidNull|invalidArray|invalidPrimitive/);
     const hooks = require('../hooks/hooks.json');
     const sessionArgs = hooks.hooks.SessionStart[0].hooks[0].args.slice(1);
-    assert.deepStrictEqual(sessionArgs, ['refresh', '--quiet']);
+    assert.deepStrictEqual(sessionArgs, ['refresh', '--quiet', '--session-start']);
     run(sessionArgs);
     const input = JSON.stringify({ tool_name: 'Agent', tool_input: { model: 'kimi-k2' } });
     const gate = run(['gate'], { input });

@@ -36,6 +36,7 @@ function test(name, fn) {
 function scratch() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-cli-'));
   fs.mkdirSync(path.join(dir, 'secrets'), { recursive: true });
+  writeJson(dir, 'config.json', { gate: { mode: 'deny', injectContext: true } });
   return dir;
 }
 
@@ -218,6 +219,7 @@ test('two identical kimi routes configured, fresh-exhausted first → NO deny', 
   const dir = scratch();
   // Custom config that overrides DEFAULTS with two identical kimi routes.
   writeJson(dir, 'config.json', {
+    gate: { mode: 'deny', injectContext: true },
     routes: [
       { id: 'kimi-plan-a', provider: 'kimi', account: 'a', match: { model: 'kimi' } },
       { id: 'kimi-plan-b', provider: 'kimi', account: 'b', match: { model: 'kimi' } },
@@ -243,6 +245,7 @@ test('two identical kimi routes configured, fresh-exhausted first → NO deny', 
 test('reverse config order — same null result', () => {
   const dir = scratch();
   writeJson(dir, 'config.json', {
+    gate: { mode: 'deny', injectContext: true },
     routes: [
       { id: 'kimi-plan-b', provider: 'kimi', account: 'b', match: { model: 'kimi' } },
       { id: 'kimi-plan-a', provider: 'kimi', account: 'a', match: { model: 'kimi' } },
@@ -365,6 +368,7 @@ test('traycer create_agent with harnessId=openrouter + a route bound to that har
   // harness=null from a profile-only payload, so this route never matches and
   // we fail open (no deny). With harnessId, the same route matches.
   writeJson(dir, 'config.json', {
+    gate: { mode: 'deny', injectContext: true },
     routes: [
       { id: 'openrouter-harness-only', provider: 'openrouter', account: 'main', match: { harness: 'openrouter' } },
     ],

@@ -981,8 +981,15 @@ function planXiaomiConfig(patch) {
   return user;
 }
 
-function writeXiaomiConfig(patch) {
-  saveConfig(planXiaomiConfig(patch));
+// F2 (round 6): revalidation persists ONLY the shared source/profile
+// selection. It must never resurrect a removed canonical route or touch
+// providers — route append + provider pinning remain setup's job.
+function writeXiaomiSourceProfile(patch) {
+  const user = readUserConfig();
+  user.xiaomi = user.xiaomi && typeof user.xiaomi === 'object' && !Array.isArray(user.xiaomi)
+    ? { ...user.xiaomi } : {};
+  Object.assign(user.xiaomi, patch);
+  saveConfig(user);
 }
 
 // Private state reset with the F2 refusal surfaced as one fixed actionable
@@ -1027,12 +1034,19 @@ function prevalidateXiaomiStateOrFail() {
   }
 }
 
-async function setupXiaomi(options) {
+async function setupXiaomi(cfg, options) {
   if (options.key !== null) {
     err('xiaomi-token-plan stores no key — Chrome console cookies are read at refresh time (no paste form).');
   }
   if (options.headless) err('xiaomi-token-plan stores no key — --headless does not apply.');
-  const profile = options.profile !== null && options.profile !== undefined ? options.profile : 'Profile 46';
+  // F1 (round 6): NO hardcoded profile. Priority: explicit --profile → the
+  // SAVED selection (a rerun must not clobber it) → 'Default'. An invalid
+  // saved value degrades to 'Default'; an invalid EXPLICIT value still errs.
+  const savedProfile = cfg && cfg.xiaomi && typeof cfg.xiaomi === 'object'
+    ? cfg.xiaomi.chromeProfile : undefined;
+  const profile = options.profile !== null && options.profile !== undefined
+    ? options.profile
+    : (validProfile(savedProfile) ? savedProfile : 'Default');
   if (!validProfile(profile)) err('invalid Chrome profile — use "Default" or "Profile <number>".');
   const source = options.chromeSource ? expandHome(options.chromeSource) : defaultChromeSource();
   if (typeof source !== 'string' || !source.trim()) err('chrome source must be a non-empty path.');
@@ -1100,7 +1114,7 @@ async function revalidateXiaomiSource(cfg, options) {
   prevalidateXiaomiStateOrFail();
   await grantInteractiveKeyOrFail();
   resetXiaomiStateOrFail();
-  writeXiaomiConfig({ chromeSource: source, chromeProfile: profile });
+  writeXiaomiSourceProfile({ chromeSource: source, chromeProfile: profile });
   log(`Chrome cookie source revalidated for ${XIAOMI_ROUTE_ID} (profile ${profile}).`);
 }
 
@@ -1150,7 +1164,7 @@ function setup(args) {
   const options = parseCredentialArgs(cfg, args);
 
   // Xiaomi: config + helper build, never the vault or a paste form.
-  if (options.routeId === XIAOMI_ROUTE_ID) return setupXiaomi(options);
+  if (options.routeId === XIAOMI_ROUTE_ID) return setupXiaomi(cfg, options);
   const setupTarget = options.routeId ? cfg.routes.find((r) => r.id === options.routeId) : null;
   if (setupTarget && isXiaomi(setupTarget)) {
     err(`only ${XIAOMI_ROUTE_ID} is supported as a Chrome-cookie source route.`);

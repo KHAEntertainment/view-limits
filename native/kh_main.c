@@ -11,6 +11,10 @@
  *  - Interactive prompting is available only with an explicit --interactive
  *    flag (setup path); the default path never prompts.
  */
+/* POSIX.1-2008 declarations for the POSIX APIs used below; defined before the
+ * first include so every header in this TU sees the same feature set. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "kh_core.h"
 #include "kh_ops.h"
 #include "kh_pipe.h"

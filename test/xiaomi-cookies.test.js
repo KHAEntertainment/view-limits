@@ -48,7 +48,7 @@ const SKIP = SQLITE ? 'skip' : undefined;
       // wal_autocheckpoint=0 + open writer ⇒ data lives in the -wal file.
       const wal = fs.statSync(fx.walPath);
       assert.ok(wal.size > 0, 'expected committed data in the -wal file');
-      const { version, rows } = await readConsoleRows(fx.dbPath, { tempRoot });
+      const { version, rows } = await readConsoleRows(fx.dbPath, { tempRoot, platform: 'darwin' });
       assert.strictEqual(version, 24);
       assert.deepStrictEqual(rows.map((r) => r.name).sort(),
         ['api-platform_ph', 'api-platform_serviceToken', 'api-platform_slh', 'userId']);
@@ -90,7 +90,7 @@ const SKIP = SQLITE ? 'skip' : undefined;
       },
     };
     try {
-      await readConsoleRows(fx.dbPath, { tempRoot, sqlite: probe });
+      await readConsoleRows(fx.dbPath, { tempRoot, platform: 'darwin', sqlite: probe });
       assert.strictEqual(observed.length, 1);
       assert.strictEqual(observed[0].dirMode, 0o700, 'snapshot temp dir must be private 0700');
       assert.strictEqual(observed[0].fileMode, 0o600, 'snapshot db copy must be private 0600');
@@ -117,7 +117,7 @@ const SKIP = SQLITE ? 'skip' : undefined;
       fx.add(`.${fixtureMod.HOST}`, 'api-platform_serviceToken', { encrypted: poison, partition: 'https://other.example' });
       fx.add(`.${fixtureMod.HOST}`, 'deviceId', { encrypted: poison });
 
-      const { rows } = await readConsoleRows(fx.dbPath, { tempRoot });
+      const { rows } = await readConsoleRows(fx.dbPath, { tempRoot, platform: 'darwin' });
       assert.deepStrictEqual(rows.map((r) => r.name).sort(),
         ['api-platform_ph', 'api-platform_serviceToken', 'api-platform_slh', 'userId']);
       for (const row of rows) {
@@ -218,7 +218,7 @@ const SKIP = SQLITE ? 'skip' : undefined;
     let reads = 0;
     try {
       const loaded = await loadConsoleCookies(
-        { chromeSource: chromeRoot, chromeProfile: 'Profile 46' },
+        { chromeSource: chromeRoot, chromeProfile: 'Profile 46', platform: 'darwin' },
         { passwordReader: () => { reads += 1; return password; } },
       );
       assert.strictEqual(reads, 1, 'exactly one key read per operation');
@@ -232,13 +232,13 @@ const SKIP = SQLITE ? 'skip' : undefined;
 
       // profile guards (async — loadConsoleCookies returns a promise)
       assert.strictEqual(await acode(() => loadConsoleCookies(
-        { chromeSource: chromeRoot, chromeProfile: '../evil' }, { passwordReader: () => password },
+        { chromeSource: chromeRoot, chromeProfile: '../evil', platform: 'darwin' }, { passwordReader: () => password },
       )), 'invalid-chrome-profile');
       assert.strictEqual(await acode(() => loadConsoleCookies(
-        { chromeSource: '', chromeProfile: 'Profile 46' }, { passwordReader: () => password },
+        { chromeSource: '', chromeProfile: 'Profile 46', platform: 'darwin' }, { passwordReader: () => password },
       )), 'chrome-source-not-configured');
       assert.strictEqual(await acode(() => loadConsoleCookies(
-        { chromeSource: chromeRoot, chromeProfile: 'Profile 99' }, { passwordReader: () => password },
+        { chromeSource: chromeRoot, chromeProfile: 'Profile 99', platform: 'darwin' }, { passwordReader: () => password },
       )), 'cookie-db-not-found');
       assert.strictEqual(await acode(() => loadConsoleCookies(
         { chromeSource: chromeRoot, chromeProfile: 'Profile 46', platform: 'linux' }, { passwordReader: () => password },
@@ -246,7 +246,7 @@ const SKIP = SQLITE ? 'skip' : undefined;
       // errors never expose directory paths
       const caught = await (async () => {
         try {
-          await loadConsoleCookies({ chromeSource: chromeRoot, chromeProfile: 'Profile 99' }, { passwordReader: () => password });
+          await loadConsoleCookies({ chromeSource: chromeRoot, chromeProfile: 'Profile 99', platform: 'darwin' }, { passwordReader: () => password });
           return null;
         } catch (e) { return e; }
       })();
@@ -259,7 +259,7 @@ const SKIP = SQLITE ? 'skip' : undefined;
       let readsOnEmpty = 0;
       try {
         await loadConsoleCookies(
-          { chromeSource: path.join(root, 'Chrome2'), chromeProfile: 'Profile 46' },
+          { chromeSource: path.join(root, 'Chrome2'), chromeProfile: 'Profile 46', platform: 'darwin' },
           { passwordReader: () => { readsOnEmpty += 1; return password; } },
         );
         assert.fail('expected console-cookie-rows-missing');
@@ -285,10 +285,10 @@ const SKIP = SQLITE ? 'skip' : undefined;
     db.exec('CREATE TABLE other(x TEXT)');
     db.close();
     try {
-      assert.strictEqual(await acode(() => readConsoleRows(bad, { tempRoot })), 'cookie-db-unreadable');
+      assert.strictEqual(await acode(() => readConsoleRows(bad, { tempRoot, platform: 'darwin' })), 'cookie-db-unreadable');
       const missing = path.join(root, 'missing.db');
-      assert.strictEqual(await acode(() => readConsoleRows(missing, { tempRoot })), 'cookie-db-unreadable');
-      assert.strictEqual(await acode(() => readConsoleRows('', { tempRoot })), 'cookie-db-not-found');
+      assert.strictEqual(await acode(() => readConsoleRows(missing, { tempRoot, platform: 'darwin' })), 'cookie-db-unreadable');
+      assert.strictEqual(await acode(() => readConsoleRows('', { tempRoot, platform: 'darwin' })), 'cookie-db-not-found');
       assert.deepStrictEqual(fs.readdirSync(tempRoot), [], 'failed reads must still clean up');
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
@@ -298,7 +298,7 @@ const SKIP = SQLITE ? 'skip' : undefined;
   await test('missing node:sqlite capability classifies actionably instead of crashing', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-xiaomi-nosqlite-'));
     try {
-      assert.strictEqual(await acode(() => readConsoleRows(path.join(root, 'x.db'), { sqlite: {} })), 'node-sqlite-unavailable');
+      assert.strictEqual(await acode(() => readConsoleRows(path.join(root, 'x.db'), { platform: 'darwin', sqlite: {} })), 'node-sqlite-unavailable');
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

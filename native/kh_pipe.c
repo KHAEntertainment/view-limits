@@ -1,12 +1,11 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "kh_pipe.h"
 
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
-
-#if defined(__APPLE__)
 #include <time.h>
-#endif
+#include <unistd.h>
 
 static unsigned int chunk_bytes = 0;
 static unsigned int chunk_delay_us = 0;

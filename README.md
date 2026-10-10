@@ -84,16 +84,20 @@ values live only in memory for a single operation.
 ### Commands
 
 ```sh
-vl.js setup xiaomi-token-plan [--chrome-source PATH] [--profile "Profile 46"]
-vl.js update xiaomi-token-plan [--chrome-source PATH] [--profile "Profile 46"]
+vl.js setup xiaomi-token-plan [--chrome-source PATH] [--profile "Profile 1"]
+vl.js update xiaomi-token-plan [--chrome-source PATH] [--profile "Profile 1"]
 vl.js remove xiaomi-token-plan
 vl.js report | report --json | check xiaomi-token-plan | refresh | snapshot --json
 ```
 
 - **`setup`** appends the opt-in route, saves the selected Chrome source and
-  profile (known working selection: **Profile 46**, display name
-  `khaentertainment.com`), and builds the non-interactive key helper into the
-  plugin data directory — only when you invoke setup. It then prompts **once**
+  profile, and builds the non-interactive key helper into the plugin data
+  directory — only when you invoke setup. There is **no hardcoded profile**:
+  an explicit `--profile` wins, otherwise your previously saved selection is
+  kept, otherwise `Default` is used. To find your profile directory, open
+  `chrome://version` in the Chrome profile you actually use and read
+  **Profile Path** — its last path component is the profile name (for example
+  `Default` or `Profile 1`). Setup then prompts **once**
   for Chrome key access: choose **"Always Allow"** (not the one-shot "Allow")
   in the macOS dialog, because "Allow" persists nothing and the next
   background read would be denied again. When the native helper sources are
@@ -135,7 +139,7 @@ exhaustion/constraint verdict, reset time, compensation window, or tier label
 is ever inferred. An explicitly expired plan shows `unknown` with no windows.
 There is no SSO or automatic-renewal code: an invalid session renders
 `session unavailable — open https://platform.xiaomimimo.com/ in Chrome
-(profile Profile 46)…` for a **manual login in the selected profile**; the next
+(profile Profile 1)…` for a **manual login in the selected profile**; the next
 refresh picks up new cookies when Chrome supplies them.
 
 ### If access fails

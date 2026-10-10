@@ -66,6 +66,7 @@ function scratch(name) {
   const ctx = () => ({
     xiaomiDeps: {
       dataDir,
+      platform: 'darwin',
       passwordReader: () => Buffer.from(fixtureMod.PASSWORD, 'utf8'),
       transport: makeTransport('ok'),
     },
@@ -313,7 +314,7 @@ function assertNoSecrets(root, extra = []) {
       let st;
       try {
         // No helper exists under dataDir/bin ⇒ access() fails before any spawn.
-        st = await xiaomiSession.fetchStatus(s.cfg, s.cfg.routes[0], { xiaomiDeps: { dataDir: s.dataDir } });
+        st = await xiaomiSession.fetchStatus(s.cfg, s.cfg.routes[0], { xiaomiDeps: { dataDir: s.dataDir, platform: 'darwin' } });
       } finally {
         cp.spawn = originalSpawn;
         cp.spawnSync = originalSpawnSync;

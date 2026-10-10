@@ -46,7 +46,7 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
           `#!/bin/sh\ntouch "${executed}"\nexit 0\n`, { mode: 0o755 });
         return { status: 0 };
       };
-      const result = await buildHelper({ pluginRoot, dataDir, run });
+      const result = await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       assert.strictEqual(result.ok, true);
       assert.strictEqual(runCalls.length, 1);
       assert.strictEqual(runCalls[0].command, 'make');
@@ -71,19 +71,19 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
       fs.mkdirSync(path.join(pluginRoot, 'native'), { recursive: true });
 
       assert.strictEqual(await code(() => buildHelper({
-        pluginRoot, dataDir, run: async () => ({ status: 2 }),
+        pluginRoot, dataDir, platform: 'darwin', run: async () => ({ status: 2 }),
       })), 'helper-build-failed');
       assert.strictEqual(await code(() => buildHelper({
-        pluginRoot, dataDir, run: async () => ({ status: 0 }), // no artifact written
+        pluginRoot, dataDir, platform: 'darwin', run: async () => ({ status: 0 }), // no artifact written
       })), 'helper-install-failed');
       assert.strictEqual(await code(() => buildHelper({
         pluginRoot, dataDir, platform: 'linux', run: async () => ({ status: 0 }),
       })), 'unsupported-platform');
       assert.strictEqual(await code(() => buildHelper({
-        pluginRoot: '', dataDir, run: async () => ({ status: 0 }),
+        pluginRoot: '', dataDir, platform: 'darwin', run: async () => ({ status: 0 }),
       })), 'plugin-root-missing');
       assert.strictEqual(await code(() => buildHelper({
-        pluginRoot, dataDir: '', run: async () => ({ status: 0 }),
+        pluginRoot, dataDir: '', platform: 'darwin', run: async () => ({ status: 0 }),
       })), 'data-dir-missing');
       // No partial target left behind.
       assert.ok(!fs.existsSync(helperPathFor(dataDir)));
@@ -93,6 +93,10 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
   });
 
   await test('real compile-only build produces the reviewed helper; the binary is never executed', async () => {
+    if (process.platform !== 'darwin') {
+      console.log('    (not macOS — real compile check skipped)');
+      return;
+    }
     const make = spawnSync('make', ['--version'], { encoding: 'utf8' });
     const cc = spawnSync('cc', ['--version'], { encoding: 'utf8' });
     if (make.status !== 0 || cc.status !== 0) {
@@ -162,7 +166,7 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
       const calls = [];
       const run = fakeRun(pluginRoot, calls);
 
-      const first = await buildHelper({ pluginRoot, dataDir, run });
+      const first = await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       assert.strictEqual(first.ok, true);
       assert.strictEqual(first.skippedRebuild, false, 'first build always compiles');
       assert.strictEqual(calls.length, 1, 'first build runs make once');
@@ -172,7 +176,7 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
 
       // Same sources: the rebuild is skipped — make is never invoked and the
       // installed binary object is untouched (cdhash/ACL stays valid).
-      const second = await buildHelper({ pluginRoot, dataDir, run });
+      const second = await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       assert.strictEqual(second.ok, true);
       assert.strictEqual(second.skippedRebuild, true, 'identical sources reuse the installed helper');
       assert.strictEqual(calls.length, 1, 'unchanged source hash must NOT invoke make');
@@ -188,7 +192,7 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
 
       // Missing installed helper → rebuild even with a matching sidecar.
       fs.unlinkSync(target);
-      const third = await buildHelper({ pluginRoot, dataDir, run });
+      const third = await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       assert.strictEqual(third.skippedRebuild, false);
       assert.strictEqual(calls.length, 2, 'a missing helper forces make');
       assert.ok(fs.existsSync(target));
@@ -207,19 +211,19 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
       const run = fakeRun(pluginRoot, calls);
       const target = helperPathFor(dataDir);
 
-      await buildHelper({ pluginRoot, dataDir, run }); // calls = 1
+      await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run }); // calls = 1
       // Round 5 (P2-3): matching sidecar but the OWNER execute bit cleared —
       // the old `mode & 0o111` check accepted this (some other exec bit) and
       // skipped; accessSync(X_OK) must force a rebuild.
       fs.chmodSync(target, 0o601);
-      const rebuilt = await buildHelper({ pluginRoot, dataDir, run });
+      const rebuilt = await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       assert.strictEqual(rebuilt.skippedRebuild, false, '0601 must not report a usable helper identity');
       assert.strictEqual(calls.length, 2, 'make re-runs for a non-executable install');
       assert.strictEqual(fs.statSync(target).mode & 0o777, 0o700, 'rebuild restores a usable 0700 helper');
 
       // A proper owned-executable helper still skips, identity preserved.
       const before = fs.lstatSync(target);
-      const skipped = await buildHelper({ pluginRoot, dataDir, run });
+      const skipped = await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       assert.strictEqual(skipped.skippedRebuild, true);
       assert.strictEqual(calls.length, 2, 'no make when the install is executable again');
       const after = fs.lstatSync(target);
@@ -242,12 +246,12 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
       const target = helperPathFor(dataDir);
       const sidecar = `${target}.srcsha256`;
 
-      await buildHelper({ pluginRoot, dataDir, run });
+      await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       const firstIno = fs.lstatSync(target).ino;
       const firstHash = JSON.parse(fs.readFileSync(sidecar, 'utf8')).sha256;
 
       fs.appendFileSync(path.join(nativeDir, 'kh_fake.c'), '/* changed */\n');
-      const rebuilt = await buildHelper({ pluginRoot, dataDir, run });
+      const rebuilt = await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       assert.strictEqual(rebuilt.skippedRebuild, false, 'changed sources must rebuild (new helper identity)');
       assert.strictEqual(calls.length, 2, 'make re-runs after a source change');
       assert.notStrictEqual(JSON.parse(fs.readFileSync(sidecar, 'utf8')).sha256, firstHash, 'sidecar records the new hash');
@@ -271,14 +275,14 @@ const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'vl-helper-build-'))
       const target = helperPathFor(dataDir);
       const sidecar = `${target}.srcsha256`;
 
-      await buildHelper({ pluginRoot, dataDir, run });
+      await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       const sentinel = path.join(root, 'sentinel');
       fs.writeFileSync(sentinel, 'UNCHANGED', { mode: 0o644 });
       fs.unlinkSync(sidecar);
       fs.symlinkSync(sentinel, sidecar);
       fs.appendFileSync(path.join(nativeDir, 'kh_fake.c'), '/* changed */\n');
 
-      const rebuilt = await buildHelper({ pluginRoot, dataDir, run });
+      const rebuilt = await buildHelper({ pluginRoot, dataDir, platform: 'darwin', run });
       assert.strictEqual(rebuilt.ok, true, 'an unsafe sidecar degrades to a rebuild, never a failure');
       assert.strictEqual(rebuilt.skippedRebuild, false, 'the planted sidecar cannot fake a source match');
       assert.strictEqual(calls.length, 2, 'make re-runs');

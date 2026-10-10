@@ -106,6 +106,7 @@ Module._load = function xiaomiTestLoad(id) {
         ...ctx,
         xiaomiDeps: {
           ...(ctx.xiaomiDeps || {}),
+          platform: 'darwin',
           // One log line per synthetic key read: proves F4 coalescing (exactly
           // one acquisition per operation no matter how many Xiaomi aliases).
           passwordReader: () => {

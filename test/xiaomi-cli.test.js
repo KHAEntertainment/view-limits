@@ -999,6 +999,66 @@ async function until(predicate, deadlineMs = 5000) {
     cleanup(ctx);
   }
 
+  // ---- R6 F1: no hardcoded profile — explicit → saved → Default --------------
+  ctx = scratch('setup-profile-default');
+  try {
+    // The SAVED selection wins when --profile is absent (no 'Profile 46').
+    const cfg0 = readConfig(ctx);
+    cfg0.xiaomi.chromeProfile = 'Profile 7';
+    fs.writeFileSync(path.join(ctx.dir, 'config.json'), JSON.stringify(cfg0, null, 2));
+    const bare = run(ctx, ['setup', XIOMI_ID, '--chrome-source', ctx.chromeRoot]);
+    assert.strictEqual(bare.status, 0, bare.stderr);
+    assert.strictEqual(readConfig(ctx).xiaomi.chromeProfile, 'Profile 7',
+      'F1: bare setup must keep the saved profile — never a hardcoded default');
+
+    // Explicit --profile still wins over the saved selection.
+    const explicit = run(ctx, ['setup', XIOMI_ID, '--chrome-source', ctx.chromeRoot, '--profile', 'Profile 3']);
+    assert.strictEqual(explicit.status, 0, explicit.stderr);
+    assert.strictEqual(readConfig(ctx).xiaomi.chromeProfile, 'Profile 3');
+
+    // First-ever setup with no saved selection falls back to Default.
+    cleanup(ctx);
+    ctx = scratch('setup-profile-fresh', { xiaomi: false });
+    const fresh = run(ctx, ['setup', XIOMI_ID, '--chrome-source', ctx.chromeRoot]);
+    assert.strictEqual(fresh.status, 0, fresh.stderr);
+    assert.strictEqual(readConfig(ctx).xiaomi.chromeProfile, 'Default',
+      'F1: first setup without --profile uses Default');
+    console.log('  ✓ R6 F1: setup profile resolves explicit → saved → Default (never hardcoded)');
+  } finally {
+    cleanup(ctx);
+  }
+
+  // ---- R6 F2: bare update must NOT resurrect a removed canonical route --------
+  ctx = scratch('update-no-resurrect');
+  try {
+    // Canonical route removed while a custom Xiaomi alias (and the shared
+    // source/profile metadata) remains — a bare update must persist ONLY the
+    // source/profile selection, never routes or providers.
+    const cfg = readConfig(ctx);
+    cfg.routes = cfg.routes.filter((r) => r.id !== XIOMI_ID);
+    cfg.routes.push({
+      id: 'xiaomi-custom', provider: 'xiaomi', account: 'token-plan',
+      match: { model: 'mimo2' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+    });
+    fs.writeFileSync(path.join(ctx.dir, 'config.json'), JSON.stringify(cfg, null, 2));
+
+    const out = run(ctx, ['update']);
+    assert.strictEqual(out.status, 0, out.stderr);
+    const after = readConfig(ctx);
+    assert.ok(!after.routes.some((r) => r.id === XIOMI_ID),
+      'F2: bare update must not re-add the removed canonical route');
+    assert.ok(after.routes.some((r) => r.id === 'xiaomi-custom'), 'alias route preserved');
+    assert.ok(after.routes.some((r) => r.id === KIMI_ID), 'unrelated route preserved');
+    assert.strictEqual(after.xiaomi.chromeProfile, 'Profile 46', 'shared profile metadata preserved');
+    assert.strictEqual(after.xiaomi.chromeSource, ctx.chromeRoot, 'shared source metadata preserved');
+    assert.ok(after.providers && after.providers.xiaomi, 'provider metadata untouched');
+    assert.match(out.stderr, /Chrome cookie source revalidated/);
+    noVaultForXiaomi(ctx, true);
+    console.log('  ✓ R6 F2: bare update after canonical removal never resurrects the route');
+  } finally {
+    cleanup(ctx);
+  }
+
   // ---- F7: shared metadata kept while an alias still needs it -------------------
   ctx = scratch('remove-alias');
   try {

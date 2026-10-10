@@ -26,7 +26,7 @@ const os = require('os');
 const readline = require('readline');
 const { spawn } = require('child_process');
 
-const { loadConfig, dataDir, expandHome, deepMerge } = require('../lib/config');
+const { loadConfig, dataDir, expandHome, deepMerge, configPath, saveConfig } = require('../lib/config');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
@@ -35,13 +35,21 @@ const { resolveRoute, dispatchContext } = require('../lib/routes');
 const { decide, summarize } = require('../lib/gate');
 const vault = require('../lib/vault');
 const { getAdapter, ADAPTERS } = require('../lib/adapters');
-const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
+const { getRuntimeSnapshot, defaultReadStatus } = require('../lib/runtime-snapshot');
 const { recommend } = require('../lib/recommend');
 const { makeJevTransport } = require('../lib/jev-openrouter');
 const { traycerEnvCallerContext } = require('../lib/traycer-adapter');
 const { writeReceipt, ackReceipt, formatReceipt, receiptFact, OUTCOME_SUBMITTED, OUTCOME_ABANDONED, OUTCOME_FAILED } = require('../lib/receipts');
+// Xiaomi live fallback: config-only eligibility + one Chrome read + at most
+// one usage/detail pair per operation. Never the legacy vault for xiaomi.
+const xiaomiSession = require('../lib/xiaomi-session');
+const { validProfile } = require('../lib/cookies/chrome');
+const { buildHelper } = require('../lib/helper-install');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
+const XIAOMI_ROUTE_ID = xiaomiSession.XIAOMI_ROUTE_ID;
+const XIAOMI_DASHBOARD = xiaomiSession.DASHBOARD_URL;
+const isXiaomi = xiaomiSession.isXiaomiRoute;
 
 function log(msg) { process.stderr.write(`view-limits: ${msg}\n`); }
 function err(msg) { process.stderr.write(`view-limits: ${msg}\n`); process.exit(1); }
@@ -50,6 +58,112 @@ function noCredentialMessage() {
   return 'view-limits: no credentials configured yet.\n\n' +
     'Run /view-limits:setup to add your provider keys (auto-imports MiniMax\n' +
     'from ~/.mmx/config.json, then opens a local browser form for the rest).\n';
+}
+
+// ---- xiaomi helpers ----------------------------------------------------------
+//
+// The Xiaomi console fallback is live-only: every normal report/check/refresh
+// reads the selected Chrome profile's cookies once and performs at most one
+// usage/detail pair. Cached Xiaomi counts are NEVER used to satisfy a normal
+// render — only the diagnostic `snapshot` command reads them (age-explicit).
+
+function reauthNote(reauth) {
+  const profile = reauth && reauth.profile ? ` (profile ${reauth.profile})` : '';
+  const url = reauth && reauth.url ? reauth.url : XIAOMI_DASHBOARD;
+  return `session unavailable — open ${url} in Chrome${profile} and log in if needed; next refresh checks for new cookies`;
+}
+
+function defaultChromeSource() {
+  return path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
+}
+
+// Shared recognizability filter (F1): a cache row is Xiaomi when its id is a
+// currently-configured Xiaomi route, or it is the canonical Xiaomi route id,
+// or its provenance marks it ours — `source: 'xiaomi'` (our writer's stamp)
+// or a `tokens` window (a window type only the Xiaomi adapter emits). Normal
+// renders (text, JSON, contended) strip every recognizable row; only the
+// diagnostic `snapshot` keeps them as age-labelled historical evidence.
+function xiaomiCacheFilter(cfg) {
+  const configured = new Set(cfg.routes.filter(isXiaomi).map((r) => r.id));
+  return (id, entry) => {
+    if (configured.has(id)) return true;
+    if (id === XIAOMI_ROUTE_ID) return true;
+    if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+      if (entry.source === 'xiaomi') return true;
+      const st = entry.status;
+      if (st && typeof st === 'object' && !Array.isArray(st) && Array.isArray(st.windows) &&
+        st.windows.some((w) => w && typeof w === 'object' && w.type === 'tokens')) {
+        return true;
+      }
+    }
+    return false;
+  };
+}
+
+// Run the live Xiaomi session ONCE per operation (F4: one Chrome read + at
+// most one usage/detail pair for the whole report/refresh, no matter how
+// many Xiaomi route aliases are configured) and project that single status
+// to every Xiaomi route. The session never throws by contract; a defensive
+// catch still yields a classified unknown so a report can never fall back to
+// cached counts.
+async function xiaomiLiveStatuses(cfg, sessionCtx = {}) {
+  const statusById = {};
+  const routes = cfg.routes.filter(isXiaomi);
+  if (!routes.length) return statusById;
+  let status;
+  try {
+    status = await xiaomiSession.fetchStatus(cfg, routes[0], sessionCtx);
+  } catch {
+    status = xiaomiSession.errorStatus(xiaomiSession.DEFAULT_ERROR);
+  }
+  for (const route of routes) statusById[route.id] = status;
+  return statusById;
+}
+
+// Display entries for live Xiaomi statuses. These render as fresh because
+// this process just observed them; the cache file itself keeps ttlSeconds 0
+// (route schema) so the gate never trusts cached Xiaomi counts.
+function xiaomiLiveEntries(cfg, statusById) {
+  const entries = {};
+  const now = Date.now();
+  for (const route of cfg.routes) {
+    if (!isXiaomi(route)) continue;
+    const status = statusById[route.id];
+    if (!status) continue;
+    entries[route.id] = {
+      routeId: route.id,
+      observedAt: new Date(now).toISOString(),
+      freshUntil: new Date(now + 1000).toISOString(),
+      source: 'xiaomi',
+      status,
+    };
+  }
+  return entries;
+}
+
+// readStatus overlay for normal renders: strips EVERY recognizable Xiaomi
+// cache entry (F1: configured ids, canonical id, orphaned `source:'xiaomi'`
+// and `tokens`-window provenance) and substitutes the supplied live/pending
+// entries, so stale Xiaomi counts cannot leak into report/refresh text or
+// JSON — including under refresh-lock contention. Applies even when no status
+// cache exists yet (first-run) or the cache is corrupt: a live Xiaomi
+// observation must render either way.
+function overlayReader(cfg, liveEntries) {
+  const isXiaomiEntry = xiaomiCacheFilter(cfg);
+  return (dir) => {
+    const raw = defaultReadStatus(dir);
+    const doc = raw.doc && typeof raw.doc === 'object' && !Array.isArray(raw.doc) && raw.doc.routes
+      && typeof raw.doc.routes === 'object' && !Array.isArray(raw.doc.routes)
+      ? raw.doc
+      : { updatedAt: null, routes: {} };
+    const routes = {};
+    for (const [id, entry] of Object.entries(doc.routes)) {
+      if (isXiaomiEntry(id, entry)) continue;
+      routes[id] = entry;
+    }
+    Object.assign(routes, liveEntries || {});
+    return { ...raw, doc: { ...doc, routes } };
+  };
 }
 
 function readStdin() {
@@ -126,7 +240,8 @@ function unknownStatus(detail) {
 async function refresh(quiet, fromSessionStart = false) {
   const cfg = loadConfig();
   if (fromSessionStart && !cfg.refreshOnSessionStart) return;
-  const configured = cfg.routes.filter((r) => cfg.providers[r.provider] && vault.has(r.id));
+  // Xiaomi eligibility is config-only (route presence) — no vault read.
+  const configured = cfg.routes.filter((r) => (isXiaomi(r) ? true : cfg.providers[r.provider] && vault.has(r.id)));
   if (!configured.length) {
     if (!quiet) process.stdout.write(noCredentialMessage());
     return;
@@ -143,7 +258,15 @@ async function refresh(quiet, fromSessionStart = false) {
   if (!acq.acquired) {
     if (!quiet) {
       const cache = readCache();
-      const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
+      // Contention: Xiaomi shows pending — never the cached counts.
+      const pendingById = {};
+      for (const route of cfg.routes) {
+        if (isXiaomi(route)) pendingById[route.id] = xiaomiSession.pendingStatus();
+      }
+      const snap = await getRuntimeSnapshot({
+        callerContext: cliCallerContext(),
+        io: { readStatus: overlayReader(cfg, xiaomiLiveEntries(cfg, pendingById)) },
+      });
       process.stdout.write(renderInventory(snap, cache.updatedAt) + '\n');
       process.stdout.write(
         `view-limits: ${acq.error ? 'refresh unavailable (' + acq.error + ')' : 'refresh already in progress'}. ` +
@@ -156,18 +279,33 @@ async function refresh(quiet, fromSessionStart = false) {
   try {
     const threshold = cfg.gate.constrainedThreshold;
     const statuses = {};
-    await Promise.all(configured.map(async (route) => {
-      try {
-        const st = await getAdapter(route.provider).fetchStatus(cfg.providers[route.provider], vault.get(route.id), { threshold });
-        statuses[route.id] = entryFor(route, st, route.provider);
-      } catch (e) {
-        statuses[route.id] = entryFor(route, unknownStatus({ error: e.message }), route.provider);
-      }
-    }));
+    // F4: exactly ONE Xiaomi session call for the whole refresh — one Chrome
+    // read + at most one usage/detail pair, projected to every Xiaomi alias.
+    // Other providers keep independent parallel fetches.
+    const xiaomiPromise = xiaomiLiveStatuses(cfg, { threshold });
+    await Promise.all([
+      xiaomiPromise,
+      ...configured.filter((route) => !isXiaomi(route)).map(async (route) => {
+        try {
+          statuses[route.id] = await getAdapter(route.provider)
+            .fetchStatus(cfg.providers[route.provider], vault.get(route.id), { threshold });
+        } catch (e) {
+          statuses[route.id] = unknownStatus({ error: e.message });
+        }
+      }),
+    ]);
+    Object.assign(statuses, await xiaomiPromise);
 
-    const doc = writeCache(statuses);
+    const cacheEntries = {};
+    for (const route of configured) cacheEntries[route.id] = entryFor(route, statuses[route.id], route.provider);
+    const doc = writeCache(cacheEntries);
     if (!quiet) {
-      const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
+      // Render the just-observed Xiaomi state; the cache keeps ttlSeconds 0
+      // for the gate, display freshness marks this process's observation.
+      const snap = await getRuntimeSnapshot({
+        callerContext: cliCallerContext(),
+        io: { readStatus: overlayReader(cfg, xiaomiLiveEntries(cfg, statuses)) },
+      });
       process.stdout.write(renderInventory(snap, doc.updatedAt) + '\n');
     }
   } finally {
@@ -372,9 +510,16 @@ function renderRoute(row) {
   }
   const resetAt = factValue(res.resetAt);
   const reset = resetAt ? ` · resets ${new Date(resetAt).toLocaleString()}` : '';
+  const xiaomiRow = factValue(row.provider) === 'xiaomi';
   let note = '';
   if (state === 'unknown') {
-    if (res.error) {
+    if (xiaomiRow) {
+      // Xiaomi: classified fixed message or the FULL dashboard link — never
+      // the credential-rotation hint, never a truncated URL.
+      if (res.reauth) note = ` — ${reauthNote(res.reauth)}`;
+      else if (res.error) note = ` — ${String(res.error)}`;
+      else if (res.state && res.state.reason) note = ` — ${res.state.reason}`;
+    } else if (res.error) {
       const msg = String(res.error);
       note = ` — ${msg.length > 80 ? msg.slice(0, 80) + '…' : msg} (rotate via /view-limits:update ${row.id})`;
     } else if (res.state && res.state.reason) {
@@ -399,6 +544,15 @@ async function check(routeId) {
   const cfg = loadConfig();
   const route = cfg.routes.find((r) => r.id === routeId);
   if (!route) err(`unknown route "${routeId}" (known: ${cfg.routes.map((r) => r.id).join(', ')})`);
+  if (isXiaomi(route)) {
+    // Live path: one Chrome read + <= one usage/detail pair, no vault.
+    const st = await xiaomiSession.fetchStatus(cfg, route, { threshold: cfg.gate.constrainedThreshold });
+    const detail = st && st.detail && typeof st.detail === 'object' ? st.detail : {};
+    if (detail.reauth) err(`check ${routeId} failed: ${reauthNote(detail.reauth)}`);
+    if (detail.error) err(`check ${routeId} failed: ${detail.error}`);
+    process.stdout.write(JSON.stringify(st, null, 2) + '\n');
+    return;
+  }
   const token = vault.get(route.id);
   if (!token) err(`no credential for "${routeId}" — run: vl.js setup`);
   let st;
@@ -508,6 +662,13 @@ function serve(port, nonce, ids) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) err('credential form received an invalid port.');
   if (typeof nonce !== 'string' || !nonce) err('credential form received an invalid nonce.');
   if (!ids.length || ids.some((id) => !known.has(id))) err('credential form received an unknown route.');
+  // Xiaomi never uses the paste form (Chrome cookies, no stored key).
+  const xiaomiFormId = ids.some((id) => {
+    if (id === XIAOMI_ROUTE_ID) return true;
+    const route = cfg.routes.find((r) => r.id === id);
+    return !!(route && isXiaomi(route));
+  });
+  if (xiaomiFormId) err('credential form cannot include xiaomi-token-plan (no paste form for Chrome cookie sources).');
   preflightVault();
 
   let abandonTimer = null;
@@ -703,12 +864,21 @@ async function openForm(ids) {
 }
 
 function parseCredentialArgs(cfg, args) {
-  const parsed = { routeId: null, headless: false, key: null };
+  const parsed = { routeId: null, headless: false, key: null, profile: null, chromeSource: null };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--headless') {
       if (parsed.headless) err('duplicate --headless option.');
       parsed.headless = true;
+      continue;
+    }
+    if (arg === '--profile' || arg === '--chrome-source') {
+      const field = arg === '--profile' ? 'profile' : 'chromeSource';
+      if (parsed[field] !== null) err(`duplicate ${arg} option.`);
+      const value = args[i + 1];
+      if (typeof value !== 'string' || !value.trim() || value.startsWith('--')) err(`${arg} requires a non-empty value.`);
+      parsed[field] = value;
+      i += 1;
       continue;
     }
     if (arg === '--key') {
@@ -724,11 +894,20 @@ function parseCredentialArgs(cfg, args) {
     if (parsed.routeId) err('only one route can be selected at a time.');
     parsed.routeId = arg;
   }
-  if (parsed.routeId && !cfg.routes.some((route) => route.id === parsed.routeId)) {
+  // xiaomi-token-plan is a known route even before setup appends it (opt-in).
+  const known = parsed.routeId === XIAOMI_ROUTE_ID || cfg.routes.some((route) => route.id === parsed.routeId);
+  if (parsed.routeId && !known) {
     err(`unknown route "${parsed.routeId}" (known: ${cfg.routes.map((route) => route.id).join(', ')})`);
   }
   if (parsed.key !== null && !parsed.routeId) err('--key requires a route id.');
   if (parsed.key !== null && parsed.headless) err('--key and --headless cannot be used together.');
+  if ((parsed.profile !== null || parsed.chromeSource !== null) && parsed.routeId !== XIAOMI_ROUTE_ID) {
+    err('--profile and --chrome-source apply only to xiaomi-token-plan.');
+  }
+  if (parsed.profile !== null && parsed.headless) err('--profile and --headless cannot be used together.');
+  if (parsed.chromeSource !== null && parsed.headless) err('--chrome-source and --headless cannot be used together.');
+  if (parsed.profile !== null && parsed.key !== null) err('--profile and --key cannot be used together.');
+  if (parsed.chromeSource !== null && parsed.key !== null) err('--chrome-source and --key cannot be used together.');
   return parsed;
 }
 
@@ -752,9 +931,245 @@ function setupOne(cfg, options, allowImport) {
   return openForm([id]);
 }
 
+// ---- xiaomi setup/update/remove ------------------------------------------------
+//
+// Chrome-cookie source configuration lives in config.json (route + provider
+// settings + selected profile). No paste form, no vault write, no cookie
+// persistence. The background key helper is built ONLY here — when the user
+// explicitly invokes setup — and is never executed by setup itself.
+
+function readUserConfig() {
+  try {
+    const doc = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+    return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : {};
+  } catch {
+    return {};
+  }
+}
+
+// Append/refresh the opt-in route + pinned provider settings + explicit
+// chrome source/profile. `routes` merge is by replacement, so the effective
+// route list is written back in full. STAGES the document; committing is
+// explicit so setup can order it after a successful helper build (F3).
+function planXiaomiConfig(patch) {
+  const user = readUserConfig();
+  const effective = loadConfig();
+  const routes = effective.routes.slice();
+  const existing = routes.find((route) => route.id === XIAOMI_ROUTE_ID);
+  if (existing) {
+    // Keep schema guarantees on an existing entry.
+    existing.provider = 'xiaomi';
+    existing.ttlSeconds = 0;
+    existing.credentialSource = 'chrome-cookies';
+  } else {
+    routes.push({
+      id: XIAOMI_ROUTE_ID,
+      provider: 'xiaomi',
+      account: 'token-plan',
+      match: { model: 'mimo' },
+      ttlSeconds: 0,
+      credentialSource: 'chrome-cookies',
+    });
+  }
+  user.routes = routes;
+  user.providers = user.providers && typeof user.providers === 'object' && !Array.isArray(user.providers)
+    ? { ...user.providers } : {};
+  user.providers.xiaomi = { baseUrl: 'https://platform.xiaomimimo.com' };
+  user.xiaomi = user.xiaomi && typeof user.xiaomi === 'object' && !Array.isArray(user.xiaomi)
+    ? { ...user.xiaomi } : {};
+  Object.assign(user.xiaomi, patch);
+  return user;
+}
+
+// F2 (round 6): revalidation persists ONLY the shared source/profile
+// selection. It must never resurrect a removed canonical route or touch
+// providers — route append + provider pinning remain setup's job.
+function writeXiaomiSourceProfile(patch) {
+  const user = readUserConfig();
+  user.xiaomi = user.xiaomi && typeof user.xiaomi === 'object' && !Array.isArray(user.xiaomi)
+    ? { ...user.xiaomi } : {};
+  Object.assign(user.xiaomi, patch);
+  saveConfig(user);
+}
+
+// Private state reset with the F2 refusal surfaced as one fixed actionable
+// error. Used by setup/update/remove; unsafe metadata never gets followed.
+// N1: a REAL unlink failure is surfaced as its own classified message (never
+// mistaken for absence/success); N2: callers run this BEFORE saving config,
+// so any refusal here leaves the prior selection untouched.
+function resetXiaomiStateOrFail() {
+  try {
+    xiaomiSession.resetXiaomiState(dataDir());
+  } catch (e) {
+    const code = e && e.code === 'metadata-remove-failed'
+      ? 'metadata-remove-failed' : 'metadata-unsafe';
+    err(xiaomiSession.message(code));
+  }
+}
+
+// Interactive key grant (round 4) — EXPLICIT setup/update only. The macOS
+// dialog is answered by the USER; nothing here automates or bypasses it.
+// One instruction line before the prompt (single line, no stack trace); a
+// denial refuses the command via err() BEFORE any config is saved, keeping
+// the F3/N2 "config only after required steps succeed" invariant.
+async function grantInteractiveKeyOrFail() {
+  log('Approve Chrome key access: click "Always Allow" (not "Allow") in the macOS dialog.');
+  try {
+    await xiaomiSession.grantInteractiveKey(dataDir());
+  } catch {
+    err('Chrome key access was not granted — rerun /view-limits:setup xiaomi-token-plan, then click "Always Allow" (not "Allow") in the macOS dialog.');
+  }
+}
+
+// Round 5 (P2-1): READ-ONLY prevalidation — refuse unsafe/read-only private
+// state BEFORE the interactive prompt, with the same classified messages the
+// reset uses. Nothing is mutated and config is untouched.
+function prevalidateXiaomiStateOrFail() {
+  try {
+    xiaomiSession.prevalidateXiaomiStateForReset(dataDir());
+  } catch (e) {
+    const code = e && e.code === 'metadata-remove-failed'
+      ? 'metadata-remove-failed' : 'metadata-unsafe';
+    err(xiaomiSession.message(code));
+  }
+}
+
+async function setupXiaomi(cfg, options) {
+  if (options.key !== null) {
+    err('xiaomi-token-plan stores no key — Chrome console cookies are read at refresh time (no paste form).');
+  }
+  if (options.headless) err('xiaomi-token-plan stores no key — --headless does not apply.');
+  // F1 (round 6): NO hardcoded profile. Priority: explicit --profile → the
+  // SAVED selection (a rerun must not clobber it) → 'Default'. An invalid
+  // saved value degrades to 'Default'; an invalid EXPLICIT value still errs.
+  const savedProfile = cfg && cfg.xiaomi && typeof cfg.xiaomi === 'object'
+    ? cfg.xiaomi.chromeProfile : undefined;
+  const profile = options.profile !== null && options.profile !== undefined
+    ? options.profile
+    : (validProfile(savedProfile) ? savedProfile : 'Default');
+  if (!validProfile(profile)) err('invalid Chrome profile — use "Default" or "Profile <number>".');
+  const source = options.chromeSource ? expandHome(options.chromeSource) : defaultChromeSource();
+  if (typeof source !== 'string' || !source.trim()) err('chrome source must be a non-empty path.');
+
+  // F3: STAGE the intended config first, build/install the helper, and only
+  // after a successful build commit the config and clear private state. A
+  // compile/install/platform failure therefore preserves the prior
+  // source/config/suppression — a first setup fails without enabling the
+  // route at all, and a failed reconfigure keeps the prior selection.
+  // N2: the owned-state reset must COMPLETE before the selection is
+  // published — a metadata refusal exits here with config untouched.
+  // Round 4: an unchanged native source REUSES the installed helper (its
+  // identity — and the user's "Always Allow" grant — survives), and the
+  // interactive grant runs before reset+save so the first background read
+  // is not denied on a fresh machine.
+  const planned = planXiaomiConfig({ chromeSource: source, chromeProfile: profile });
+  let built;
+  try {
+    built = await buildHelper({ pluginRoot: PLUGIN_ROOT, dataDir: dataDir() });
+  } catch (e) {
+    const code = e && typeof e.code === 'string' ? e.code : 'helper-build-failed';
+    if (code === 'unsupported-platform') {
+      err('helper build requires macOS — the Chrome cookie fallback is macOS-only.');
+    }
+    if (code === 'helper-build-failed') {
+      err('helper build failed — install the Xcode command line tools (xcode-select --install), then rerun /view-limits:setup xiaomi-token-plan.');
+    }
+    err('helper build failed — rerun /view-limits:setup xiaomi-token-plan.');
+  }
+  log(built && built.skippedRebuild
+    ? 'helper unchanged — identity preserved'
+    : 'background key helper built (non-interactive reads only)');
+  // Round 5: refuse unsafe state BEFORE prompting; user-driven Keychain grant
+  // next; a denial exits here (no config change). The mutating reset runs
+  // only AFTER the grant succeeds.
+  prevalidateXiaomiStateOrFail();
+  await grantInteractiveKeyOrFail();
+  // A successful explicit setup makes the source eligible again: drop any
+  // stale rejected-bundle digest or key-failure suppression. Runs BEFORE the
+  // config commit so a refusal cannot leave a switched selection behind (N2).
+  resetXiaomiStateOrFail();
+  saveConfig(planned);
+  log(`configured Chrome cookie source for ${XIAOMI_ROUTE_ID} (profile ${profile})`);
+  log('run /view-limits to fetch current usage.');
+}
+
+// Validate/refresh the configured source+profile (update path). No vault, no
+// form, no helper build. Round 4: update DELIBERATELY performs the same
+// user-approved interactive key grant as setup (a profile/source change can
+// invalidate which store the ACL must cover) — background reads still never
+// prompt. Round 5 (P2-1): order is READ-ONLY prevalidation → interactive
+// grant → MUTATING reset → publish the selection, so a denied update leaves
+// prior config AND both private markers (rejection digest + suppression)
+// intact — nothing mutating runs before the grant succeeds.
+async function revalidateXiaomiSource(cfg, options) {
+  const current = cfg.xiaomi && typeof cfg.xiaomi === 'object' ? cfg.xiaomi : {};
+  const profile = options.profile !== null && options.profile !== undefined ? options.profile : current.chromeProfile;
+  const source = options.chromeSource ? expandHome(options.chromeSource) : current.chromeSource;
+  if (!validProfile(profile)) {
+    err('Chrome profile not configured — run /view-limits:setup xiaomi-token-plan (use "Default" or "Profile <number>").');
+  }
+  if (typeof source !== 'string' || !source.length) {
+    err('Chrome source not configured — run /view-limits:setup xiaomi-token-plan.');
+  }
+  prevalidateXiaomiStateOrFail();
+  await grantInteractiveKeyOrFail();
+  resetXiaomiStateOrFail();
+  writeXiaomiSourceProfile({ chromeSource: source, chromeProfile: profile });
+  log(`Chrome cookie source revalidated for ${XIAOMI_ROUTE_ID} (profile ${profile}).`);
+}
+
+async function updateXiaomi(cfg, options) {
+  const route = cfg.routes.find((r) => r.id === options.routeId);
+  if (!route) err(`${XIAOMI_ROUTE_ID} is not configured — run /view-limits:setup ${XIAOMI_ROUTE_ID} first.`);
+  if (options.key !== null) err('xiaomi-token-plan stores no key — no paste form.');
+  if (options.headless) err('xiaomi-token-plan stores no key — --headless does not apply.');
+  await revalidateXiaomiSource(cfg, options);
+}
+
+function removeXiaomi(cfg, routeId) {
+  const user = readUserConfig();
+  const routes = Array.isArray(user.routes) ? user.routes : [];
+  const remaining = routes.filter((route) => !(route && route.id === routeId));
+  const aliasStillConfigured = remaining.some((route) => route && route.provider === 'xiaomi');
+  if (!aliasStillConfigured) {
+    // F7: the FINAL Xiaomi route goes — drop its private state first so an
+    // unsafe-metadata refusal leaves the config untouched, then remove the
+    // saved source/profile and provider metadata with it.
+    resetXiaomiStateOrFail();
+    delete user.xiaomi;
+    if (user.providers && typeof user.providers === 'object' && !Array.isArray(user.providers)) {
+      delete user.providers.xiaomi;
+    }
+  }
+  // When another Xiaomi alias still needs the shared source/profile/provider
+  // metadata, it is intentionally retained.
+  user.routes = remaining;
+  saveConfig(user);
+  // Drop any cached counts so no orphan row can render old Xiaomi numbers.
+  try {
+    const cache = readCache();
+    if (cache.routes && Object.prototype.hasOwnProperty.call(cache.routes, routeId)) {
+      const cached = { ...cache.routes };
+      delete cached[routeId];
+      writeCache(cached);
+    }
+  } catch { /* cache rewrite is best effort */ }
+  log(aliasStillConfigured
+    ? `disabled route "${routeId}" (shared Chrome cookie source kept for other Xiaomi routes)`
+    : `disabled Chrome cookie source for "${routeId}" and removed private metadata`);
+}
+
 function setup(args) {
   const cfg = loadConfig();
   const options = parseCredentialArgs(cfg, args);
+
+  // Xiaomi: config + helper build, never the vault or a paste form.
+  if (options.routeId === XIAOMI_ROUTE_ID) return setupXiaomi(cfg, options);
+  const setupTarget = options.routeId ? cfg.routes.find((r) => r.id === options.routeId) : null;
+  if (setupTarget && isXiaomi(setupTarget)) {
+    err(`only ${XIAOMI_ROUTE_ID} is supported as a Chrome-cookie source route.`);
+  }
+
   preflightVault();
 
   // Single route: `vl.js setup <routeId> [--key K]`
@@ -765,6 +1180,7 @@ function setup(args) {
   const imported = [];
   const failed = [];
   for (const route of cfg.routes) {
+    if (isXiaomi(route)) continue; // Chrome-cookie source: no vault credential
     const imp = cfg.importMap && cfg.importMap[route.id];
     const secret = imp ? readNativeSecret(imp) : null;
     if (secret) {
@@ -788,23 +1204,51 @@ function setup(args) {
   return openForm(missing);
 }
 
-function update(args) {
+async function update(args) {
   const cfg = loadConfig();
   const options = parseCredentialArgs(cfg, args);
+
+  // Xiaomi: revalidate source/profile — no vault preflight, no form.
+  if (options.routeId === XIAOMI_ROUTE_ID) return updateXiaomi(cfg, options);
+  const updateTarget = options.routeId ? cfg.routes.find((r) => r.id === options.routeId) : null;
+  if (updateTarget && isXiaomi(updateTarget)) {
+    err(`only ${XIAOMI_ROUTE_ID} is supported as a Chrome-cookie source route.`);
+  }
+
   preflightVault();
 
   // Single route: `vl.js update <routeId>` — rotate one existing key.
   if (options.routeId) return setupOne(cfg, options, false);
 
+  // Bare update: revalidate a configured xiaomi source alongside the others.
+  const xiaomiConfigured = cfg.routes.find(isXiaomi) || null;
+  // Round 5 (P2-2): the xiaomi revalidate carries the interactive grant and
+  // must RESOLVE before any sibling credential is touched — a denial aborts
+  // the whole update, so no other bearer key is rotated first.
+  if (xiaomiConfigured) await revalidateXiaomiSource(cfg, options);
+
   // Rotate existing credentials: open the form for configured routes.
-  const existing = cfg.routes.filter((r) => vault.has(r.id));
-  if (!existing.length) { log('no credentials to update — run /view-limits:setup first.'); return; }
+  const existing = cfg.routes.filter((r) => !isXiaomi(r) && vault.has(r.id));
+  if (!existing.length) {
+    if (!xiaomiConfigured) log('no credentials to update — run /view-limits:setup first.');
+    return;
+  }
   log(`updating credentials for: ${existing.map((r) => r.id).join(', ')}`);
   if (options.headless) return promptHeadless(existing.map((r) => r.id));
   return openForm(existing.map((r) => r.id));
 }
 
 function remove(routeId) {
+  const cfg = loadConfig();
+  const route = cfg.routes.find((r) => r.id === routeId);
+  if (routeId === XIAOMI_ROUTE_ID || (route && isXiaomi(route))) {
+    if (!route) {
+      log(`no Chrome cookie source configured for "${routeId}"`);
+      return;
+    }
+    removeXiaomi(cfg, routeId);
+    return;
+  }
   log(vault.remove(routeId) ? `removed credential for "${routeId}"` : `no credential for "${routeId}"`);
 }
 
@@ -914,10 +1358,22 @@ function config() {
   const out = {
     dataDir: dataDir(),
     vaultBackend: cfg.vault.backend,
-    routes: cfg.routes.map((r) => ({
-      id: r.id, provider: r.provider, account: r.account, match: r.match,
-      ttlSeconds: r.ttlSeconds, hasCredential: vault.has(r.id),
-    })),
+    routes: cfg.routes.map((r) => (isXiaomi(r)
+      ? {
+        // Config metadata only — no vault, Chrome, or Keychain read, and no
+        // claim that a server-side session is currently valid.
+        id: r.id, provider: r.provider, account: r.account, match: r.match,
+        ttlSeconds: r.ttlSeconds,
+        credentialSource: r.credentialSource || 'chrome-cookies',
+        cookieSourceConfigured: xiaomiSession.sourceConfigured(cfg),
+        ...(cfg.xiaomi && typeof cfg.xiaomi === 'object'
+          ? { chromeProfile: cfg.xiaomi.chromeProfile, chromeSource: cfg.xiaomi.chromeSource }
+          : {}),
+      }
+      : {
+        id: r.id, provider: r.provider, account: r.account, match: r.match,
+        ttlSeconds: r.ttlSeconds, hasCredential: vault.has(r.id),
+      })),
     providers: Object.fromEntries(Object.entries(cfg.providers).map(([k, v]) => [k, v.baseUrl])),
     gate: cfg.gate,
     refreshOnSessionStart: cfg.refreshOnSessionStart,
@@ -930,7 +1386,8 @@ function config() {
 
 function sessionStart() {
   const cfg = loadConfig();
-  const hasCreds = cfg.routes.some((r) => vault.has(r.id));
+  // Xiaomi counts as configured from config metadata alone — never vault.has.
+  const hasCreds = cfg.routes.some((r) => (isXiaomi(r) ? true : vault.has(r.id)));
   // Surface any fresh credential receipt and ack it (session-start already
   // performs writes in some paths, so acking here is consistent).
   const receiptMsg = formatReceipt(receiptFact(dataDir()));
@@ -968,13 +1425,34 @@ const hasFlag = (n) => args.includes(n);
       const cache = readCache();
       // [#7] Surface any fresh credential receipt even on first-run (no creds).
       const receiptMsg = formatReceipt(receiptFact(dataDir()));
-      if (!cfg.routes.some((r) => vault.has(r.id))) {
+      // Xiaomi is configured by route presence alone (no vault read).
+      const anyConfigured = cfg.routes.some((r) => (isXiaomi(r) ? true : vault.has(r.id)));
+      if (!anyConfigured) {
         process.stdout.write(noCredentialMessage());
         if (receiptMsg) process.stdout.write('  ' + receiptMsg + '\n');
         return;
       }
-      if (hasFlag('--json')) return process.stdout.write(JSON.stringify(cache, null, 2) + '\n');
-      const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
+      // Normal Xiaomi reports are LIVE: ONE Chrome read + at most one
+      // usage/detail pair for the whole operation (F4), projected to every
+      // Xiaomi alias. Every recognizable cached Xiaomi row — configured,
+      // canonical, orphaned — is stripped from this render (F1).
+      const statusById = await xiaomiLiveStatuses(cfg);
+      const liveEntries = xiaomiLiveEntries(cfg, statusById);
+      if (hasFlag('--json')) {
+        const isXiaomiEntry = xiaomiCacheFilter(cfg);
+        const routes = {};
+        for (const [id, entry] of Object.entries(cache.routes || {})) {
+          if (isXiaomiEntry(id, entry)) continue;
+          routes[id] = entry;
+        }
+        Object.assign(routes, liveEntries);
+        process.stdout.write(JSON.stringify({ ...cache, routes }, null, 2) + '\n');
+        return;
+      }
+      const snap = await getRuntimeSnapshot({
+        callerContext: cliCallerContext(),
+        io: { readStatus: overlayReader(cfg, liveEntries) },
+      });
       let report = renderInventory(snap, cache.updatedAt);
       // Surface any fresh credential receipt (read-only, no ack).
       if (receiptMsg) report += '\n  ' + receiptMsg;

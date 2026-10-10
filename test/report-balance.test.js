@@ -83,6 +83,37 @@ try {
   assert.match(report.stdout, /openrouter-usage-only: unknown · spent 2\.50 USD week/);
   assert.doesNotMatch(report.stdout, /balance 0\.00 USD|NaN|undefined/);
 
+  // Phase 0 (Issue #35) regression: byte-stable deterministic lines must
+  // survive the move of rendering into lib/view-model.js. The requester line
+  // and generatedAt inherit env / wall clock from the parent process and are
+  // out of scope here; the harness-pool section, the per-route line shape
+  // (with sub-cent `<0.01`, balance vs spent selection, stale suffix), the
+  // counts line, and the cache-updated footer all carry the view model's
+  // exact formatting — any drift in indentation, separator, or rendering
+  // rule fails this check.
+  const expectedLines = [
+    /^view-limits runtime inventory — generated .+ · completeness partial$/,
+    /^  requester: .+$/,
+    /^    models: configured unknown · default unknown · effective unknown$/,
+    /^  harness pool:$/,
+    /^    \(no runtime harness\/session\/profile facts\)$/,
+    /^    reason: No cached harness, session, or profile facts are available in runtime\.json\..*$/,
+    /^  external routes:$/,
+    /^    openrouter-main: healthy · balance <0\.01 USD · spent <0\.01 USD week · 20\.00 USD monthly cap \(stale\)$/,
+    /^    openrouter-usage-only: unknown · spent 2\.50 USD week \(stale\)$/,
+    /^$/,
+    /^  1 healthy · 0 constrained · 0 exhausted · 1 unknown · 2 stale$/,
+    /^  cache updated 2026-09-21T00:00:00\.000Z$/,
+  ];
+  const actualLines = report.stdout.split('\n');
+  // Trailing newline produces one extra empty entry; drop it for comparison.
+  if (actualLines.length && actualLines[actualLines.length - 1] === '') actualLines.pop();
+  assert.strictEqual(actualLines.length, expectedLines.length,
+    `expected ${expectedLines.length} deterministic lines, got ${actualLines.length}:\n${report.stdout}`);
+  for (let i = 0; i < expectedLines.length; i += 1) {
+    assert.match(actualLines[i], expectedLines[i], `line ${i} drifted: ${JSON.stringify(actualLines[i])}`);
+  }
+
   const json = spawnSync(process.execPath, [cli, 'report', '--json'], { env, encoding: 'utf8' });
   assert.strictEqual(json.status, 0, json.stderr || String(json.error));
   const parsed = JSON.parse(json.stdout);

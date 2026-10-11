@@ -334,6 +334,59 @@ function renderInventory(snap, updatedAt) {
   return buildViewModel(snap, updatedAt).lines.join('\n');
 }
 
+// ---- report ----------------------------------------------------------------
+//
+// `vl.js report` and its alias `vl.js status` (Phase 1, Issue #37) share one
+// implementation: `reportCmd`. The default rendering is the shared view
+// model's text lines (preserved byte-identical by #35); `--json` emits the
+// raw cache envelope with every recognizable Xiaomi row stripped and live
+// Xiaomi observations projected onto every Xiaomi route alias (F1/F4).
+//
+// No Claude hook APIs on the core path: `reportCmd` never reads stdin and the
+// shared view model is transport-neutral. The dispatcher passes its parsed
+// `args` array through unchanged, so any flag `--json` is a positional
+// concern of the caller — the function does not interpret Claude hook
+// envelopes.
+
+async function reportCmd(args) {
+  const cfg = loadConfig();
+  const cache = readCache();
+  // [#7] Surface any fresh credential receipt even on first-run (no creds).
+  const receiptMsg = formatReceipt(receiptFact(dataDir()));
+  // Xiaomi is configured by route presence alone (no vault read).
+  const anyConfigured = cfg.routes.some((r) => (isXiaomi(r) ? true : vault.has(r.id)));
+  if (!anyConfigured) {
+    process.stdout.write(noCredentialMessage());
+    if (receiptMsg) process.stdout.write('  ' + receiptMsg + '\n');
+    return;
+  }
+  // Normal Xiaomi reports are LIVE: ONE Chrome read + at most one
+  // usage/detail pair for the whole operation (F4), projected to every
+  // Xiaomi alias. Every recognizable cached Xiaomi row — configured,
+  // canonical, orphaned — is stripped from this render (F1).
+  const statusById = await xiaomiLiveStatuses(cfg);
+  const liveEntries = xiaomiLiveEntries(cfg, statusById);
+  if (args.includes('--json')) {
+    const isXiaomiEntry = xiaomiCacheFilter(cfg);
+    const routes = {};
+    for (const [id, entry] of Object.entries(cache.routes || {})) {
+      if (isXiaomiEntry(id, entry)) continue;
+      routes[id] = entry;
+    }
+    Object.assign(routes, liveEntries);
+    process.stdout.write(JSON.stringify({ ...cache, routes }, null, 2) + '\n');
+    return;
+  }
+  const snap = await getRuntimeSnapshot({
+    callerContext: cliCallerContext(),
+    io: { readStatus: overlayReader(cfg, liveEntries) },
+  });
+  let report = renderInventory(snap, cache.updatedAt);
+  // Surface any fresh credential receipt (read-only, no ack).
+  if (receiptMsg) report += '\n  ' + receiptMsg;
+  return process.stdout.write(report + '\n');
+}
+
 // ---- check ------------------------------------------------------------------
 
 async function check(routeId) {
@@ -1216,44 +1269,13 @@ const hasFlag = (n) => args.includes(n);
   switch (cmd) {
     case 'gate': return gate();
     case 'refresh': return refresh(hasFlag('--quiet'), hasFlag('--session-start'));
-    case 'report': {
-      const cfg = loadConfig();
-      const cache = readCache();
-      // [#7] Surface any fresh credential receipt even on first-run (no creds).
-      const receiptMsg = formatReceipt(receiptFact(dataDir()));
-      // Xiaomi is configured by route presence alone (no vault read).
-      const anyConfigured = cfg.routes.some((r) => (isXiaomi(r) ? true : vault.has(r.id)));
-      if (!anyConfigured) {
-        process.stdout.write(noCredentialMessage());
-        if (receiptMsg) process.stdout.write('  ' + receiptMsg + '\n');
-        return;
-      }
-      // Normal Xiaomi reports are LIVE: ONE Chrome read + at most one
-      // usage/detail pair for the whole operation (F4), projected to every
-      // Xiaomi alias. Every recognizable cached Xiaomi row — configured,
-      // canonical, orphaned — is stripped from this render (F1).
-      const statusById = await xiaomiLiveStatuses(cfg);
-      const liveEntries = xiaomiLiveEntries(cfg, statusById);
-      if (hasFlag('--json')) {
-        const isXiaomiEntry = xiaomiCacheFilter(cfg);
-        const routes = {};
-        for (const [id, entry] of Object.entries(cache.routes || {})) {
-          if (isXiaomiEntry(id, entry)) continue;
-          routes[id] = entry;
-        }
-        Object.assign(routes, liveEntries);
-        process.stdout.write(JSON.stringify({ ...cache, routes }, null, 2) + '\n');
-        return;
-      }
-      const snap = await getRuntimeSnapshot({
-        callerContext: cliCallerContext(),
-        io: { readStatus: overlayReader(cfg, liveEntries) },
-      });
-      let report = renderInventory(snap, cache.updatedAt);
-      // Surface any fresh credential receipt (read-only, no ack).
-      if (receiptMsg) report += '\n  ' + receiptMsg;
-      return process.stdout.write(report + '\n');
-    }
+    case 'report': return reportCmd(args);
+    // Phase 1 (Issue #37): `status` is a real subcommand and a strict alias for
+    // `report` — same flags, same rendering, same exit codes. Issue #38 / #39
+    // (Codex + OpenCode harness surfaces) will wire their "gating + status"
+    // commands to this name; the alias keeps the surface stable without
+    // introducing a divergent JSON shape or a second text renderer.
+    case 'status': return reportCmd(args);
     case 'check': return check(args[0]);
     case 'setup': return setup(args);
     case 'update': return update(args);
@@ -1264,6 +1286,6 @@ const hasFlag = (n) => args.includes(n);
     case 'snapshot': return snapshot(args);
     case 'recommend': return recommendCmd(args);
     default:
-      return err('usage: vl.js gate|refresh|report|check <routeId>|setup [<routeId>]|update [<routeId>]|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js status|report [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
   }
 })();

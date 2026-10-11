@@ -1,0 +1,29 @@
+{
+  "description": "Codex harness surface for view-limits — wiring only, no logic. PreToolUse runs the dispatch gate (network-free, cache-only, fail-open) and SessionStart refreshes the cache. Both delegate to bin/vl.js; every value is rendered by the CLI. Requires [features] codex_hooks = true in config.toml. Set VIEW_LIMITS_ROOT to the view-limits checkout; unset, the path resolves from the session git root (repo-local install).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js\" gate || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js\" refresh --quiet --session-start || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

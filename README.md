@@ -169,6 +169,19 @@ Dev / local:
 claude --plugin-dir /path/to/view-limits
 ```
 
+### Other harnesses
+
+The same CLI runs under Codex and OpenCode. Those surfaces are wiring only —
+there is no second renderer, gate, or adapter:
+
+| Harness | Install guide | Surfaces |
+| --- | --- | --- |
+| Codex | [`harness/codex/README.md`](./harness/codex/README.md) | `hooks.json` (gate + session refresh), `view-limits` skill (status) |
+| OpenCode | [`harness/opencode/README.md`](./harness/opencode/README.md) | `plugin/view-limits.js` (gate), `command/view-limits.md` (status refresh) |
+
+Both resolve the CLI from the checkout (or `VIEW_LIMITS_ROOT`) and read the
+same cache and vault as the Claude plugin, so no Claude install is required.
+
 ## Configuration
 
 Credentials are managed **in-CLI**, never pasted into chat:
@@ -227,8 +240,12 @@ receipts.
 
 ## Architecture
 
-See [CLAUDE.md](./CLAUDE.md). The core `lib/` is transport-neutral; `bin/vl.js`,
-hooks, commands, and skills are thin Claude Code wrappers over it.
+See [CLAUDE.md](./CLAUDE.md). The core `lib/` is transport-neutral, and one
+transport-neutral CLI (`bin/vl.js`) is the single substrate every surface
+drives. `hooks/`, `commands/` and `skills/` are thin Claude Code wrappers over
+it; `harness/codex/` and `harness/opencode/` are the equivalent wiring for the
+Codex and OpenCode harnesses. Each surface file delegates to the CLI and
+relays its output verbatim — all rendering lives in `lib/view-model.js`.
 
 ## CLI reference
 
@@ -274,6 +291,7 @@ node test/adapters.test.js        # adapter fixture tests (no network/credential
 claude plugin validate .          # manifest validation
 node bin/vl.js refresh            # live smoke test
 node test/cli-boundary.test.js    # CLI-boundary regression coverage (Issue #37)
+node test/phase1-boundary.test.js # cross-surface parity: one CLI, one view model (Issue #40)
 ```
 
 ## Version

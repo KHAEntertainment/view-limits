@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "terminal": {
+      "command": "terminal-mcp",
+      "args": ["--headless"]
+    }
+  }
+}

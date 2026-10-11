@@ -89,7 +89,7 @@ node bin/vl.js check <routeId>  # live-check one route (JSON)
   commands, and skills are the only Claude-specific surface (so the same library
   can later serve an MCP / other-harness interface).
 - **Bump the version on every change that ships plugin behavior** — anything
-  under `lib/`, `bin/`, `hooks/`, `commands/`, or `skills/`, plus `README.md`
+  under `lib/`, `bin/`, `hooks/`, `commands/`, `skills/`, or `harness/`, plus `README.md`
   and `docs/`. Bump `.claude-plugin/plugin.json` `version` — it is the only
   version of record (`package.json` carries none; `test/version.test.js`
   enforces this).

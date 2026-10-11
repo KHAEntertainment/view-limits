@@ -13,9 +13,13 @@
 // reformatting instructions:
 //   - an exec line outside the argv allowlist (pipes, `;`, redirects,
 //     subshells, sed/awk/jq/printf all fail closed by construction),
-//   - text-processing tools or pipeline metacharacters in any code span,
+//   - text-processing tools or pipeline metacharacters in any code span, or
+//     formatting tools / piping instructions in shim prose (ambiguous English
+//     words such as "paste" or "cut" are excluded from the prose scan so
+//     guidance like "paste the key into the form" survives; they remain
+//     forbidden inside code spans),
 //   - code fences (JS/formatting code has no place in a shim),
-//   - prose that tells the agent to summarize/format the output, or a
+//   - prose that tells the agent to summarize/format/pipe the output, or a
 //     markdown table laid out in the shim file.
 // Prose that documents CLI *behavior* (workflow and security guidance such as
 // "never in chat", or the credential-receipt note in skills/update) is not
@@ -58,6 +62,23 @@ const REFORMAT_RE =
 
 // A markdown table row laid out inside the shim.
 const TABLE_ROW_RE = /^[ \t]*\|[^\n]*\|[ \t]*$/m;
+
+// [QA-Medium] Formatting-tool names that stay unambiguous in running prose.
+// Ambiguous English words (paste, cut, head, tail, tr, sort, ...) are
+// deliberately excluded here — they are still forbidden inside code spans
+// above — so guidance prose like "paste the key into the form" is not a
+// false positive. Catching novel phrasing ("Trim the output with sed") is
+// why the prose scan exists at all.
+const PROSE_TOOL_RE = /\b(?:sed|awk|jq|grep|perl|printf|xargs|base64|column)\b/i;
+
+// [QA-Medium] Piping / redirect instructions in prose: a relay-only shim
+// never tells the agent to transform the CLI output stream.
+const PROSE_PIPE_RE =
+  /\b(?:pipe|pipes|piped|piping|redirect|redirects|redirected|redirecting)\b/i;
+
+// [QA-Low] Every exec line in the command shim must be the live refresh.
+const REFRESH_EXEC_RE =
+  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" refresh(?: 2>&1)?$/;
 
 const failures = [];
 function check(cond, msg) {
@@ -132,17 +153,23 @@ for (const rel of shims) {
     `${rel}: reformatting instruction in the shim (relay verbatim; do not format)`);
   check(!TABLE_ROW_RE.test(body),
     `${rel}: markdown table laid out in the shim (field layout belongs in the CLI / view model)`);
-}
+  const proseTool = body.match(PROSE_TOOL_RE);
+  check(!proseTool,
+    `${rel}: formatting tool named in shim prose (transform output in the CLI / view model, not the shim): ${proseTool ? proseTool[0] : ''}`);
+  const prosePipe = body.match(PROSE_PIPE_RE);
+  check(!prosePipe,
+    `${rel}: piping/redirect instruction in shim prose (relay the CLI output untransformed): ${prosePipe ? prosePipe[0] : ''}`);
 
-// [AC2] /view-limits stays a live refresh: its exec must run `vl.js refresh`,
-// never a cache-only display path.
-{
-  const rel = 'commands/view-limits.md';
-  if (shims.includes(rel)) {
-    const text = fs.readFileSync(path.join(root, rel), 'utf8');
-    const m = text.match(/^!`(.+)`$/m);
-    check(!!m && /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" refresh(?: 2>&1)?$/.test(m[1]),
-      `${rel}: /view-limits must remain a live refresh — expected exec \`vl.js refresh\`, found: ${m ? m[1] : '(none)'}`);
+  // [AC2] /view-limits stays a live refresh: EVERY exec line in the command
+  // shim must run `vl.js refresh` — a second "extra" exec line must not
+  // smuggle in a cache-only display path such as `vl.js report`.
+  if (rel === 'commands/view-limits.md') {
+    for (const line of execLines) {
+      const m = line.match(/^!`(.+)`$/);
+      if (!m) continue; // malformed form already failed above
+      check(REFRESH_EXEC_RE.test(m[1]),
+        `${rel}: every exec must remain a live refresh — expected \`vl.js refresh\`, found: ${m[1]}`);
+    }
   }
 }
 

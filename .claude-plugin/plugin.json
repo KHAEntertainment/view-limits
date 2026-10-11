@@ -1,6 +1,6 @@
 {
   "name": "view-limits",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "description": "Check coding-plan credit and rate-limit status across providers before dispatching sub-agents, with an optional dispatch gate for exhausted accounts.",
   "author": { "name": "KHA Entertainment" },
   "license": "MIT",

@@ -45,6 +45,9 @@ const { writeReceipt, ackReceipt, formatReceipt, receiptFact, OUTCOME_SUBMITTED,
 const xiaomiSession = require('../lib/xiaomi-session');
 const { validProfile } = require('../lib/cookies/chrome');
 const { buildHelper } = require('../lib/helper-install');
+// Phase 0 (Issue #35): transport-neutral view model — owns the presentation
+// layer's rendering; vl.js only joins its pre-formatted text lines.
+const { buildViewModel, reauthNote } = require('../lib/view-model');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 const XIAOMI_ROUTE_ID = xiaomiSession.XIAOMI_ROUTE_ID;
@@ -67,11 +70,9 @@ function noCredentialMessage() {
 // usage/detail pair. Cached Xiaomi counts are NEVER used to satisfy a normal
 // render — only the diagnostic `snapshot` command reads them (age-explicit).
 
-function reauthNote(reauth) {
-  const profile = reauth && reauth.profile ? ` (profile ${reauth.profile})` : '';
-  const url = reauth && reauth.url ? reauth.url : XIAOMI_DASHBOARD;
-  return `session unavailable — open ${url} in Chrome${profile} and log in if needed; next refresh checks for new cookies`;
-}
+// Inline reauthNote moved to lib/view-model.js — re-exported above so the
+// `check` command and any future caller still format Xiaomi reauth messages
+// from a single source of truth.
 
 function defaultChromeSource() {
   return path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome');
@@ -320,222 +321,17 @@ async function refresh(quiet, fromSessionStart = false) {
 // provider routes. Every printed value comes from a snapshot fact: the
 // renderer never infers effective models or selected accounts, and unknown /
 // stale evidence stays visibly distinct from healthy / exhausted states.
+//
+// Phase 0 (Issue #35): the rendering logic itself lives in lib/view-model.js.
+// This command joins the view model's pre-formatted text lines; the view
+// object is the contract for text (today) and JSON / HTML (Phase 3-4).
 
 function cliCallerContext() {
   return { host: os.hostname(), surface: 'cli', ...traycerEnvCallerContext(process.env) };
 }
 
-function factValue(f) {
-  return f && f.provenance !== 'unknown' && f.value !== null && f.value !== undefined
-    ? f.value : null;
-}
-
-function factText(f) {
-  const v = factValue(f);
-  return v === null ? 'unknown' : String(v);
-}
-
 function renderInventory(snap, updatedAt) {
-  const lines = [`view-limits runtime inventory — generated ${snap.generatedAt} · completeness ${snap.completeness}`];
-
-  // Requester — the assembled caller facts, verbatim.
-  const c = snap.caller || {};
-  const who = [
-    factValue(c.ade),
-    factValue(c.agentId) != null ? `agent ${factValue(c.agentId)}` : null,
-    factValue(c.epicId) != null ? `epic ${factValue(c.epicId)}` : null,
-  ].filter(Boolean).join(' · ');
-  const where = [factValue(c.harness), factValue(c.surface), factValue(c.host)].filter(Boolean).join(' · ');
-  lines.push(`  requester: ${who || 'unknown'}${where ? ` — ${where}` : ''}`);
-  lines.push(`    models: configured ${factText(c.configuredModel)} · default ${factText(c.defaultModel)} · effective ${factText(c.effectiveModel)}${factValue(c.differsFromDefault) === true ? ' (differs from default)' : ''}`);
-  if (factValue(c.selectedProfile) !== null || factValue(c.selectedAccount) !== null) {
-    lines.push(`    selection: profile ${factText(c.selectedProfile)} · account ${factText(c.selectedAccount)}`);
-  }
-
-  // Harness pool — harnesses, sessions and native profiles stay separate
-  // sections keyed by their own composite identity; nothing here merges with
-  // external routes by name.
-  lines.push('  harness pool:');
-  const harnesses = Array.isArray(snap.harnesses) ? snap.harnesses : [];
-  const sessions = Array.isArray(snap.sessions) ? snap.sessions : [];
-  const profiles = Array.isArray(snap.profiles) ? snap.profiles : [];
-  const poolReason = (snap.diagnostics || []).find((d) => d.code === 'runtime-pool-cache-empty');
-  if (!harnesses.length && !sessions.length && !profiles.length) {
-    lines.push('    (no runtime harness/session/profile facts)');
-    if (poolReason) lines.push(`    reason: ${poolReason.summary}`);
-  }
-  for (const h of harnesses) lines.push('    ' + renderHarness(h));
-  for (const s of sessions) lines.push('    ' + renderSession(s));
-  for (const p of profiles) lines.push('    ' + renderProfile(p));
-
-  // External provider routes — one line per route with usable identity:
-  // configured routes always render; unconfigured cache rows render only when
-  // they carry some observed evidence (garbage cache entries never print).
-  lines.push('  external routes:');
-  const rows = (Array.isArray(snap.routes) ? snap.routes : [])
-    .filter(renderableRoute)
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  if (!rows.length) lines.push('    (no configured routes)');
-  for (const row of rows) lines.push('    ' + renderRoute(row));
-
-  const counts = { healthy: 0, constrained: 0, exhausted: 0, unavailable: 0, unknown: 0 };
-  let stale = 0;
-  for (const row of rows) {
-    const s = factValue(row.resource && row.resource.state) || 'unknown';
-    counts[s] = (counts[s] || 0) + 1;
-    if (row.resource && row.resource.freshness === 'stale') stale += 1;
-  }
-  lines.push('');
-  const parts = [`${counts.healthy} healthy`, `${counts.constrained} constrained`, `${counts.exhausted} exhausted`];
-  if (counts.unavailable) parts.push(`${counts.unavailable} unavailable`);
-  parts.push(`${counts.unknown} unknown`);
-  if (stale) parts.push(`${stale} stale`);
-  lines.push(`  ${parts.join(' · ')}`);
-  const unobserved = (Array.isArray(snap.routes) ? snap.routes : [])
-    .filter((r) => r.configured && r.resource && r.resource.state && r.resource.state.reason === 'no-cached-observation')
-    .length;
-  if (unobserved) lines.push(`  ${unobserved} configured route(s) have no cached observation — /view-limits refreshes routes with stored keys and provider config (/view-limits:setup)`);
-  for (const d of snap.diagnostics || []) {
-    if (d === poolReason) continue;
-    lines.push(`  notice [${d.scope || 'snapshot'}] ${d.code} — ${d.summary}`);
-  }
-  lines.push(`  cache updated ${updatedAt || 'never'}`);
-  return lines.join('\n');
-}
-
-function renderHarness(h) {
-  const key = h.key || {};
-  const avail = factValue(h.available);
-  const availability = avail === true ? 'available'
-    : avail === false ? 'unavailable'
-    : `availability unknown${h.available && h.available.reason ? ` — ${h.available.reason}` : ''}`;
-  const refs = Array.isArray(h.sessionRefs) ? h.sessionRefs.length : 0;
-  const resources = Array.isArray(h.resourceRefs) ? h.resourceRefs.length : 0;
-  const defaults = h.defaults && typeof h.defaults === 'object'
-    ? Object.entries(h.defaults).map(([k, f]) => `${k}=${factText(f)}`).join(' ')
-    : '';
-  return `${key.harness || 'unknown'} (${key.surface || 'unknown'}) @ ${key.host || 'unknown'}: ${availability}` +
-    `${refs ? ` · ${refs} session(s)` : ''}${resources ? ` · ${resources} resource ref(s)` : ''}` +
-    `${defaults ? ` · defaults: ${defaults}` : ''}`;
-}
-
-function renderSession(s) {
-  const key = s.key || {};
-  const bits = [];
-  if (factValue(s.harness) !== null) bits.push(`harness ${factValue(s.harness)}`);
-  if (factValue(s.surface) !== null) bits.push(factValue(s.surface));
-  if (factValue(s.title) !== null) bits.push(`"${factValue(s.title)}"`);
-  const active = factValue(s.active);
-  if (active !== null) bits.push(active ? 'active' : 'idle');
-  if (factValue(s.isSelf) === true) bits.push('this requester');
-  return `session ${key.agentId || 'unknown'} @ ${key.host || 'unknown'}: ${bits.join(' · ') || 'no facts'}`;
-}
-
-function renderProfile(p) {
-  const key = p.key || {};
-  const bits = [];
-  if (factValue(p.authStatus) !== null) bits.push(`auth ${factValue(p.authStatus)}`);
-  if (factValue(p.rateLimitStatus) !== null) bits.push(`rate limits ${factValue(p.rateLimitStatus)}`);
-  const usageAt = factValue(p.usageUpdatedAt);
-  bits.push(usageAt ? `usage observed ${usageAt}` : 'usage unobserved');
-  if (factValue(p.nativeRateLimits) !== null) bits.push('native rate limits observed');
-  return `profile ${key.provider || 'unknown'}/${key.profileId || 'unknown'} @ ${key.host || 'unknown'}: ${bits.join(' · ')}`;
-}
-
-// An unconfigured (cache-orphan) row renders only when it carries some known
-// evidence; a malformed or empty orphan reproduces the v1 behavior of
-// dropping non-object cache entries from the human report.
-function renderableRoute(row) {
-  if (row.configured) return true;
-  const r = row.resource || {};
-  return factValue(r.state) !== null || factValue(r.observedAt) !== null ||
-    factValue(r.source) !== null || (Array.isArray(r.windows) && r.windows.length > 0) ||
-    r.balance != null || r.usage != null;
-}
-
-function finiteNumber(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value !== 'string' || value.trim() === '') return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function formatMoney(value, currency) {
-  const amount = finiteNumber(value);
-  if (amount == null) return null;
-  const unit = typeof currency === 'string' && currency.trim() ? ` ${currency.trim()}` : '';
-  if (amount > 0 && amount < 0.01) return `<0.01${unit}`;
-  if (amount < 0 && amount > -0.01) return `${amount.toPrecision(2)}${unit}`;
-  return `${amount.toFixed(2)}${unit}`;
-}
-
-function renderRoute(row) {
-  const res = row.resource || {};
-  const state = factValue(res.state) || 'unknown';
-  let quota = '—';
-  const balance = res.balance && typeof res.balance === 'object' && !Array.isArray(res.balance)
-    ? res.balance : null;
-  const formattedBalance = balance && formatMoney(balance.available, balance.currency);
-  if (formattedBalance) {
-    quota = `balance ${formattedBalance}`;
-    if (balance.spent && typeof balance.spent === 'object' && !Array.isArray(balance.spent)) {
-      const spent = [];
-      const daily = formatMoney(balance.spent.daily, balance.currency);
-      const weekly = formatMoney(balance.spent.weekly, balance.currency);
-      if (daily) spent.push(`${daily} today`);
-      if (weekly) spent.push(`${weekly} week`);
-      if (spent.length) quota += ` · spent ${spent.join(' / ')}`;
-    }
-    if (balance.limit && typeof balance.limit === 'object' && !Array.isArray(balance.limit)) {
-      const cap = formatMoney(balance.limit.amount, balance.currency);
-      if (cap) quota += ` · ${cap} ${balance.limit.period || balance.limit.reset || 'period'} cap`;
-    }
-  }
-  else if (res.usage && typeof res.usage === 'object' && !Array.isArray(res.usage)) {
-    const usage = res.usage;
-    const spent = [];
-    const daily = formatMoney(usage.daily, usage.currency);
-    const weekly = formatMoney(usage.weekly, usage.currency);
-    const monthly = formatMoney(usage.monthly, usage.currency);
-    if (daily) spent.push(`${daily} today`);
-    if (weekly) spent.push(`${weekly} week`);
-    if (monthly) spent.push(`${monthly} month`);
-    if (spent.length) quota = `spent ${spent.join(' / ')}`;
-  }
-  else if (res.windows && res.windows.length) {
-    quota = res.windows.map((w) => {
-      if (w.limit > 0 && w.remaining != null) return `${w.type} ${Math.round((w.remaining / w.limit) * 100)}%`;
-      return `${w.type} ${w.remaining}/${w.limit}`;
-    }).join(' · ');
-  }
-  const resetAt = factValue(res.resetAt);
-  const reset = resetAt ? ` · resets ${new Date(resetAt).toLocaleString()}` : '';
-  const xiaomiRow = factValue(row.provider) === 'xiaomi';
-  let note = '';
-  if (state === 'unknown') {
-    if (xiaomiRow) {
-      // Xiaomi: classified fixed message or the FULL dashboard link — never
-      // the credential-rotation hint, never a truncated URL.
-      if (res.reauth) note = ` — ${reauthNote(res.reauth)}`;
-      else if (res.error) note = ` — ${String(res.error)}`;
-      else if (res.state && res.state.reason) note = ` — ${res.state.reason}`;
-    } else if (res.error) {
-      const msg = String(res.error);
-      note = ` — ${msg.length > 80 ? msg.slice(0, 80) + '…' : msg} (rotate via /view-limits:update ${row.id})`;
-    } else if (res.state && res.state.reason) {
-      note = ` — ${res.state.reason}`;
-    }
-  }
-  // Stale evidence is marked at end of line: a stale exhausted route still
-  // says exhausted, but never reads as current.
-  const stale = res.freshness === 'stale' ? ' (stale)' : '';
-  const binding = Array.isArray(row.boundBy) && row.boundBy.length
-    ? ` · bound to ${row.boundBy.map((b) => `${b.harness}@${b.host}`).join(', ')}`
-    : '';
-  const models = Array.isArray(factValue(row.models)) && factValue(row.models).length
-    ? ` · models ${factValue(row.models).join(', ')}`
-    : '';
-  return `${row.id}: ${state}${quota !== '—' ? ' · ' + quota : ''}${reset}${note}${binding}${models}${stale}`;
+  return buildViewModel(snap, updatedAt).lines.join('\n');
 }
 
 // ---- check ------------------------------------------------------------------

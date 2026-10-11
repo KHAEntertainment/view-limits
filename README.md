@@ -252,7 +252,7 @@ vl.js recommend --json            # advisory recommendation (Jev-dormant by defa
 | --- | --- | --- |
 | `gate` | `0` (always — fail-open dispatch contract) | n/a (never exits non-zero) |
 | `refresh` | `0` | `0` on contention ("refresh already in progress"); `0` when no credentials configured (print guidance); per-adapter failures downgrade the entry to `unknown` and do not raise the exit code |
-| `status` / `report` | `0` (`--json` writes one pretty JSON document to stdout) | `1` on bad args / unset config |
+| `status` / `report` | `0` (`--json` writes one pretty JSON document to stdout) | n/a — always exits `0` (unknown flags are ignored; an unset config renders the no-credentials guidance) |
 | `check <routeId>` | `0` (one JSON `NormalizedStatus` on stdout) | `1` on unknown route, missing credential, or classified adapter error (one-line `view-limits: check <id> failed: …` on stderr; never a stack trace) |
 | `snapshot --json` | `0` (one pretty JSON envelope on stdout) | `1` when `--json` is missing or any other flag is passed |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |

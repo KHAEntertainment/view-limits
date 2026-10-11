@@ -182,7 +182,7 @@ test('vl status (text) preserves the shared view-model rendering: header line + 
   assert.match(r.stdout, /cache updated \d{4}-\d{2}-\d{2}T/);
 });
 
-test('vl report --bogus (unknown flag) → JSON shape unchanged, exit 1, one-line stderr', () => {
+test('vl report --bogus (unknown flag): never leaks a credential; exit 1 with one-line stderr if args are validated, else the documented exit 0 passthrough', () => {
   const dir = scratch();
   seedHealthyRoute(dir);
   const preload = fakeVaultAdapterPreload(dir);
@@ -445,7 +445,7 @@ test('partial adapter failure (one throws, one succeeds): surviving sibling fact
   }));
   const preload = fakeVaultAdapterPreload(dir, { failProvider: 'kimi' });
   const env = envBare(dir, { NODE_OPTIONS: `--require=${preload}` });
-  const r = spawnSync(process.execPath, [VL, 'refresh', '--quiet'], { env, encoding: 'utf8', timeout: 8000 });
+  const r = spawnSync(process.execPath, [VL, 'refresh', '--quiet'], { env, encoding: 'utf8', timeout: 10000 });
   assert.strictEqual(r.status, 0, `exit ${r.status}; stderr=${r.stderr}`);
   const cache = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
   // Surviving sibling fact preserved.

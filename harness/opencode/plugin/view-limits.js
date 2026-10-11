@@ -43,7 +43,10 @@ function modelOf(args) {
 }
 
 function runGate(model) {
-  const result = spawnSync(process.execPath, [cliPath(), 'gate'], {
+  // Literal 'node', never process.execPath: OpenCode loads plugins under Bun,
+  // where process.execPath is the opencode binary itself. 'node' matches the
+  // command surface's idiom and fails open below if node is not on PATH.
+  const result = spawnSync('node', [cliPath(), 'gate'], {
     input: JSON.stringify({ tool_name: 'Agent', tool_input: { model } }),
     encoding: 'utf8',
     timeout: CLI_TIMEOUT_MS,

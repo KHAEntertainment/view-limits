@@ -172,14 +172,19 @@ function assertNoNetworkOrCredentials(log, label) {
 
     // ---- 2. THIN: bare CLI invocations, nothing else -----------------------
     const pluginSource = fs.readFileSync(PLUGIN_PATH, 'utf8');
-    for (const match of pluginSource.matchAll(IMPORT_RE)) {
+    // Structural checks run on code only: the file's comments legitimately
+    // name the forbidden idiom while explaining why it is forbidden.
+    const pluginCode = pluginSource.replace(/\/\/.*$/gm, '');
+    for (const match of pluginCode.matchAll(IMPORT_RE)) {
       assert.ok(ALLOWED_IMPORTS.has(match[1]), `plugin: import ${match[1]} is not a Node builtin`);
     }
-    assert.doesNotMatch(pluginSource, /require\s*\(/, 'plugin: ESM only, no CJS require');
-    assert.doesNotMatch(pluginSource, /\.\.\/lib|\blib\//, 'plugin: never imports lib/ — the CLI owns all logic');
-    assert.match(pluginSource, /spawnSync\(process\.execPath, \[cliPath\(\), 'gate'\]/,
-      'the plugin spawns a bare `node <cli> gate`');
-    assert.doesNotMatch(pluginSource, FORMAT_TOOL_RE, 'plugin: no text-processing tools');
+    assert.doesNotMatch(pluginCode, /require\s*\(/, 'plugin: ESM only, no CJS require');
+    assert.doesNotMatch(pluginCode, /\.\.\/lib|\blib\//, 'plugin: never imports lib/ — the CLI owns all logic');
+    assert.match(pluginCode, /spawnSync\('node', \[cliPath\(\), 'gate'\]/,
+      'the plugin spawns a bare `node <cli> gate` (literal node — process.execPath is the opencode binary under Bun)');
+    assert.doesNotMatch(pluginCode, /process\.execPath/,
+      'plugin: never process.execPath — OpenCode runs plugins under Bun, where it is the opencode binary');
+    assert.doesNotMatch(pluginCode, FORMAT_TOOL_RE, 'plugin: no text-processing tools');
 
     const command = fs.readFileSync(COMMAND_PATH, 'utf8');
     assert.match(command, /^---\ndescription: .+\n---\n/, 'command frontmatter');

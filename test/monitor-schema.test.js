@@ -81,10 +81,10 @@ test('endpoint with embedded credentials → rejected', () => {
   assert.match(r.error, /credentials/);
 });
 
-test('non-http(s) endpoint → rejected', () => {
+test('ftp: (and other non-https) endpoint → rejected', () => {
   const r = validateMonitor({ id: 'x', monitor: { endpoint: 'ftp://api.example.com' } });
   assert.strictEqual(r.ok, false);
-  assert.match(r.error, /http\(s\)/);
+  assert.match(r.error, /https/);
 });
 
 test('malformed endpoint URL → rejected', () => {
@@ -115,6 +115,61 @@ test('non-string account/profile/region → rejected', () => {
 test('non-object recipeOptions → rejected', () => {
   assert.strictEqual(validateMonitor({ id: 'x', monitor: { recipeOptions: 'nope' } }).ok, false);
   assert.strictEqual(validateMonitor({ id: 'x', monitor: { recipeOptions: [] } }).ok, false);
+});
+
+console.log('endpoint — https-only (F2)');
+
+test('http: endpoint is rejected (https-only — F2)', () => {
+  const r = validateMonitor({ id: 'x', monitor: { endpoint: 'http://api.example.com' } });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /https/);
+});
+
+test('https: endpoint → accepted', () => {
+  const r = validateMonitor({ id: 'x', monitor: { endpoint: 'https://api.example.com', recipe: 'openai-compat' } });
+  assert.strictEqual(r.ok, true);
+});
+
+console.log('monitor:null — normalized to absent at the boundary (F3)');
+
+test('route.monitor = null → ok:true, monitor:null (consistent with absent)', () => {
+  const r = validateMonitor({ id: 'kimi-code-plan', provider: 'kimi', monitor: null });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.monitor, null);
+});
+
+test('all four functions agree that monitor:null means no monitor', () => {
+  const r = { id: 'custom-a', provider: 'openai-compat', monitor: null };
+  // validateMonitor: ok:true
+  assert.strictEqual(validateMonitor(r).ok, true);
+  // poolIdentity: null
+  assert.strictEqual(poolIdentity(r), null);
+  // configRevision: still deterministic; differs from {monitor: undefined} only
+  // when the structural fields differ. monitor=null and monitor=undefined
+  // produce the same revision because normalizedMonitor skips both.
+  const rUndef = { id: 'custom-a', provider: 'openai-compat' };
+  assert.strictEqual(configRevision(r), configRevision(rUndef));
+});
+
+test('poolIdentity stays null on invalid-monitor branch', () => {
+  // route.monitor = 'oops' is invalid — poolIdentity must still return null
+  // so the resolver's invalid-monitor branch classifies consistently.
+  assert.strictEqual(poolIdentity({ id: 'r', monitor: 'oops' }), null);
+});
+
+console.log('configRevision excludes recipeOptions (F4)');
+
+test('configRevision is unchanged when only recipeOptions content rotates', () => {
+  const r1 = { id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a', recipe: 'openai-compat', recipeOptions: { foo: 1 } } };
+  const r2 = { id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a', recipe: 'openai-compat', recipeOptions: { foo: 2, bar: 3 } } };
+  assert.strictEqual(configRevision(r1), configRevision(r2),
+    'recipeOptions rotation must not bump configRevision (avoids cache churn)');
+});
+
+test('configRevision still bumps on structural field changes (sanity)', () => {
+  const r1 = { id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a', recipe: 'openai-compat' } };
+  const r2 = { id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a', recipe: 'openai-compat', region: 'us' } };
+  assert.notStrictEqual(configRevision(r1), configRevision(r2));
 });
 
 console.log('validateLabel — accept / collision-reject');

@@ -8,11 +8,25 @@
 const assert = require('assert');
 const { RECIPES, getRecipe, knownRecipes } = require('../lib/recipes');
 
+// Async-aware runner: collects tests then awaits each Promise-returning fn
+// so a rejected async assert becomes a counted failure (not an unhandled
+// crash that would have falsely printed ✓). Same pattern as
+// test/effective-config.test.js:22-32.
 let failures = 0;
-function test(name, fn) {
-  try { fn(); console.log(`  ✓ ${name}`); }
-  catch (e) { failures += 1; console.log(`  ✗ ${name}\n    ${e.message}`); }
+async function runTests() {
+  for (const t of tests) {
+    try {
+      await t.fn();
+      console.log(`  ✓ ${t.name}`);
+    } catch (e) {
+      failures += 1;
+      console.log(`  ✗ ${t.name}\n    ${e && e.message || e}`);
+    }
+  }
 }
+
+const tests = [];
+function test(name, fn) { tests.push({ name, fn }); }
 
 console.log('registry shape + immutability');
 
@@ -85,8 +99,10 @@ test('knownRecipes() returns a fresh Set (no registry mutation possible)', () =>
   assert.ok(!b.has('should-not-persist'));
 });
 
-if (failures) {
-  console.error(`\n${failures} recipes test(s) failed`);
-  process.exit(1);
-}
-console.log('all recipes tests passed');
+runTests().then(() => {
+  if (failures) {
+    console.error(`\n${failures} recipes test(s) failed`);
+    process.exit(1);
+  }
+  console.log('all recipes tests passed');
+});

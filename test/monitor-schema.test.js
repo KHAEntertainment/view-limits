@@ -11,6 +11,8 @@ const {
   configRevision,
   poolIdentity,
   classifyCapability,
+  validateRecipeOptions,
+  httpsEndpointError,
   ALLOWED_MONITOR_FIELDS,
   SECRET_FIELD_NAMES,
 } = require('../lib/monitor-schema');
@@ -30,17 +32,27 @@ test('absent monitor → ok:true, monitor:null', () => {
 });
 
 test('well-formed monitor → ok:true, monitor shape preserved', () => {
+  // #55: openai-compat now requires recipeOptions.path (declared shape).
   const m = { endpoint: 'https://api.example.com', model: 'gpt-x', recipe: 'openai-compat',
-                account: 'team-a', profile: 'p1', region: 'us' };
+                account: 'team-a', profile: 'p1', region: 'us', recipeOptions: { path: '/v1/models' } };
   const r = validateMonitor({ id: 'custom-x', provider: 'openai-compat', monitor: m });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(r.monitor, m);
 });
 
-test('recipeOptions allowed object → ok', () => {
-  const m = { endpoint: 'https://api.example.com', recipe: 'openai-compat', recipeOptions: { foo: 'bar' } };
+// #55 (QA M-R1): recipeOptions are validated against the recipe's declared
+// shape. Before #55 any object was accepted (`{ foo: 'bar' }` passed).
+test('recipeOptions matching the recipe declaration → ok', () => {
+  const m = { endpoint: 'https://api.example.com', recipe: 'openai-compat', recipeOptions: { path: '/v1/models', scope: 'account' } };
   const r = validateMonitor({ id: 'x', provider: 'openai-compat', monitor: m });
   assert.strictEqual(r.ok, true);
+});
+
+test('recipeOptions with an undeclared key → rejected (M-R1)', () => {
+  const m = { endpoint: 'https://api.example.com', recipe: 'openai-compat', recipeOptions: { path: '/v1/models', foo: 'bar' } };
+  const r = validateMonitor({ id: 'x', provider: 'openai-compat', monitor: m });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /recipeOptions\.foo is not an option/);
 });
 
 test('non-object route → ok:false', () => {
@@ -126,7 +138,7 @@ test('http: endpoint is rejected (https-only — F2)', () => {
 });
 
 test('https: endpoint → accepted', () => {
-  const r = validateMonitor({ id: 'x', monitor: { endpoint: 'https://api.example.com', recipe: 'openai-compat' } });
+  const r = validateMonitor({ id: 'x', monitor: { endpoint: 'https://api.example.com', recipe: 'openai-compat', recipeOptions: { path: '/v1/models' } } });
   assert.strictEqual(r.ok, true);
 });
 
@@ -157,13 +169,40 @@ test('poolIdentity stays null on invalid-monitor branch', () => {
   assert.strictEqual(poolIdentity({ id: 'r', monitor: 'oops' }), null);
 });
 
-console.log('configRevision excludes recipeOptions (F4)');
+// #55 (QA M-R2): before #55 configRevision ignored ALL recipeOptions. Now
+// only options a recipe declares revision-bearing are hashed; ephemeral ones
+// still rotate without cache churn.
+console.log('configRevision hashes revision-bearing recipeOptions only (M-R2)');
 
-test('configRevision is unchanged when only recipeOptions content rotates', () => {
-  const r1 = { id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a', recipe: 'openai-compat', recipeOptions: { foo: 1 } } };
-  const r2 = { id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a', recipe: 'openai-compat', recipeOptions: { foo: 2, bar: 3 } } };
-  assert.strictEqual(configRevision(r1), configRevision(r2),
-    'recipeOptions rotation must not bump configRevision (avoids cache churn)');
+const compatRoute = (opts) => ({ id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a.example', recipe: 'openai-compat', recipeOptions: opts } });
+
+test('configRevision is unchanged when only an ephemeral option rotates', () => {
+  assert.strictEqual(
+    configRevision(compatRoute({ path: '/v1/models', timeoutMs: 2000 })),
+    configRevision(compatRoute({ path: '/v1/models', timeoutMs: 9000 })),
+    'timeoutMs is ephemeral: rotation must not bump configRevision');
+});
+
+test('configRevision bumps when a revision-bearing option changes', () => {
+  const base = configRevision(compatRoute({ path: '/v1/models' }));
+  assert.notStrictEqual(base, configRevision(compatRoute({ path: '/v1/limits' })), 'path');
+  assert.notStrictEqual(base, configRevision(compatRoute({ path: '/v1/models', scope: 'account' })), 'scope');
+  assert.notStrictEqual(base, configRevision(compatRoute({ path: '/v1/models', resetEncoding: 'rfc3339' })), 'resetEncoding');
+});
+
+test('configRevision treats an omitted option and its explicit default alike', () => {
+  assert.strictEqual(
+    configRevision(compatRoute({ path: '/v1/models' })),
+    configRevision(compatRoute({ path: '/v1/models', scope: 'diagnostic', resetEncoding: 'duration' })));
+});
+
+test('configRevision for a built-in route is unchanged by #55', () => {
+  // Same hash input as #54: no recipeOptions key when nothing is revision-bearing.
+  const route = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', account: 'a' } };
+  const expected = require('crypto').createHash('sha1')
+    .update(JSON.stringify({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', account: 'a' } }))
+    .digest('hex');
+  assert.strictEqual(configRevision(route), expected);
 });
 
 test('configRevision still bumps on structural field changes (sanity)', () => {
@@ -343,6 +382,73 @@ test('non-Set registry → invalid-known-recipes (defensive)', () => {
     { monitorable: false, reason: 'invalid-known-recipes' });
   assert.deepStrictEqual(classifyCapability({ recipe: 'openai-compat' }, ['built-in']),
     { monitorable: false, reason: 'invalid-known-recipes' });
+});
+
+console.log('validateRecipeOptions — credential-shaped names/values are non-persistable (M-R1)');
+
+test('credential-shaped option names → rejected for known and unknown recipes', () => {
+  for (const recipe of ['openai-compat', 'anthropic-compat', 'built-in', 'not-a-recipe']) {
+    for (const name of ['token', 'apiKey', 'api_key', 'x-api-key', 'authHeader', 'sessionCookie', 'clientSecret', 'Password']) {
+      const r = validateRecipeOptions(recipe, { [name]: 'v' });
+      assert.strictEqual(r.ok, false, `${recipe}.${name}`);
+      assert.match(r.error, /credential-shaped/, `${recipe}.${name}`);
+    }
+  }
+});
+
+test('credential-shaped option values → rejected', () => {
+  for (const v of ['sk-abcdef1234567890', 'sk_live_abcdef123', 'Bearer abc', 'basic dXNlcjpwYXNz', 'eyJhbGciOi.eyJzdWIiOi.sig', 'ghp_abcdefgh', 'AKIAABCDEFGHIJKL']) {
+    const r = validateRecipeOptions('not-a-recipe', { label: v });
+    assert.strictEqual(r.ok, false, v);
+    assert.match(r.error, /credential-shaped value/, v);
+  }
+});
+
+test('nested option values → rejected (flat primitives only)', () => {
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/v1', scope: { x: 1 } }).ok, false);
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: ['/v1'] }).ok, false);
+});
+
+test('path must be absolute, query-free, traversal-free and secret-free', () => {
+  for (const p of ['v1/models', '//evil.example/x', '/v1/../admin', '/v1/./x', '/v1?api_key=1', '/v1#frag', '/v1 models', '/v1/sk-abcdef1234567890', 'https://x/y']) {
+    assert.strictEqual(validateRecipeOptions('openai-compat', { path: p }).ok, false, p);
+  }
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/api/v1/models' }).ok, true);
+});
+
+test('declared shape: required path, enum values, integer bounds', () => {
+  assert.match(validateRecipeOptions('openai-compat', {}).error, /path is required/);
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/m', scope: 'everything' }).ok, false);
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/m', resetEncoding: 'epoch-ms' }).ok, false);
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/m', timeoutMs: 999 }).ok, false);
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/m', timeoutMs: 15001 }).ok, false);
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/m', timeoutMs: 1500.5 }).ok, false);
+  assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/m', timeoutMs: 15000 }).ok, true);
+});
+
+test('anthropicVersion outside the documented enum → stable unsupported-anthropic-version code', () => {
+  const r = validateRecipeOptions('anthropic-compat', { path: '/v1/models', anthropicVersion: '2099-01-01' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.code, 'unsupported-anthropic-version');
+  assert.strictEqual(validateRecipeOptions('anthropic-compat', { path: '/v1/models', anthropicVersion: '2023-06-01' }).ok, true);
+});
+
+test('built-in declares no options → any recipeOptions key rejected', () => {
+  assert.strictEqual(validateRecipeOptions('built-in', { path: '/x' }).ok, false);
+  assert.strictEqual(validateRecipeOptions('built-in', {}).ok, true);
+});
+
+test('validateMonitor surfaces recipeOptions failures (setup writer cannot persist them)', () => {
+  const r = validateMonitor({ id: 'x', provider: 'openai-compat', monitor: { endpoint: 'https://a.example', recipe: 'openai-compat', recipeOptions: { path: '/m', token: 'x' } } });
+  assert.strictEqual(r.ok, false);
+});
+
+test('httpsEndpointError is the single URL policy (http, creds, garbage)', () => {
+  assert.strictEqual(httpsEndpointError('https://api.example.com/v1'), null);
+  assert.strictEqual(httpsEndpointError('http://api.example.com'), 'must be https');
+  assert.strictEqual(httpsEndpointError('https://u:p@api.example.com'), 'must not embed credentials');
+  assert.strictEqual(httpsEndpointError('not a url'), 'is not a valid URL');
+  assert.strictEqual(httpsEndpointError(''), 'must be a non-empty string');
 });
 
 if (failures) {

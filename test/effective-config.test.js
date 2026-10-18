@@ -88,15 +88,18 @@ test('getAdapter(provider) and resolveEffectiveConfig(builtInRoute, cfg, {getAda
 console.log('AC1 — two custom routes sharing a wire family get distinct effective cfg');
 
 test('two routes with same provider but different monitor.endpoint have different effective cfg', () => {
-  const routeA = { id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a.example.com', recipe: 'openai-compat' } };
-  const routeB = { id: 'custom-b', provider: 'openai-compat', monitor: { endpoint: 'https://b.example.com', recipe: 'openai-compat' } };
+  // #55: openai-compat is a registered recipe and requires recipeOptions.path.
+  const opts = { path: '/v1/models' };
+  const routeA = { id: 'custom-a', provider: 'openai-compat', monitor: { endpoint: 'https://a.example.com', recipe: 'openai-compat', recipeOptions: opts } };
+  const routeB = { id: 'custom-b', provider: 'openai-compat', monitor: { endpoint: 'https://b.example.com', recipe: 'openai-compat', recipeOptions: opts } };
   const cfg = { providers: { 'openai-compat': { baseUrl: 'https://default.example.com' } } };
   const effA = resolveEffectiveConfig(routeA, cfg, { getAdapter });
   const effB = resolveEffectiveConfig(routeB, cfg, { getAdapter });
-  // Both route to the same unsupported-recipe branch today (#55 owns the
-  // real openai-compat recipe). Pool identity (recipe+account) is identical
-  // here because account is unset; configRevision must differ because the
-  // endpoint differs.
+  // Each route uses its own endpoint, never the shared providers entry.
+  // Pool identity (recipe+account) is identical here because account is
+  // unset; configRevision must differ because the endpoint differs.
+  assert.strictEqual(effA.cfg.baseUrl, 'https://a.example.com');
+  assert.strictEqual(effB.cfg.baseUrl, 'https://b.example.com');
   assert.notStrictEqual(effA.poolIdentity, null);
   assert.strictEqual(effA.poolIdentity, effB.poolIdentity); // same recipe, no account differentiation
   assert.notStrictEqual(effA.configRevision, effB.configRevision,
@@ -104,8 +107,8 @@ test('two routes with same provider but different monitor.endpoint have differen
 });
 
 test('different account in monitor → different poolIdentity (AC1 cross-account isolation)', () => {
-  const routeA = { id: 'custom-a', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://x', account: 'team-a' } };
-  const routeB = { id: 'custom-b', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://x', account: 'team-b' } };
+  const routeA = { id: 'custom-a', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://x', account: 'team-a', recipeOptions: { path: '/v1/models' } } };
+  const routeB = { id: 'custom-b', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://x', account: 'team-b', recipeOptions: { path: '/v1/models' } } };
   const cfg = { providers: { 'openai-compat': {} } };
   const a = resolveEffectiveConfig(routeA, cfg, { getAdapter });
   const b = resolveEffectiveConfig(routeB, cfg, { getAdapter });

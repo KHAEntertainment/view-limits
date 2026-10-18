@@ -28,13 +28,14 @@ const { spawn } = require('child_process');
 
 const { loadConfig, dataDir, expandHome, deepMerge, configPath, saveConfig } = require('../lib/config');
 const {
-  readCache, writeCache, isFresh,
+  readCache, writeCache, isFresh, recoveryBoundedFreshUntil,
   tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
 } = require('../lib/cache');
 const { resolveRoute, dispatchContext } = require('../lib/routes');
 const { decide, summarize } = require('../lib/gate');
 const vault = require('../lib/vault');
 const { getAdapter, ADAPTERS } = require('../lib/adapters');
+const { validateMonitor } = require('../lib/monitor-schema');
 const { getRuntimeSnapshot, defaultReadStatus } = require('../lib/runtime-snapshot');
 const { recommend } = require('../lib/recommend');
 const { makeJevTransport } = require('../lib/jev-openrouter');
@@ -227,10 +228,21 @@ async function gate() {
 
 // ---- refresh ----------------------------------------------------------------
 
+// A custom route: a non-null route.monitor that passes schema validation.
+// Invalid monitors still resolve (to a stable unknown) via check, but are not
+// worth a refresh slot.
+function isCustomMonitored(route) {
+  if (!route || route.monitor == null) return false;
+  return validateMonitor(route).ok;
+}
+
 function entryFor(route, status, source) {
   const ttl = route.ttlSeconds != null ? route.ttlSeconds : 180;
-  const observedAt = new Date().toISOString();
-  const freshUntil = new Date(Date.now() + ttl * 1000).toISOString();
+  const now = Date.now();
+  const observedAt = new Date(now).toISOString();
+  // Custom (route.monitor) routes: a deny-eligible exhaustion expires by its
+  // known recovery, not only by TTL (Issue #55). Built-ins keep TTL-only.
+  const freshUntil = new Date(recoveryBoundedFreshUntil(route, status, now + ttl * 1000)).toISOString();
   return { routeId: route.id, observedAt, freshUntil, source, status };
 }
 
@@ -242,7 +254,12 @@ async function refresh(quiet, fromSessionStart = false) {
   const cfg = loadConfig();
   if (fromSessionStart && !cfg.refreshOnSessionStart) return;
   // Xiaomi eligibility is config-only (route presence) — no vault read.
-  const configured = cfg.routes.filter((r) => (isXiaomi(r) ? true : cfg.providers[r.provider] && vault.has(r.id)));
+  // Custom routes (Issue #55) carry their source on a valid route.monitor
+  // rather than in cfg.providers; they still need a vault credential keyed
+  // to route.id, and are otherwise skipped as unmonitored (not an error).
+  const configured = cfg.routes.filter((r) => (isXiaomi(r)
+    ? true
+    : (cfg.providers[r.provider] || isCustomMonitored(r)) && vault.has(r.id)));
   if (!configured.length) {
     if (!quiet) process.stdout.write(noCredentialMessage());
     return;

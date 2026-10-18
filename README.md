@@ -54,6 +54,67 @@ Anthropic is omitted — Claude Code surfaces its own native rate-limit state.
 > **Kimi note:** `kimi-code-plan` needs a `sk-kimi-*` Coding Plan key (a Moonshot
 > `sk-*` key will not work). Base URL defaults to `https://api.kimi.com/coding/v1`.
 
+## Custom OpenAI- / Anthropic-compatible routes
+
+A third-party plan that speaks the OpenAI or Anthropic wire format can be
+added as a custom route. **Wire compatibility does not give you a quota API.**
+view-limits reads only the documented rate-limit headers that one explicit,
+read-only `GET` endpoint returns. It never sends an inference request on
+refresh, check or the gate.
+
+```json
+{
+  "id": "custom-acme",
+  "provider": "anthropic-compat",
+  "match": { "model": "acme" },
+  "monitor": {
+    "endpoint": "https://api.acme.example",
+    "recipe": "anthropic-compat",
+    "recipeOptions": { "path": "/v1/models", "scope": "diagnostic" }
+  }
+}
+```
+
+| | `openai-compat` | `anthropic-compat` |
+|---|---|---|
+| Auth sent | `Authorization: Bearer <key>` | `x-api-key` + `anthropic-version` (never a Bearer token) |
+| Headers read | `x-ratelimit-{limit,remaining,reset}-{requests,tokens}` | `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{limit,remaining,reset}` |
+| Reset format | `resetEncoding`: `duration` (`6m0s`, default), `epoch-seconds` or `rfc3339` | RFC 3339 |
+
+`recipeOptions` (each recipe accepts only its declared options):
+
+- `path` (required): the read-only source, appended to `endpoint`. There is no
+  default, so view-limits never quietly falls back to `GET /models`.
+- `scope`: what the headers describe. One of `diagnostic` (default),
+  `account`, `model` or `organization`. **A non-diagnostic scope is your
+  explicit assertion** that this endpoint's headers report the quota pool the
+  route dispatches against. Under `diagnostic`, the route stays `unknown` and
+  the numbers are shown only as `detail.throughput`.
+- `anthropicVersion` (Anthropic only): `2023-06-01`. Any other value fails
+  closed as `unsupported-anthropic-version`.
+- `timeoutMs`: 1000–15000 (default 8000). Changing it does not invalidate
+  cached status. Changing `path`, `scope` or `resetEncoding` does.
+
+What the result means:
+
+- Windows are request/token **throughput**, labelled `signal: "throughput"`.
+  They are never plan credits, and `balance` is always `null`.
+- `exhausted` needs a declared scope, a window with `remaining` 0, and a valid
+  future reset. The cached entry expires at that reset, so the gate cannot
+  keep denying after the provider said the limit recovers. Without a known
+  reset the route is `unknown` (`exhaustion-without-recovery`).
+- A 429, an auth failure, a redirect, a timeout, an oversized body, or
+  malformed, partial or contradictory headers all produce `unknown` with a
+  stable `detail.reason`. They never produce `healthy` or `exhausted`.
+
+Requests are HTTPS-only. Redirects are refused, and the body (64 KiB) and time
+are capped. Provider error text is never surfaced. `recipeOptions` that look
+like credentials, by name or value, are rejected. The key lives in the vault
+under the route `id` like any other route. A route without a key is skipped as
+unmonitored. Guided add/probe/remove (including any opt-in discovery request)
+comes with the setup lifecycle in Issue #58. These adapters are verified with
+documented-format fixtures only, not against a live provider account.
+
 ## Experimental: Xiaomi Token Plan (Chrome cookie fallback)
 
 > **Experimental — not released; K1 and R1 live-accepted, C1 pending.** This
@@ -292,6 +353,9 @@ claude plugin validate .          # manifest validation
 node bin/vl.js refresh            # live smoke test
 node test/cli-boundary.test.js    # CLI-boundary regression coverage (Issue #37)
 node test/phase1-boundary.test.js # cross-surface parity: one CLI, one view model (Issue #40)
+node test/compat-adapters.test.js # openai-/anthropic-compat recipes: auth, parsing, truthfulness (Issue #55)
+node test/bounded-http.test.js    # bounded transport: https, redirects, timeouts, body cap (Issue #55)
+node test/compat-cli.test.js      # custom routes through the real refresh/check CLI (Issue #55)
 ```
 
 ## Version

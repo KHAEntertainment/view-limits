@@ -288,7 +288,7 @@ async function refresh(quiet, fromSessionStart = false) {
       xiaomiPromise,
       ...configured.filter((route) => !isXiaomi(route)).map(async (route) => {
         try {
-          statuses[route.id] = await getAdapter(route.provider)
+          statuses[route.id] = await getAdapter(route.provider, route, cfg)
             .fetchStatus(cfg.providers[route.provider], vault.get(route.id), { threshold });
         } catch (e) {
           statuses[route.id] = unknownStatus({ error: e.message });
@@ -406,7 +406,7 @@ async function check(routeId) {
   if (!token) err(`no credential for "${routeId}" — run: vl.js setup`);
   let st;
   try {
-    st = await getAdapter(route.provider).fetchStatus(
+    st = await getAdapter(route.provider, route, cfg).fetchStatus(
       cfg.providers[route.provider], token, { threshold: cfg.gate.constrainedThreshold },
     );
   } catch (e) {

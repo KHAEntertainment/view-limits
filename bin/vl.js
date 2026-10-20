@@ -39,9 +39,9 @@ const { validateMonitor } = require('../lib/monitor-schema');
 // Issue #56: a recipe that authenticates through its own approved CLI (the
 // Bailian CLI owns its console credential) stores no secret under route.id, so
 // it declares `capabilities.vaultCredential === false`. This predicate reads
-// that capability flag — never a recipe id — so a future CLI-managed-auth
-// recipe (#57 StepFun) is covered without another code change. Every route
-// whose recipe does not declare the flag behaves exactly as before.
+// that capability flag — never a recipe id — so #57's stepfun-plan (local-only
+// fetch, no secret either) is covered without another code change. Every
+// route whose recipe does not declare the flag behaves exactly as before.
 const { routeNeedsVaultCredential } = require('../lib/recipes');
 const { getRuntimeSnapshot, defaultReadStatus } = require('../lib/runtime-snapshot');
 const { recommend } = require('../lib/recommend');
@@ -244,9 +244,35 @@ function isCustomMonitored(route) {
 }
 
 // A route takes part when it has a credential under its id, OR when its recipe
-// declares that it authenticates through its own CLI and holds none for us.
+// declares that it authenticates through its own CLI (or documents no quota
+// source at all) and holds none for us — keyed on the capability flag, never
+// on a recipe id.
 function isConfiguredRoute(route) {
   return !routeNeedsVaultCredential(route) || vault.has(route.id);
+}
+
+// #57: a route whose recipe documents no quota source (stepfun-plan) resolves
+// to capability { monitorable:false, reason:'unmonitored:<recipe>' }. Such a
+// route needs no vault credential and is refreshed/reported as unmonitored —
+// never silently dropped and never promoted to a capacity state.
+function isUnmonitored(route, cfg) {
+  try {
+    const a = getAdapter(route.provider, route, cfg);
+    const cap = a && a.capability;
+    return !!(cap && cap.monitorable === false
+      && typeof cap.reason === 'string' && cap.reason.startsWith('unmonitored:'));
+  } catch {
+    return false;
+  }
+}
+
+function unmonitoredBlock(cfg) {
+  // Returns '' or newline-joined lines with NO leading/trailing newline —
+  // callers own the separator (renderInventory has no trailing newline).
+  return cfg.routes
+    .filter((r) => !isXiaomi(r) && isCustomMonitored(r) && isUnmonitored(r, cfg))
+    .map((r) => `    ${r.id}: unmonitored — no documented quota source`)
+    .join('\n');
 }
 
 function entryFor(route, status, source) {
@@ -270,6 +296,9 @@ async function refresh(quiet, fromSessionStart = false) {
   // Custom routes (Issue #55) carry their source on a valid route.monitor
   // rather than in cfg.providers; they still need a vault credential keyed
   // to route.id, and are otherwise skipped as unmonitored (not an error).
+  // #57: a route whose recipe documents no quota source is also configured
+  // by presence alone — routeNeedsVaultCredential returns false for it now
+  // that stepfun-plan declares vaultCredential:false.
   const configured = cfg.routes.filter((r) => (isXiaomi(r)
     ? true
     : (cfg.providers[r.provider] || isCustomMonitored(r)) && isConfiguredRoute(r)));
@@ -318,8 +347,12 @@ async function refresh(quiet, fromSessionStart = false) {
       xiaomiPromise,
       ...configured.filter((route) => !isXiaomi(route)).map(async (route) => {
         try {
+          // Credential-free recipes (vaultCredential:false) never read the
+          // vault — the adapter receives null instead of triggering a
+          // keychain/security lookup for a secret that cannot exist.
+          const routeToken = routeNeedsVaultCredential(route) ? vault.get(route.id) : null;
           statuses[route.id] = await getAdapter(route.provider, route, cfg)
-            .fetchStatus(cfg.providers[route.provider], vault.get(route.id), { threshold });
+            .fetchStatus(cfg.providers[route.provider], routeToken, { threshold });
         } catch (e) {
           statuses[route.id] = unknownStatus({ error: e.message });
         }
@@ -338,6 +371,10 @@ async function refresh(quiet, fromSessionStart = false) {
         io: { readStatus: overlayReader(cfg, xiaomiLiveEntries(cfg, statuses)) },
       });
       process.stdout.write(renderInventory(snap, doc.updatedAt) + '\n');
+      // #57: unmonitored routes are refreshed locally (no request) and get an
+      // explicit note; they are never silently dropped.
+      const ub = unmonitoredBlock(cfg);
+      if (ub) process.stdout.write(ub + '\n');
     }
   } finally {
     releaseWorker(acq);
@@ -383,7 +420,9 @@ async function reportCmd(args) {
   const cache = readCache();
   // [#7] Surface any fresh credential receipt even on first-run (no creds).
   const receiptMsg = formatReceipt(receiptFact(dataDir()));
-  // Xiaomi is configured by route presence alone (no vault read).
+  // Xiaomi is configured by route presence alone (no vault read). #57:
+  // unmonitored-recipe routes are likewise configured by presence alone,
+  // because routeNeedsVaultCredential is false for them (capability flag).
   const anyConfigured = cfg.routes.some((r) => (isXiaomi(r) ? true : isConfiguredRoute(r)));
   if (!anyConfigured) {
     process.stdout.write(noCredentialMessage());
@@ -412,6 +451,10 @@ async function reportCmd(args) {
     io: { readStatus: overlayReader(cfg, liveEntries) },
   });
   let report = renderInventory(snap, cache.updatedAt);
+  // #57: unmonitored routes get an explicit line (additive; #56's changes to
+  // this block must stay additive too).
+  const ub = unmonitoredBlock(cfg);
+  if (ub) report += '\n' + ub;
   // Surface any fresh credential receipt (read-only, no ack).
   if (receiptMsg) report += '\n  ' + receiptMsg;
   return process.stdout.write(report + '\n');
@@ -432,8 +475,11 @@ async function check(routeId) {
     process.stdout.write(JSON.stringify(st, null, 2) + '\n');
     return;
   }
-  const token = vault.get(route.id);
-  if (!token && routeNeedsVaultCredential(route)) err(`no credential for "${routeId}" — run: vl.js setup`);
+  // #57: unmonitored-recipe routes (vaultCredential:false) document no quota
+  // source — no credential exists to fetch, so the vault is not even read.
+  const needsVault = routeNeedsVaultCredential(route);
+  const token = needsVault ? vault.get(route.id) : null;
+  if (!token && needsVault) err(`no credential for "${routeId}" — run: vl.js setup`);
   let st;
   try {
     st = await getAdapter(route.provider, route, cfg).fetchStatus(

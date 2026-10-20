@@ -185,6 +185,40 @@ built from the published CLI JSON contract and the documented Coding Plan
 policy. No live Alibaba account was used, and no authenticated read was
 performed.
 
+## StepFun Step Plan (unmonitored)
+
+> **Implemented — not live-tested (awaiting owner account).** Classification
+> below is documentation-based (StepFun's published docs), not a live probe.
+
+StepFun's Step Plan is a credit-based subscription. The published
+documentation (`platform.stepfun.ai/step-plan`, `/step-code`, and the API
+reference) documents **no read-only quota API** for subscription Credits. The
+only documented endpoint, `GET https://api.stepfun.ai/v1/accounts`, reports
+Open Platform **cash** balance — a different system from Step Plan Credits —
+so view-limits never reads it and never conflates the two numbers.
+
+```json
+{
+  "id": "stepfun-plan-main",
+  "provider": "stepfun-plan",
+  "match": { "model": "stepfun" },
+  "monitor": { "recipe": "stepfun-plan" }
+}
+```
+
+- **Supported:** declare the route; view-limits classifies it truthfully.
+  `refresh` and `check` send **no request** (no quota source is documented),
+  need **no credential** (nothing is keyed in the vault), and write a stable
+  cache entry: `state: "unknown"`, empty windows, `balance: null`,
+  `detail.reason: "unmonitored-no-documented-quota-source"`.
+- **Unsupported (deliberately):** any Credit headroom number. Subscription
+  Credits (monthly, cleared, no rollover) are not Open Platform cash, and
+  Step Plan has no RPM/TPM windows — view-limits reports none of these for
+  StepFun rather than guessing.
+- `vl.js report` prints the explicit line:
+  `    <routeId>: unmonitored — no documented quota source`.
+  The gate stays fail-open: an unmonitored route never denies.
+
 ## Experimental: Xiaomi Token Plan (Chrome cookie fallback)
 
 > **Experimental — not released; K1 and R1 live-accepted, C1 pending.** This
@@ -428,6 +462,7 @@ node test/bounded-http.test.js    # bounded transport: https, redirects, timeout
 node test/compat-cli.test.js      # custom routes through the real refresh/check CLI (Issue #55)
 node test/alibaba-coding-plan.test.js # Bailian CLI recipe: parsing, truthfulness, argv allowlist (Issue #56)
 node test/alibaba-cli.test.js      # Alibaba route through the real refresh/check CLI (Issue #56)
+node test/step-plan.test.js        # stepfun-plan unmonitored classification, CLI (Issue #57)
 ```
 
 ## Version

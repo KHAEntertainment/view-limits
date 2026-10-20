@@ -31,9 +31,14 @@ function test(name, fn) { tests.push({ name, fn }); }
 console.log('registry shape + immutability');
 
 // #55 registers openai-compat + anthropic-compat; #56 registers
-// alibaba-coding-plan (was: only `built-in`). The registry must be safe to
+// alibaba-coding-plan; #57 registers the documentation-based unmonitored
+// stepfun-plan recipe (was: only `built-in`). The registry must be safe to
 // enumerate, immutable, and the built-in pass-through must mirror the existing
 // wire-family adapter contract.
+test('registry holds built-in + the two #55 compat recipes + #56 alibaba + stepfun-plan', () => {
+  assert.deepStrictEqual([...knownRecipes()].sort(),
+    ['alibaba-coding-plan', 'anthropic-compat', 'built-in', 'openai-compat', 'stepfun-plan']);
+});
 
 test('compat recipes declare family, options and inference:false', () => {
   for (const id of ['openai-compat', 'anthropic-compat']) {
@@ -63,9 +68,11 @@ test('every recipe declares whether it needs a vault credential', () => {
       `${id} must declare vaultCredential`,
     );
   }
-  // Only the CLI-managed-auth recipe opts out; every other recipe keeps the
-  // pre-#56 behaviour of requiring a credential under route.id.
+  // Only the CLI-managed-auth and local-only-unmonitored recipes opt out;
+  // every other recipe keeps the pre-#56 behaviour of requiring a credential
+  // under route.id.
   assert.strictEqual(getRecipe('alibaba-coding-plan').capabilities.vaultCredential, false);
+  assert.strictEqual(getRecipe('stepfun-plan').capabilities.vaultCredential, false);
   for (const id of ['built-in', 'openai-compat', 'anthropic-compat']) {
     assert.strictEqual(getRecipe(id).capabilities.vaultCredential, true, id);
   }
@@ -73,6 +80,9 @@ test('every recipe declares whether it needs a vault credential', () => {
 
 test('routeNeedsVaultCredential is capability-driven, not id-driven', () => {
   assert.strictEqual(routeNeedsVaultCredential({ monitor: { recipe: 'alibaba-coding-plan' } }), false);
+  // #57: the unmonitored recipe also declares vaultCredential:false, so the
+  // same capability-driven predicate exempts it without naming the id.
+  assert.strictEqual(routeNeedsVaultCredential({ monitor: { recipe: 'stepfun-plan' } }), false);
   // Anything that is not an explicitly-flagged registered recipe still needs a
   // credential — including a future id nobody has implemented yet.
   for (const recipe of ['openai-compat', 'anthropic-compat', 'built-in', 'stepfun-pending', undefined]) {

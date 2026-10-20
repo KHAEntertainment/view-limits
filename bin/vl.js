@@ -36,6 +36,13 @@ const { decide, summarize } = require('../lib/gate');
 const vault = require('../lib/vault');
 const { getAdapter, ADAPTERS } = require('../lib/adapters');
 const { validateMonitor } = require('../lib/monitor-schema');
+// Issue #56: a recipe that authenticates through its own approved CLI (the
+// Bailian CLI owns its console credential) stores no secret under route.id, so
+// it declares `capabilities.vaultCredential === false`. This predicate reads
+// that capability flag — never a recipe id — so a future CLI-managed-auth
+// recipe (#57 StepFun) is covered without another code change. Every route
+// whose recipe does not declare the flag behaves exactly as before.
+const { routeNeedsVaultCredential } = require('../lib/recipes');
 const { getRuntimeSnapshot, defaultReadStatus } = require('../lib/runtime-snapshot');
 const { recommend } = require('../lib/recommend');
 const { makeJevTransport } = require('../lib/jev-openrouter');
@@ -236,6 +243,12 @@ function isCustomMonitored(route) {
   return validateMonitor(route).ok;
 }
 
+// A route takes part when it has a credential under its id, OR when its recipe
+// declares that it authenticates through its own CLI and holds none for us.
+function isConfiguredRoute(route) {
+  return !routeNeedsVaultCredential(route) || vault.has(route.id);
+}
+
 function entryFor(route, status, source) {
   const ttl = route.ttlSeconds != null ? route.ttlSeconds : 180;
   const now = Date.now();
@@ -259,7 +272,7 @@ async function refresh(quiet, fromSessionStart = false) {
   // to route.id, and are otherwise skipped as unmonitored (not an error).
   const configured = cfg.routes.filter((r) => (isXiaomi(r)
     ? true
-    : (cfg.providers[r.provider] || isCustomMonitored(r)) && vault.has(r.id)));
+    : (cfg.providers[r.provider] || isCustomMonitored(r)) && isConfiguredRoute(r)));
   if (!configured.length) {
     if (!quiet) process.stdout.write(noCredentialMessage());
     return;
@@ -371,7 +384,7 @@ async function reportCmd(args) {
   // [#7] Surface any fresh credential receipt even on first-run (no creds).
   const receiptMsg = formatReceipt(receiptFact(dataDir()));
   // Xiaomi is configured by route presence alone (no vault read).
-  const anyConfigured = cfg.routes.some((r) => (isXiaomi(r) ? true : vault.has(r.id)));
+  const anyConfigured = cfg.routes.some((r) => (isXiaomi(r) ? true : isConfiguredRoute(r)));
   if (!anyConfigured) {
     process.stdout.write(noCredentialMessage());
     if (receiptMsg) process.stdout.write('  ' + receiptMsg + '\n');
@@ -420,7 +433,7 @@ async function check(routeId) {
     return;
   }
   const token = vault.get(route.id);
-  if (!token) err(`no credential for "${routeId}" — run: vl.js setup`);
+  if (!token && routeNeedsVaultCredential(route)) err(`no credential for "${routeId}" — run: vl.js setup`);
   let st;
   try {
     st = await getAdapter(route.provider, route, cfg).fetchStatus(

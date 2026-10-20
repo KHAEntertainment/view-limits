@@ -11,6 +11,11 @@
 //
 //   VL_FAKE_STATUS        HTTP status for every fetch (default 200)
 //   VL_FAKE_HEADERS       JSON object of response headers
+//   VL_FAIL_CONFIG_RENAME fail the atomic config publication at its rename, as
+//                         a full disk would — the only way to exercise the
+//                         config stage now that saveConfig is temp+rename
+//                         (chmod on config.json no longer blocks a rename, and
+//                         a read-only data dir fails earlier, at the lock).
 //   VL_TEST_FORCE_SPAWN   test-only tripwire proof: deliberately attempt a
 //                         forbidden `bl auth logout` so the suite can confirm
 //                         the subprocess assertion is capable of failing.
@@ -63,4 +68,16 @@ global.fetch = async (url, init = {}) => {
 // lib/ or bin/ reads this variable.
 if (process.env.VL_TEST_FORCE_SPAWN === '1') {
   try { cp.execFileSync('bl', ['auth', 'logout']); } catch { /* recorded, then refused */ }
+}
+
+if (process.env.VL_FAIL_CONFIG_RENAME === '1') {
+  const realRename = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (path.basename(String(to)) === 'config.json') {
+      const e = new Error('ENOSPC: no space left on device, rename');
+      e.code = 'ENOSPC';
+      throw e;
+    }
+    return realRename(from, to);
+  };
 }

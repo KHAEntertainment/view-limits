@@ -839,7 +839,7 @@ function parseCredentialArgs(cfg, args) {
       i += 1;
       continue;
     }
-    if (arg.startsWith('--')) err(`unknown option "${arg}".`);
+    if (arg.startsWith('--')) err(`unknown option "${redactFlagToken(arg)}".`);
     if (!arg.trim()) err('route id must not be empty.');
     if (parsed.routeId) err('only one route can be selected at a time.');
     parsed.routeId = arg;
@@ -895,6 +895,37 @@ function readUserConfig() {
   } catch {
     return {};
   }
+}
+
+// Like readUserConfig, but tells absent apart from broken (Issue #58).
+//
+// readUserConfig deliberately swallows everything and returns `{}` so a
+// malformed config can never crash a read path. That is wrong for a WRITE: a
+// lifecycle write replaces config.json wholesale, so starting from `{}`
+// because of one typo would silently discard every setting the user put
+// there. The lifecycle refuses in that case; see userConfigBlocked in
+// lib/provider-lifecycle.js.
+//
+//   { ok: true, doc }            absent (first run, doc = {}) or well-formed
+//   { ok: false, reason }        'malformed' | 'not-an-object' | 'unreadable'
+function readUserConfigStrict() {
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath(), 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { ok: true, doc: {} };
+    return { ok: false, reason: 'unreadable' };
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: 'malformed' };
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { ok: false, reason: 'not-an-object' };
+  }
+  return { ok: true, doc };
 }
 
 // Append/refresh the opt-in route + pinned provider settings + explicit
@@ -1249,6 +1280,7 @@ function lifecycleIo(cfg) {
     // Re-read on every call so a step that follows a config write sees it.
     effectiveRoutes: () => loadConfig().routes,
     readUserConfig,
+    readUserConfigStrict,
     saveConfig,
     vault: {
       assertWritable: () => vault.assertWritable(),
@@ -1284,6 +1316,17 @@ const PROVIDER_VALUE_FLAGS = Object.freeze({
   '--region': 'region',
   '--key': 'key',
 });
+
+// `--key=sk-…` is not supported syntax (values are separate argv tokens), but
+// a user will type it, and the unknown-option error echoes the token back. Any
+// `--flag=value` form therefore has its value half redacted before it is
+// printed: a mistyped credential must not land in stderr, a terminal
+// scrollback or a captured log.
+function redactFlagToken(arg) {
+  const text = String(arg);
+  const eq = text.indexOf('=');
+  return eq < 0 ? text : `${text.slice(0, eq)}=<redacted>`;
+}
 
 function parseProviderArgs(args) {
   const out = {
@@ -1336,7 +1379,7 @@ function parseProviderArgs(args) {
       i += 1;
       continue;
     }
-    if (arg.startsWith('--')) err(`unknown option "${arg}".`);
+    if (arg.startsWith('--')) err(`unknown option "${redactFlagToken(arg)}".`);
     if (!arg.trim()) err('route id must not be empty.');
     if (out.routeId) err('only one route can be selected at a time.');
     out.routeId = arg;

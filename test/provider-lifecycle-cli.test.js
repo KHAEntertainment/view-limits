@@ -115,6 +115,14 @@ const ADD_ACME = [
   '--option', 'scope=account', '--match-model', 'acme', '--key', KEY_A, '--json',
 ];
 
+// A second, independent custom endpoint — used where a test needs to add one
+// route while another already exists and must survive untouched.
+const ADD_BETA = [
+  'provider', 'add', '--label', 'beta-plan', '--recipe', 'openai-compat',
+  '--endpoint', 'https://beta.example.com', '--option', 'path=/v1/models',
+  '--option', 'scope=account', '--key', KEY_B, '--json',
+];
+
 console.log('provider add — custom endpoint');
 
 test('a monitored probe persists route, credential and cache; exit 0', () => {
@@ -263,12 +271,18 @@ test('the two retention flags are mutually exclusive', () => {
 
 console.log('provider add — partial-persistence recovery (AC1)');
 
-test('an unwritable config.json rolls the credential back; exit 5, nothing persisted', () => {
+// config.json is published atomically (temp file + rename), so neither
+// chmod-ing the FILE (a rename replaces it regardless of its mode) nor
+// freezing the data DIRECTORY (that fails earlier, at the mutation lock)
+// exercises the config stage. `VL_FAIL_CONFIG_RENAME` fails the publication
+// itself, exactly as a full disk would, which is the failure the credential
+// rollback exists for.
+const FAIL_CONFIG = { VL_FAIL_CONFIG_RENAME: '1' };
+
+test('a failed config publication rolls the credential back; exit 5, nothing persisted', () => {
   const dir = freshDir();
-  fs.chmodSync(path.join(dir, 'config.json'), 0o444);
-  const r = run(dir, ADD_ACME);
-  fs.chmodSync(path.join(dir, 'config.json'), 0o644);
-  assert.strictEqual(r.status, 5, r.stderr);
+  const r = run(dir, ADD_ACME, FAIL_CONFIG);
+  assert.strictEqual(r.status, 5, `${r.stdout}${r.stderr}`);
   assert.strictEqual(r.json.status, 'persist-failed');
   assert.strictEqual(r.json.stage, 'config');
   assert.strictEqual(r.json.rollback, 'credential-removed');
@@ -279,23 +293,85 @@ test('an unwritable config.json rolls the credential back; exit 5, nothing persi
 
 test('rerunning after the failure completes the add', () => {
   const dir = freshDir();
-  fs.chmodSync(path.join(dir, 'config.json'), 0o444);
-  assert.strictEqual(run(dir, ADD_ACME).status, 5);
-  fs.chmodSync(path.join(dir, 'config.json'), 0o644);
+  assert.strictEqual(run(dir, ADD_ACME, FAIL_CONFIG).status, 5);
   const r = run(dir, ADD_ACME);
   assert.strictEqual(r.status, 0, r.stderr);
   assert.deepStrictEqual(r.json.persisted, { credential: true, config: true, cache: true });
   assert.ok(routeById(dir, 'custom-acme-plan'));
 });
 
+test('a failed publication leaves the existing config.json byte-identical', () => {
+  const dir = freshDir();
+  assert.strictEqual(run(dir, ADD_ACME).status, 0);
+  const before = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+  const r = run(dir, ADD_BETA, FAIL_CONFIG);
+  assert.strictEqual(r.status, 5, r.stderr);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before,
+    'a failed publication must not damage the previous document');
+  assert.deepStrictEqual(fs.readdirSync(dir).filter((f) => f.startsWith('config.json.tmp')), [],
+    'a failed publication left its temp file behind');
+  assert.deepStrictEqual(secretFiles(dir), ['custom-acme-plan.enc'],
+    'the earlier route keeps its credential; the new one was rolled back');
+});
+
+test('a read-only data dir cannot take the mutation lock, and persists nothing', () => {
+  const dir = freshDir();
+  fs.chmodSync(dir, 0o555);
+  const r = run(dir, ADD_ACME);
+  fs.chmodSync(dir, 0o755);
+  assert.strictEqual(r.status, 6, r.stderr);
+  assert.strictEqual(r.json.status, 'lock-busy');
+  assert.deepStrictEqual(secretFiles(dir), []);
+  assert.strictEqual(routeById(dir, 'custom-acme-plan'), null);
+});
+
+test('a malformed config.json is refused, not overwritten', () => {
+  const dir = freshDir();
+  const broken = '{\n "vault": { "backend": "file" },\n "routes": [\n  { "id": "mine", "provider": "kimi" },\n ]\n}\n';
+  fs.writeFileSync(path.join(dir, 'config.json'), broken);
+  const r = run(dir, ADD_ACME);
+  assert.strictEqual(r.status, 5, r.stderr);
+  assert.strictEqual(r.json.stage, 'config-unreadable');
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), broken,
+    'a config we could not parse must be left exactly as it was');
+  assert.deepStrictEqual(secretFiles(dir), [], 'and no credential may be stored');
+});
+
 test('a busy mutation lock is reported, not silently queued; exit 6', () => {
   const dir = freshDir();
-  fs.writeFileSync(path.join(dir, 'provider-lifecycle.lock'), JSON.stringify({ pid: 1, at: new Date().toISOString() }));
+  // A lock held by THIS process: a live owner is never taken over.
+  fs.writeFileSync(path.join(dir, 'provider-lifecycle.lock'),
+    JSON.stringify({ pid: process.pid, owner: 'someone-else', at: new Date().toISOString() }));
   const r = run(dir, ADD_ACME);
   assert.strictEqual(r.status, 6, r.stderr);
   assert.strictEqual(r.json.status, 'lock-busy');
   assert.deepStrictEqual(secretFiles(dir), []);
   assert.strictEqual(routeById(dir, 'custom-acme-plan'), null);
+  assert.ok(fs.existsSync(path.join(dir, 'provider-lifecycle.lock')),
+    "a refused contender must not remove the holder's lock");
+});
+
+console.log('credentials never reach the output');
+
+test('a mistyped --key=SECRET is not echoed back', () => {
+  const dir = freshDir();
+  const r = run(dir, ['provider', 'add', '--label', 'acme-plan', '--recipe', 'openai-compat',
+    `--key=${KEY_A}`, '--json']);
+  assert.strictEqual(r.status, 1, 'unsupported syntax is a bad argument');
+  // `run` already fails the test if either stream contains KEY_A; assert the
+  // shape of what IS printed so the redaction is pinned, not just absence.
+  assert.match(r.stderr, /unknown option "--key=<redacted>"/);
+});
+
+test('a probe failure never prints provider or credential text', () => {
+  const dir = freshDir();
+  // 500 with a body: the adapter classifies it, and nothing of the exchange
+  // may reach stdout.
+  const r = run(dir, ADD_ACME, { VL_FAKE_STATUS: '500' });
+  assert.strictEqual(r.status, 2, r.stderr);
+  assert.strictEqual(r.json.probe.outcome, 'no-signal');
+  assert.strictEqual(JSON.stringify(r.json).includes(KEY_A), false);
+  assert.strictEqual(JSON.stringify(r.json).includes('Bearer'), false);
 });
 
 console.log('provider update');
@@ -414,12 +490,10 @@ test('a credential-free recipe is removed without any vault delete', () => {
   assert.strictEqual(r.json.removed.config, true);
 });
 
-test('removal is resumable: an unwritable config keeps the cleared credential reported', () => {
+test('removal is resumable: a failed config publication keeps the cleared credential reported', () => {
   const dir = freshDir();
   run(dir, ADD_ACME);
-  fs.chmodSync(path.join(dir, 'config.json'), 0o444);
-  const r = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json']);
-  fs.chmodSync(path.join(dir, 'config.json'), 0o644);
+  const r = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json'], FAIL_CONFIG);
   assert.strictEqual(r.status, 5, r.stderr);
   assert.strictEqual(r.json.removed.credential, true);
   assert.strictEqual(r.json.removed.config, false);

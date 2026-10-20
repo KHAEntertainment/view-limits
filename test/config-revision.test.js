@@ -107,25 +107,32 @@ test('an ephemeral option (timeoutMs) does NOT make an entry obsolete', () => {
     'transport tuning must not invalidate a cached observation');
 });
 
-test('the predicate is total: no input throws, and nothing unprovable is obsolete', () => {
-  const circular = { id: 'x', provider: 'y' };
-  circular.monitor = { recipe: 'openai-compat', endpoint: 'https://a.example.com' };
-  circular.self = circular;
-  for (const [entry, route] of [
-    [null, ROUTE], [undefined, ROUTE], [42, ROUTE], ['s', ROUTE], [[], ROUTE],
-    [exhaustedEntry({ configRevision: 'x' }), null],
-    [exhaustedEntry({ configRevision: 'x' }), undefined],
-    [exhaustedEntry({ configRevision: 'x' }), 42],
-    [exhaustedEntry({ configRevision: 'x' }), []],
-    [exhaustedEntry({ configRevision: 'x' }), {}],
-    [exhaustedEntry({ configRevision: 'x' }), circular],
-  ]) {
-    const r = isConfigObsolete(entry, route);
-    assert.strictEqual(typeof r, 'boolean');
-    if (route === null || route === undefined || typeof route !== 'object' || Array.isArray(route)) {
-      assert.strictEqual(r, false, 'an unusable route must never mark an entry obsolete');
-    }
+test('the predicate is total: no input throws, and an unverifiable revision fails OPEN', () => {
+  // A BigInt in a HASHED field is the reliable way to make configRevision
+  // throw: JSON.stringify refuses to serialize it. A circular reference on a
+  // key outside ALLOWED_MONITOR_FIELDS would simply be dropped by
+  // normalizedMonitor and never reach the hash at all.
+  const unhashable = { ...ROUTE, monitor: { ...ROUTE.monitor, endpoint: 1n } };
+  assert.throws(() => configRevision(unhashable), /BigInt|serialize/i,
+    'the fixture must really be unhashable, or this test proves nothing');
+  for (const entry of [null, undefined, 42, 's', []]) {
+    assert.strictEqual(isConfigObsolete(entry, ROUTE), false, 'a non-entry is never obsolete');
   }
+  // A revision IS present but cannot be checked against the route ⇒ obsolete,
+  // which is the fail-open direction at the gate: an observation we cannot
+  // verify must not support a deny.
+  const stamped = exhaustedEntry({ configRevision: 'abc123' });
+  for (const route of [null, undefined, 42, [], 'nope']) {
+    assert.strictEqual(isConfigObsolete(stamped, route), true,
+      'an unusable route must not leave a stamped entry deny-capable');
+  }
+  assert.strictEqual(isConfigObsolete(stamped, {}), true);
+  assert.strictEqual(isConfigObsolete(stamped, unhashable), true,
+    'a route whose revision cannot be computed must not be deny-capable');
+  // But a legacy entry with NO revision keeps its pre-#58 behaviour whatever
+  // the route looks like.
+  assert.strictEqual(isConfigObsolete(exhaustedEntry(), null), false);
+  assert.strictEqual(isConfigObsolete(exhaustedEntry(), unhashable), false);
 });
 
 test('lib/cache re-exports the same predicate', () => {
@@ -177,6 +184,18 @@ test('advisory mode is unaffected by an obsolete entry (never denies anyway)', (
   const config = { gate: { mode: 'advisory', injectContext: true, constrainedThreshold: 0.2 } };
   const d = decide({ route: edited({ account: 'second-seat' }), entry, now: Date.now(), config });
   assert.strictEqual(d.action, 'allow');
+});
+
+test('a stamped entry whose revision cannot be verified does not deny', () => {
+  const unhashable = { ...ROUTE, monitor: { ...ROUTE.monitor, endpoint: 1n } };
+  const d = decide({
+    route: unhashable,
+    entry: exhaustedEntry({ configRevision: configRevision(ROUTE) }),
+    now: Date.now(),
+    config: DENY_CONFIG,
+  });
+  assert.strictEqual(d.action, 'allow', 'an unverifiable revision must fail open, not deny');
+  assert.strictEqual(d.refresh, true);
 });
 
 console.log('CLI — writer and reader together');
@@ -270,6 +289,12 @@ test('a credential-shaped option VALUE is rejected at depth 2, including short f
     'eyJhbGci.eyJzdWIi', 'xoxb-123', 'ghp_abc', 'AKIAABCDEFGH12345678']) {
     const r = validateMonitor({ id: 'x', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://a.example.com', recipeOptions: { path: '/v1/models', scope: value } } });
     assert.strictEqual(r.ok, false, `recipeOptions value "${value}" must be refused`);
+    // Assert the CREDENTIAL-specific reason, not merely ok:false. Every value
+    // here is also outside `scope`'s enum, so a bare ok:false assertion would
+    // stay green even with the secret-value guard deleted — the enum branch
+    // would reject it anyway. This pins the guard itself.
+    assert.match(r.error, /holds a credential-shaped value and is non-persistable/,
+      `"${value}" was rejected by the wrong rule — the credential-value guard did not fire`);
   }
 });
 

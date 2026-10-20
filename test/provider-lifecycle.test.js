@@ -15,6 +15,7 @@ const path = require('path');
 
 const lifecycle = require('../lib/provider-lifecycle');
 const { configRevision } = require('../lib/monitor-schema');
+const { attachRevisions } = require('../lib/cache');
 const { STATUS, PROBE_OUTCOME, RETENTION } = lifecycle;
 
 let failures = 0;
@@ -70,6 +71,9 @@ function makeIo(options = {}) {
     lockCalls: 0,
     effectiveRoutes: () => (Array.isArray(userDoc.routes) ? userDoc.routes : baseRoutes),
     readUserConfig: () => JSON.parse(JSON.stringify(userDoc)),
+    readUserConfigStrict: () => (options.configUnreadable
+      ? { ok: false, reason: options.configUnreadable }
+      : { ok: true, doc: JSON.parse(JSON.stringify(userDoc)) }),
     saveConfig: (doc) => {
       journal.push('config');
       if (options.fail === 'config') throw new Error('EACCES: permission denied');
@@ -90,6 +94,11 @@ function makeIo(options = {}) {
         journal.push(`vault-remove:${id}`);
         if (options.fail === 'vault-rollback') throw new Error('rollback refused');
         if (options.fail === 'vault-remove') throw new Error('keychain delete refused');
+        // The production backends SWALLOW their errors and return false, so a
+        // fake that only throws would never exercise the real contract.
+        // `vaultDeleteNoops: true` reproduces it: the call reports false and
+        // the secret stays put.
+        if (options.vaultDeleteNoops) return false;
         return vaultStore.delete(id);
       },
     },
@@ -98,7 +107,12 @@ function makeIo(options = {}) {
       journal.push('cache');
       if (options.fail === 'cache') throw new Error('ENOSPC');
       io.lastWriteCacheOptions = opts;
-      cache = { updatedAt: new Date().toISOString(), routes: JSON.parse(JSON.stringify(routes)) };
+      // Run the REAL attachRevisions: passing `options.routes` re-stamps every
+      // row's configRevision from the current config, which is exactly the
+      // behaviour a lifecycle write must not trigger. A fake that skipped this
+      // could not see the difference.
+      const enriched = attachRevisions(JSON.parse(JSON.stringify(routes)), opts);
+      cache = { updatedAt: new Date().toISOString(), routes: enriched };
       return cache;
     },
     lock: () => {
@@ -364,18 +378,41 @@ test('a cache-only failure is a warning: route and credential stand', async () =
   assert.strictEqual(io.userDoc.routes.length, 1);
 });
 
-test('persisting republishes revision metadata for the surviving routes', async () => {
-  const io = makeIo();
-  await lifecycle.setupProvider(COMPAT_ROUTE, io);
-  assert.ok(Array.isArray(io.lastWriteCacheOptions.routes), 'writeCache must receive the route list');
-  assert.ok(io.lastWriteCacheOptions.routes.some((r) => r.id === 'custom-acme-plan'));
-});
-
 test('a stale cache row for a reused id is dropped by the add', async () => {
   const io = makeIo({ cache: { updatedAt: null, routes: { 'custom-acme-plan': { routeId: 'custom-acme-plan', status: { state: 'exhausted' } }, other: { routeId: 'other' } } } });
   await lifecycle.setupProvider(COMPAT_ROUTE, io);
   assert.strictEqual(io.cache.routes['custom-acme-plan'], undefined);
   assert.ok(io.cache.routes.other, 'an unrelated row must survive');
+});
+
+test('a lifecycle write does NOT re-stamp a surviving row it never observed', async () => {
+  // Route B is time-fresh, exhausted, and stamped for a config it no longer
+  // has, so the gate correctly stops trusting it. Adding an unrelated route
+  // must not make that observation look current again: nothing re-observed B.
+  const staleRouteB = {
+    id: 'custom-b', provider: 'openai-compat',
+    monitor: { recipe: 'openai-compat', endpoint: 'https://b-old.example.com', recipeOptions: { path: '/v1/models', scope: 'account' } },
+  };
+  const editedRouteB = {
+    ...staleRouteB,
+    monitor: { ...staleRouteB.monitor, endpoint: 'https://b-new.example.com' },
+  };
+  const obsoleteStamp = configRevision(staleRouteB);
+  const io = makeIo({
+    userDoc: { routes: [editedRouteB] },
+    secrets: { 'custom-b': 'sk-B' },
+    cache: {
+      updatedAt: null,
+      routes: { 'custom-b': { routeId: 'custom-b', configRevision: obsoleteStamp, status: { state: 'exhausted' } } },
+    },
+  });
+  const r = await lifecycle.setupProvider(COMPAT_ROUTE, io);
+  assert.strictEqual(r.status, STATUS.OK, r.error);
+  assert.strictEqual(io.cache.routes['custom-b'].configRevision, obsoleteStamp,
+    "an unobserved sibling's revision was rewritten, making a stale exhaustion deny again");
+  assert.notStrictEqual(io.cache.routes['custom-b'].configRevision, configRevision(editedRouteB));
+  assert.strictEqual(io.lastWriteCacheOptions, undefined,
+    'a lifecycle cache write must not pass options.routes (that is refresh\'s job)');
 });
 
 section('updateProvider');
@@ -541,6 +578,62 @@ test('a vault delete failure stops before the config is rewritten', async () => 
   assert.strictEqual(io.userDoc.routes.length, 1, 'the route must survive a vault failure');
 });
 
+section('malformed config.json is never overwritten');
+
+// A lifecycle write replaces config.json wholesale, so starting from `{}`
+// because the existing document would not parse silently discards every
+// setting in it. Refuse instead — before the probe, before the vault.
+test('an add refuses when config.json exists but will not parse', async () => {
+  const io = makeIo({ configUnreadable: 'malformed' });
+  const r = await lifecycle.setupProvider(COMPAT_ROUTE, io);
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  assert.strictEqual(r.stage, 'config-unreadable');
+  assert.deepStrictEqual(r.persisted, { credential: false, config: false, cache: false });
+  assert.strictEqual(io.journal.includes('config'), false, 'config must not be written');
+  assert.strictEqual(io.journal.some((j) => j.startsWith('vault-set')), false, 'no credential may be stored');
+  assert.strictEqual(io.journal.includes('probe'), false, 'the guard runs before the probe');
+  assert.match(r.recovery, /discard every setting/);
+});
+
+test('an update refuses on the same condition', async () => {
+  const io = updateIo({ configUnreadable: 'malformed' });
+  const r = await lifecycle.updateProvider({ routeId: 'custom-acme-plan', key: 'sk-NEW-0002' }, io);
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  assert.strictEqual(r.stage, 'config-unreadable');
+  assert.strictEqual(io.vaultStore.get('custom-acme-plan'), 'sk-OLD-0001', 'the stored key must be untouched');
+  assert.strictEqual(io.journal.includes('config'), false);
+});
+
+test('a non-object config document is refused too', async () => {
+  const r = await lifecycle.setupProvider(COMPAT_ROUTE, makeIo({ configUnreadable: 'not-an-object' }));
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  assert.strictEqual(r.stage, 'config-unreadable');
+});
+
+test('removal is NOT blocked by it — it never rewrites an unreadable config', async () => {
+  // With an unreadable config no custom route resolves, so removal takes its
+  // no-route-entry branch: the credential and cache row go, saveConfig is
+  // never called. `vl.js remove <built-in>` must keep working on a broken
+  // config rather than being locked out by the guard.
+  const io = makeIo({
+    configUnreadable: 'malformed',
+    routes: [{ id: 'kimi-code-plan', provider: 'kimi' }],
+    secrets: { 'kimi-code-plan': 'sk-kimi-x' },
+    cache: { updatedAt: null, routes: { 'kimi-code-plan': { routeId: 'kimi-code-plan' } } },
+  });
+  const r = lifecycle.removeProvider({ routeId: 'kimi-code-plan' }, io);
+  assert.strictEqual(r.status, STATUS.OK, r.error);
+  assert.strictEqual(r.removed.credential, true);
+  assert.strictEqual(io.journal.includes('config'), false, 'removal must not rewrite a broken config');
+});
+
+test('an io without the strict reader behaves exactly as before', async () => {
+  const io = makeIo();
+  delete io.readUserConfigStrict;
+  const r = await lifecycle.setupProvider(COMPAT_ROUTE, io);
+  assert.strictEqual(r.status, STATUS.OK, r.error);
+});
+
 section('credential never leaks through an error path');
 
 // The keychain backend shells out to `security … -w <secret>`, and a failed
@@ -649,6 +742,156 @@ test('every status maps to a stable code, and 1 stays reserved for bad args', ()
     'no lifecycle status may claim exit 1 (bad arguments)');
 });
 
+section('a silent vault delete is never reported as success');
+
+// Both production backends swallow their delete error and return false
+// (lib/vault.js keychainDelete / fileDelete), so the return value alone cannot
+// support a claim that a secret is gone. These cases use that exact contract:
+// the call reports false and the secret stays put.
+test('a rollback whose delete silently no-ops is reported as FAILED, not removed', async () => {
+  const io = makeIo({ fail: 'config', vaultDeleteNoops: true });
+  const r = await lifecycle.setupProvider(COMPAT_ROUTE, io);
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  assert.strictEqual(r.rollback, 'failed',
+    'a delete that silently did nothing must not be reported as a successful rollback');
+  assert.strictEqual(r.persisted.credential, true, 'the credential is still stored, so say so');
+  assert.strictEqual(io.vaultStore.get('custom-acme-plan'), COMPAT_ROUTE.key);
+  assert.match(r.recovery, /still stored/);
+});
+
+test('a removal whose delete silently no-ops does NOT go on to delete the route', async () => {
+  const io = updateIo({ vaultDeleteNoops: true });
+  const r = lifecycle.removeProvider({ routeId: 'custom-acme-plan' }, io);
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  assert.strictEqual(r.stage, 'vault');
+  assert.strictEqual(io.userDoc.routes.length, 1,
+    'removing the route while its credential is still stored would orphan the secret');
+  assert.strictEqual(io.vaultStore.get('custom-acme-plan'), 'sk-OLD-0001');
+});
+
+test('an absent credential is not a failed delete', async () => {
+  // remove() returns false here too, but nothing was there — that is success.
+  const route = { id: 'custom-acme-plan', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://a.example.com', recipeOptions: { path: '/v1/models', scope: 'account' } } };
+  const io = makeIo({ userDoc: { routes: [route] }, secrets: {} });
+  const r = lifecycle.removeProvider({ routeId: 'custom-acme-plan' }, io);
+  assert.strictEqual(r.status, STATUS.OK, r.error);
+  assert.strictEqual(r.removed.credential, false);
+  assert.strictEqual(r.removed.config, true);
+});
+
+section('removal snapshots under the lock');
+
+test('a route added between the call and the lock is not deleted by the removal', async () => {
+  // The remover must read the route list under the lock. If it snapshots
+  // first, it writes a list that predates a concurrent add and silently drops
+  // that route — while leaving its credential behind.
+  const routeA = { id: 'custom-a', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://a.example.com', recipeOptions: { path: '/v1/models', scope: 'account' } } };
+  const routeB = { id: 'custom-b', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://b.example.com', recipeOptions: { path: '/v1/models', scope: 'account' } } };
+  const io = makeIo({ userDoc: { routes: [routeA] }, secrets: { 'custom-a': 'sk-A', 'custom-b': 'sk-B' } });
+  const realLock = io.lock;
+  io.lock = () => {
+    // A competing mutation commits route B while we are acquiring.
+    io.saveConfig({ ...io.readUserConfig(), routes: [routeA, routeB] });
+    io.lock = realLock;
+    return realLock();
+  };
+  const r = lifecycle.removeProvider({ routeId: 'custom-a' }, io);
+  assert.strictEqual(r.status, STATUS.OK, r.error);
+  assert.deepStrictEqual(io.userDoc.routes.map((x) => x.id), ['custom-b'],
+    'the concurrently added route must survive the removal');
+});
+
+section('a shipped built-in route is never deletable');
+
+test('an explicit built-in monitor does not make a shipped route removable', async () => {
+  // The resolver supports `monitor: { recipe: 'built-in' }` as a wire-family
+  // pass-through, so monitor presence alone is not ownership evidence.
+  const builtIn = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in' } };
+  const io = makeIo({
+    userDoc: { routes: [builtIn] },
+    secrets: { 'kimi-code-plan': 'sk-kimi-x' },
+    cache: { updatedAt: null, routes: { 'kimi-code-plan': { routeId: 'kimi-code-plan' } } },
+  });
+  const r = lifecycle.removeProvider({ routeId: 'kimi-code-plan' }, io);
+  assert.strictEqual(r.status, STATUS.OK, r.error);
+  assert.strictEqual(r.removed.config, false, 'a shipped route must stay in config.json');
+  assert.deepStrictEqual(io.userDoc.routes, [builtIn]);
+  assert.strictEqual(r.removed.credential, true, 'its credential still goes');
+  assert.strictEqual(io.cache.routes['kimi-code-plan'], undefined, 'and its cache row still goes');
+});
+
+test('a shipped id is protected even carrying a real custom recipe', async () => {
+  const masquerading = {
+    id: 'glm-coding-plan', provider: 'openai-compat',
+    monitor: { recipe: 'openai-compat', endpoint: 'https://x.example.com', recipeOptions: { path: '/v1/models', scope: 'account' } },
+  };
+  const io = makeIo({ userDoc: { routes: [masquerading] }, secrets: { 'glm-coding-plan': 'sk-x' } });
+  const r = lifecycle.removeProvider({ routeId: 'glm-coding-plan' }, io);
+  assert.strictEqual(r.removed.config, false);
+  assert.deepStrictEqual(io.userDoc.routes, [masquerading]);
+});
+
+section('a probe exception never reaches the result');
+
+test('the text of a thrown probe is dropped, not reported', async () => {
+  const io = makeIo();
+  io.probe = async () => {
+    // A probe runs with the credential in hand; a thrown error can quote the
+    // request it was making, header and all.
+    throw new Error(`connect ETIMEDOUT https://acme.example.com (Authorization: Bearer ${COMPAT_ROUTE.key})`);
+  };
+  const r = await lifecycle.setupProvider({ ...COMPAT_ROUTE, retention: RETENTION.KEEP }, io);
+  const printed = JSON.stringify(r);
+  assert.strictEqual(printed.includes(COMPAT_ROUTE.key), false,
+    'the credential reached the result through the probe exception');
+  assert.strictEqual(printed.includes('Authorization'), false);
+  assert.strictEqual(r.probe.outcome, PROBE_OUTCOME.FAILED);
+  assert.strictEqual(r.probe.reason, 'probe-threw');
+  assert.strictEqual(r.probe.detail, undefined);
+});
+
+section('config.json is published atomically');
+
+// saveConfig used writeFileSync directly on config.json, which truncates
+// first: a failure after truncation left an empty or partial document, and a
+// malformed config silently falls back to DEFAULTS on the next read — so every
+// route and setting in it would be gone while the lifecycle reported "nothing
+// was persisted". A chmod-based test cannot catch this (it fails before the
+// truncation), so this one fails the write itself.
+test('a write that fails mid-publication leaves the previous document intact', () => {
+  const { saveConfig } = require('../lib/config');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-atomic-cfg-'));
+  const prevDataDir = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CLAUDE_PLUGIN_DATA = dir;
+  const target = path.join(dir, 'config.json');
+  const original = JSON.stringify({ routes: [{ id: 'my-route', provider: 'kimi' }], vault: { backend: 'file' } }, null, 1);
+  fs.writeFileSync(target, original);
+  const realWrite = fs.writeFileSync;
+  try {
+    fs.writeFileSync = (file, ...rest) => {
+      // Let the temp file be created, then fail as a full disk would.
+      if (String(file) !== target) {
+        realWrite(file, ...rest);
+        const e = new Error('ENOSPC: no space left on device');
+        e.code = 'ENOSPC';
+        throw e;
+      }
+      return realWrite(file, ...rest);
+    };
+    assert.throws(() => saveConfig({ routes: [], vault: {} }), /ENOSPC/);
+  } finally {
+    fs.writeFileSync = realWrite;
+    if (prevDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = prevDataDir;
+  }
+  assert.strictEqual(fs.readFileSync(target, 'utf8'), original,
+    'config.json was damaged by a failed write');
+  assert.deepStrictEqual(
+    fs.readdirSync(dir).filter((f) => f.startsWith('config.json.tmp')), [],
+    'a failed write left its temp file behind',
+  );
+});
+
 section('mutation lock (real fs)');
 
 test('a second acquire is refused while the first is held, and works after release', () => {
@@ -665,14 +908,71 @@ test('a second acquire is refused while the first is held, and works after relea
   assert.strictEqual(fs.existsSync(path.join(dir, lifecycle.LOCK_FILE)), false);
 });
 
-test('a stale lock is taken over exactly once', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-stale-'));
+// A pid nothing is using, confirmed absent rather than assumed.
+function absentPid() {
+  for (let pid = 60000; pid < 65000; pid += 7) {
+    try { process.kill(pid, 0); } catch (e) {
+      if (e && e.code === 'ESRCH') return pid;
+    }
+  }
+  return null;
+}
+
+test('a LIVE holder is never taken over, however old its lock', () => {
+  // The Alibaba recipe allows timeoutMs up to 30000 for each of two sequential
+  // reads, so a perfectly healthy probe can hold the lock past any age
+  // horizon. Age alone must therefore never authorize a takeover.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-live-'));
   const held = lifecycle.acquireMutationLock(dir);
   assert.strictEqual(held.ok, true);
-  // Pretend "now" is well past the staleness horizon.
-  const later = lifecycle.acquireMutationLock(dir, { now: () => Date.now() + lifecycle.LOCK_STALE_MS + 1000 });
-  assert.strictEqual(later.ok, true, 'a stale lock must be reclaimed');
-  later.release();
+  const later = lifecycle.acquireMutationLock(dir, { now: () => Date.now() + lifecycle.LOCK_STALE_MS * 100 });
+  assert.strictEqual(later.ok, false, 'a live owner was stolen from');
+  assert.strictEqual(later.error, 'held');
+  held.release();
+});
+
+test('a provably dead holder is reclaimed', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-dead-'));
+  const pid = absentPid();
+  assert.ok(pid, 'could not find an absent pid to test with');
+  fs.writeFileSync(path.join(dir, lifecycle.LOCK_FILE),
+    JSON.stringify({ pid, owner: 'ghost', at: new Date().toISOString() }));
+  const taken = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(taken.ok, true, "a dead holder's lock must not block every future mutation");
+  taken.release();
+});
+
+test("a taken-over holder's release cannot remove its successor's lock", () => {
+  // Without ownership checking, the old holder's release unlinks whatever file
+  // is at the path — admitting a third contender while the successor still
+  // believes it holds the lock.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-steal-'));
+  const pid = absentPid();
+  assert.ok(pid, 'could not find an absent pid to test with');
+  const lockPath = path.join(dir, lifecycle.LOCK_FILE);
+  fs.writeFileSync(lockPath, JSON.stringify({ pid, owner: 'ghost', at: new Date().toISOString() }));
+  // We can still construct the displaced holder's handle: acquire, then let
+  // someone else take the path over.
+  const displaced = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(displaced.ok, true);
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, owner: 'successor', at: new Date().toISOString() }));
+  assert.strictEqual(displaced.release(), false, 'release must refuse when the token no longer matches');
+  assert.strictEqual(fs.existsSync(lockPath), true, "the successor's lock was deleted");
+  const contender = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(contender.ok, false, 'a third contender must still be refused');
+});
+
+test('an unparseable lock keeps an age-based escape hatch', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-corrupt-'));
+  const lockPath = path.join(dir, lifecycle.LOCK_FILE);
+  fs.writeFileSync(lockPath, 'not json at all');
+  // Fresh corruption is still respected...
+  assert.strictEqual(lifecycle.acquireMutationLock(dir).ok, false);
+  // ...but it must not deadlock every future mutation forever, since no pid
+  // can be read from it.
+  const taken = lifecycle.acquireMutationLock(dir, { now: () => Date.now() + lifecycle.LOCK_STALE_MS + 1000 });
+  assert.strictEqual(taken.ok, true);
+  taken.release();
 });
 
 test('the lock is created under the data dir, creating it when absent', () => {

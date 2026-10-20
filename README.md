@@ -166,11 +166,25 @@ auth failure, a timeout — the command **persists nothing** and exits
 with one of:
 
 - `--keep-unmonitored` — register the route anyway. It is marked
-  `retention: "keep-unmonitored"` at route level (never inside `monitor`, so the
-  flag cannot change a cached observation's validity), `report` names it
-  explicitly, and it can never read as healthy or exhausted.
+  `retention: "keep-unmonitored"` at route level (never inside `monitor`, so
+  the flag cannot change a cached observation's validity) and `report` names it
+  explicitly, so the probe's verdict stays visible instead of looking like an
+  ordinary unknown row. The flag records **what the probe found at setup
+  time**; it is not a state policy. The route stays configured, `refresh` and
+  `check` still read it, and if the source later does report real capacity that
+  observation is published like any other — an annotation never invents a
+  state, and never suppresses a genuine one. A route whose *recipe* documents
+  no quota source (`stepfun-plan`) can never report capacity, but that comes
+  from the recipe's `monitorable: false` capability, not from this flag.
 - `--clear-credential` — abandon it. On `add` nothing was ever stored; on
   `update` the credential, the route and its cached row are all removed.
+
+> **`--key` is visible in the process list and your shell history.** It is the
+> same trade-off as `vl.js setup <routeId> --key`, and the value goes straight
+> into the vault — but on a shared machine prefer adding the route first with a
+> source that needs no credential, or rotate afterwards from a shell whose
+> history is off. A mistyped `--key=value` (one token) is rejected as unknown
+> syntax with its value redacted, so the key is not echoed back.
 
 **Partial writes are recoverable.** Persistence is vault → config → cache and
 each stage is reported:

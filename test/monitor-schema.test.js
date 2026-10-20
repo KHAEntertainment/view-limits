@@ -416,6 +416,19 @@ test('path must be absolute, query-free, traversal-free and secret-free', () => 
   assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/api/v1/models' }).ok, true);
 });
 
+// F-1: the previous {6,} floor let short `sk-` fragments slip past
+// `looksLikeSecretValue` and through `pathError`, so a 3-char fragment inside
+// `recipeOptions.path` would have been written to config.json. After the
+// relaxation, a synthetic fragment is rejected just like a realistic key.
+test('path with a short sk- fragment is rejected (F-1)', () => {
+  const r = validateMonitor({
+    id: 'r', provider: 'openai-compat',
+    monitor: { endpoint: 'https://oa.example.com', recipe: 'openai-compat', recipeOptions: { path: '/v1/sk-AAA/models' } },
+  });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /credential-shaped segment|credential-shaped value/);
+});
+
 test('declared shape: required path, enum values, integer bounds', () => {
   assert.match(validateRecipeOptions('openai-compat', {}).error, /path is required/);
   assert.strictEqual(validateRecipeOptions('openai-compat', { path: '/m', scope: 'everything' }).ok, false);
@@ -449,6 +462,36 @@ test('httpsEndpointError is the single URL policy (http, creds, garbage)', () =>
   assert.strictEqual(httpsEndpointError('https://u:p@api.example.com'), 'must not embed credentials');
   assert.strictEqual(httpsEndpointError('not a url'), 'is not a valid URL');
   assert.strictEqual(httpsEndpointError(''), 'must be a non-empty string');
+});
+
+// CR-1: align monitor endpoint validation with the sourceUrl policy. A user
+// cannot smuggle a key via `?api_key=…` or pin a stale fragment for a future
+// relay to interpret; the validator refuses both shapes up-front so they
+// never reach the bounded transport.
+test('httpsEndpointError rejects a query string (CR-1)', () => {
+  assert.strictEqual(
+    httpsEndpointError('https://api.example.com/v1/models?key=value'),
+    'must not contain a query string');
+});
+
+test('httpsEndpointError rejects a fragment (CR-1)', () => {
+  assert.strictEqual(
+    httpsEndpointError('https://api.example.com/v1/models#frag'),
+    'must not contain a fragment');
+});
+
+test('httpsEndpointError accepts a clean https URL (CR-1 regression)', () => {
+  assert.strictEqual(
+    httpsEndpointError('https://api.example.com/v1/models'),
+    null);
+});
+
+test('httpsEndpointError credential check still wins over query (CR-1 regression)', () => {
+  // Both checks would fire; the credentials one surfaces first so callers
+  // get the more actionable reason.
+  assert.strictEqual(
+    httpsEndpointError('https://user:pass@api.example.com/v1/models'),
+    'must not embed credentials');
 });
 
 if (failures) {

@@ -541,6 +541,50 @@ test('a vault delete failure stops before the config is rewritten', async () => 
   assert.strictEqual(io.userDoc.routes.length, 1, 'the route must survive a vault failure');
 });
 
+section('credential never leaks through an error path');
+
+// The keychain backend shells out to `security … -w <secret>`, and a failed
+// execFileSync puts its entire argv — credential included — into
+// `error.message`. Verified against the real binary: the message does contain
+// the password. So a vault exception's text must never be repeated into a
+// result that gets printed as JSON.
+function leakyError(secret) {
+  return new Error(`Command failed: security add-generic-password -U -a custom-acme-plan -s svc -w ${secret}`);
+}
+
+test('a vault WRITE failure never repeats the exception text (which holds the key)', async () => {
+  const io = makeIo();
+  io.vault.set = () => { throw leakyError(COMPAT_ROUTE.key); };
+  const r = await lifecycle.setupProvider(COMPAT_ROUTE, io);
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  assert.strictEqual(r.stage, 'vault');
+  const printed = JSON.stringify(r);
+  assert.strictEqual(printed.includes(COMPAT_ROUTE.key), false,
+    'the credential reached the reported result through the vault error message');
+  assert.strictEqual(printed.includes('add-generic-password'), false,
+    'the vault argv reached the reported result');
+  assert.match(r.error, /credential store refused the write/);
+});
+
+test('a vault DELETE failure never repeats the exception text', async () => {
+  const io = updateIo();
+  io.vault.remove = () => { throw leakyError('sk-OLD-0001'); };
+  const r = lifecycle.removeProvider({ routeId: 'custom-acme-plan' }, io);
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  const printed = JSON.stringify(r);
+  assert.strictEqual(printed.includes('sk-OLD-0001'), false,
+    'the credential reached the reported result through the vault error message');
+  assert.match(r.error, /credential store refused the delete/);
+});
+
+test('a rollback failure after a leaky vault error also stays clean', async () => {
+  const io = makeIo({ fail: 'config' });
+  io.vault.remove = () => { throw leakyError(COMPAT_ROUTE.key); };
+  const r = await lifecycle.setupProvider(COMPAT_ROUTE, io);
+  assert.strictEqual(r.rollback, 'failed');
+  assert.strictEqual(JSON.stringify(r).includes(COMPAT_ROUTE.key), false);
+});
+
 section('listProviders');
 
 test('reports credential need, retention and revision agreement', async () => {

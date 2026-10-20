@@ -339,16 +339,20 @@ test('a malformed config.json is refused, not overwritten', () => {
 
 test('a busy mutation lock is reported, not silently queued; exit 6', () => {
   const dir = freshDir();
-  // A lock held by THIS process: a live owner is never taken over.
-  fs.writeFileSync(path.join(dir, 'provider-lifecycle.lock'),
-    JSON.stringify({ pid: process.pid, owner: 'someone-else', at: new Date().toISOString() }));
+  // A ticket held by THIS process: a live contender is never taken over, and
+  // its lower number wins the election outright.
+  const tickets = path.join(dir, 'provider-mutations');
+  fs.mkdirSync(tickets, { recursive: true });
+  const held = path.join(tickets, `${process.pid}-${'1'.repeat(32)}.json`);
+  fs.writeFileSync(held, JSON.stringify({ pid: process.pid, owner: 'someone-else', number: 1 }));
   const r = run(dir, ADD_ACME);
   assert.strictEqual(r.status, 6, r.stderr);
   assert.strictEqual(r.json.status, 'lock-busy');
   assert.deepStrictEqual(secretFiles(dir), []);
   assert.strictEqual(routeById(dir, 'custom-acme-plan'), null);
-  assert.ok(fs.existsSync(path.join(dir, 'provider-lifecycle.lock')),
-    "a refused contender must not remove the holder's lock");
+  assert.ok(fs.existsSync(held), "a refused contender must not remove the holder's ticket");
+  assert.deepStrictEqual(fs.readdirSync(tickets), [path.basename(held)],
+    'a refused contender left its own ticket behind, which would block the next mutation');
 });
 
 console.log('credentials never reach the output');
@@ -500,6 +504,51 @@ test('removal is resumable: a failed config publication keeps the cleared creden
   assert.match(r.json.recovery, /rerun the removal/);
   const again = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json']);
   assert.strictEqual(again.status, 0, again.stderr);
+  assert.strictEqual(routeById(dir, 'custom-acme-plan'), null);
+});
+
+// The REAL vault's failure behaviour, not the unit suite's fake: production
+// `fileGet` swallows every read/decrypt error and returns null, and
+// `fileDelete` swallows every unlink error and returns false. So a delete that
+// FAILED is byte-for-byte indistinguishable from a secret that was never
+// there, if all you have is get() and remove(). Here the secret is provably
+// still on disk and the delete provably failed, which is the case a read-back
+// would have announced as a successful removal — leaving an orphaned
+// credential behind a deleted route.
+test('a credential that could not be deleted is reported as failed, not removed (real vault)', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    console.log('    (skipped: running as root, where mode bits do not deny)');
+    return;
+  }
+  const dir = freshDir();
+  run(dir, ADD_ACME);
+  const secrets = path.join(dir, 'secrets');
+  const blob = path.join(secrets, 'custom-acme-plan.enc');
+  assert.strictEqual(fs.existsSync(blob), true, 'the add did not store a credential to delete');
+  // r-x: the blob can still be STAT'd (so presence is provable) but the
+  // directory cannot be written, so unlink fails. This is exactly the shape of
+  // a vault that is intact and inaccessible.
+  fs.chmodSync(secrets, 0o500);
+  try {
+    const r = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json']);
+    assert.strictEqual(r.status, 5, r.stderr);
+    assert.strictEqual(r.json.stage, 'vault');
+    assert.strictEqual(r.json.removed.credential, false,
+      'a failed delete was reported as a credential removal');
+    assert.strictEqual(r.json.removed.config, false,
+      'the route was deleted while its credential was still stored');
+    assert.match(r.json.recovery, /still stored/);
+    assert.strictEqual(fs.existsSync(blob), true, 'the test premise failed: the blob was deleted');
+    assert.ok(!JSON.stringify(r.json).includes(KEY_A), 'the credential appeared in the result');
+    assert.ok(routeById(dir, 'custom-acme-plan'), 'the route entry must survive a failed vault stage');
+  } finally {
+    fs.chmodSync(secrets, 0o700);
+  }
+  // Idempotent: once the vault is reachable again the same command finishes.
+  const again = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json']);
+  assert.strictEqual(again.status, 0, again.stderr);
+  assert.strictEqual(again.json.removed.credential, true);
+  assert.strictEqual(fs.existsSync(blob), false);
   assert.strictEqual(routeById(dir, 'custom-acme-plan'), null);
 });
 

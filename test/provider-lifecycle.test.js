@@ -3,7 +3,7 @@
 // collision, draft validation, probe classification, the retention gate, the
 // persistence order and every partial-write recovery branch, plus the
 // mutation lock. Fake io throughout — no filesystem, no vault, no provider —
-// except for the lock tests, which exercise the real O_EXCL implementation.
+// except for the lock tests, which exercise the real ticket protocol.
 //
 // Every fake records what it was asked to do, so an assertion fails when the
 // service writes the wrong thing, in the wrong order, or at all.
@@ -83,7 +83,13 @@ function makeIo(options = {}) {
       assertWritable: () => {
         if (options.fail === 'vault-preflight') throw new Error('vault unavailable');
       },
-      get: (id) => (vaultStore.has(id) ? vaultStore.get(id) : null),
+      get: (id) => {
+        // An unreadable vault answers exactly like an empty one — that is the
+        // whole hazard. A locked Keychain, a missing master key and a blob that
+        // will not decrypt all return null here, same as "no such secret".
+        if (options.vaultUnreadable) return null;
+        return vaultStore.has(id) ? vaultStore.get(id) : null;
+      },
       set: (id, secret) => {
         journal.push(`vault-set:${id}`);
         if (options.fail === 'vault') throw new Error('keychain write refused');
@@ -99,7 +105,16 @@ function makeIo(options = {}) {
         // `vaultDeleteNoops: true` reproduces it: the call reports false and
         // the secret stays put.
         if (options.vaultDeleteNoops) return false;
+        if (options.vaultUnreadable) return false;
         return vaultStore.delete(id);
+      },
+      // The real three-way contract (lib/vault.js `probe`): presence WITHOUT
+      // reading the secret, and a third answer for "could not look".
+      // `vaultUnreadable: true` is the case production must survive — a secret
+      // still on disk whose get() is null and whose remove() is false.
+      probe: (id) => {
+        if (options.vaultUnreadable) return 'unreadable';
+        return vaultStore.has(id) ? 'present' : 'absent';
       },
     },
     readCache: () => JSON.parse(JSON.stringify(cache)),
@@ -578,6 +593,35 @@ test('a vault delete failure stops before the config is rewritten', async () => 
   assert.strictEqual(io.userDoc.routes.length, 1, 'the route must survive a vault failure');
 });
 
+test('an UNREADABLE credential is a failed delete, never an absent one', async () => {
+  // The hole this closes: get() returns null both for "no such secret" and for
+  // a secret it could not read, and remove() returns false both for "nothing
+  // there" and for a delete that failed. A read-back of those two therefore
+  // CANNOT prove absence — it is byte-for-byte what an unreadable, still
+  // present secret looks like. Announcing it gone and then deleting the route
+  // orphans a live credential, which is the data-integrity failure.
+  const io = updateIo({ vaultUnreadable: true });
+  const r = lifecycle.removeProvider({ routeId: 'custom-acme-plan' }, io);
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  assert.strictEqual(r.stage, 'vault');
+  assert.strictEqual(r.removed.credential, false,
+    'an unreadable vault was reported as a successful credential removal');
+  assert.strictEqual(io.userDoc.routes.length, 1,
+    'the route was deleted while its credential may still be stored');
+  assert.match(r.recovery, /still stored/);
+});
+
+test('a vault that cannot prove absence never reports a credential removed', async () => {
+  // Fail closed on an interface that predates the probe: no proof is not
+  // proof. Production always supplies it (bin/vl.js lifecycleIo), so this
+  // pins the default rather than a reachable user-facing path.
+  const io = updateIo({});
+  delete io.vault.probe;
+  const r = lifecycle.removeProvider({ routeId: 'custom-acme-plan' }, io);
+  assert.strictEqual(r.status, STATUS.PERSIST_FAILED);
+  assert.strictEqual(r.stage, 'vault');
+});
+
 section('malformed config.json is never overwritten');
 
 // A lifecycle write replaces config.json wholesale, so starting from `{}`
@@ -894,20 +938,6 @@ test('a write that fails mid-publication leaves the previous document intact', (
 
 section('mutation lock (real fs)');
 
-test('a second acquire is refused while the first is held, and works after release', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-lock-'));
-  const first = lifecycle.acquireMutationLock(dir);
-  assert.strictEqual(first.ok, true);
-  const second = lifecycle.acquireMutationLock(dir);
-  assert.strictEqual(second.ok, false);
-  assert.strictEqual(second.error, 'held');
-  first.release();
-  const third = lifecycle.acquireMutationLock(dir);
-  assert.strictEqual(third.ok, true);
-  third.release();
-  assert.strictEqual(fs.existsSync(path.join(dir, lifecycle.LOCK_FILE)), false);
-});
-
 // A pid nothing is using, confirmed absent rather than assumed.
 function absentPid() {
   for (let pid = 60000; pid < 65000; pid += 7) {
@@ -918,69 +948,140 @@ function absentPid() {
   return null;
 }
 
-test('a LIVE holder is never taken over, however old its lock', () => {
+// Plant one contender's ticket by hand. `hex` keeps the name unique, exactly
+// as a real contender's random suffix does.
+function plantTicket(dir, { pid, number, hex, raw }) {
+  const root = path.join(dir, lifecycle.LOCK_DIR);
+  fs.mkdirSync(root, { recursive: true });
+  const file = path.join(root, `${pid}-${hex}.json`);
+  fs.writeFileSync(file, raw !== undefined
+    ? raw
+    : JSON.stringify({ pid, owner: `planted-${hex.slice(0, 6)}`, number }));
+  return file;
+}
+
+function ticketsIn(dir) {
+  try { return fs.readdirSync(path.join(dir, lifecycle.LOCK_DIR)).sort(); } catch { return []; }
+}
+
+test('a second acquire is refused while the first is held, and works after release', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-lock-'));
+  const first = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(first.ok, true);
+  const second = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(second.ok, false);
+  assert.strictEqual(second.error, 'held');
+  assert.strictEqual(first.release(), true);
+  const third = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(third.ok, true);
+  assert.strictEqual(third.release(), true);
+  assert.deepStrictEqual(ticketsIn(dir), [],
+    'a refused contender or a released holder left its ticket behind');
+});
+
+test('a LIVE holder is never taken over, and no age horizon exists to try it', () => {
   // The Alibaba recipe allows timeoutMs up to 30000 for each of two sequential
-  // reads, so a perfectly healthy probe can hold the lock past any age
-  // horizon. Age alone must therefore never authorize a takeover.
+  // reads, so a perfectly healthy probe can hold the lock for a minute. There
+  // is no clock in this protocol at all: liveness is the only question asked,
+  // so there is nothing for a long-running holder to age out of.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-live-'));
   const held = lifecycle.acquireMutationLock(dir);
   assert.strictEqual(held.ok, true);
-  const later = lifecycle.acquireMutationLock(dir, { now: () => Date.now() + lifecycle.LOCK_STALE_MS * 100 });
-  assert.strictEqual(later.ok, false, 'a live owner was stolen from');
-  assert.strictEqual(later.error, 'held');
-  held.release();
+  for (let i = 0; i < 3; i += 1) {
+    const later = lifecycle.acquireMutationLock(dir);
+    assert.strictEqual(later.ok, false, 'a live owner was stolen from');
+    assert.strictEqual(later.error, 'held');
+  }
+  assert.strictEqual(held.release(), true);
 });
 
 test('a provably dead holder is reclaimed', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-dead-'));
   const pid = absentPid();
   assert.ok(pid, 'could not find an absent pid to test with');
-  fs.writeFileSync(path.join(dir, lifecycle.LOCK_FILE),
-    JSON.stringify({ pid, owner: 'ghost', at: new Date().toISOString() }));
+  const ghost = plantTicket(dir, { pid, number: 1, hex: 'a'.repeat(32) });
   const taken = lifecycle.acquireMutationLock(dir);
-  assert.strictEqual(taken.ok, true, "a dead holder's lock must not block every future mutation");
-  taken.release();
+  assert.strictEqual(taken.ok, true, "a dead holder's ticket must not block every future mutation");
+  assert.strictEqual(fs.existsSync(ghost), false, "the dead contender's ticket was left to rot");
+  assert.strictEqual(taken.release(), true);
 });
 
-test("a taken-over holder's release cannot remove its successor's lock", () => {
-  // Without ownership checking, the old holder's release unlinks whatever file
-  // is at the path — admitting a third contender while the successor still
-  // believes it holds the lock.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-steal-'));
+test('two contenders racing to reclaim the same dead holder cannot both acquire', () => {
+  // The bug this protocol removes: with one shared lock file, each contender
+  // confirmed the dead holder and then unlinked "the lock" — so the slower one
+  // deleted the WINNER'S LIVE LOCK and acquired too, and both went on to write
+  // config.json. Here the dead ticket belongs to one contender and is reaped
+  // by name, nobody unlinks a peer's file, and the election picks exactly one.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-reclaim-'));
   const pid = absentPid();
   assert.ok(pid, 'could not find an absent pid to test with');
-  const lockPath = path.join(dir, lifecycle.LOCK_FILE);
-  fs.writeFileSync(lockPath, JSON.stringify({ pid, owner: 'ghost', at: new Date().toISOString() }));
-  // We can still construct the displaced holder's handle: acquire, then let
-  // someone else take the path over.
-  const displaced = lifecycle.acquireMutationLock(dir);
-  assert.strictEqual(displaced.ok, true);
-  fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, owner: 'successor', at: new Date().toISOString() }));
-  assert.strictEqual(displaced.release(), false, 'release must refuse when the token no longer matches');
-  assert.strictEqual(fs.existsSync(lockPath), true, "the successor's lock was deleted");
-  const contender = lifecycle.acquireMutationLock(dir);
-  assert.strictEqual(contender.ok, false, 'a third contender must still be refused');
+  plantTicket(dir, { pid, number: 1, hex: 'b'.repeat(32) });
+  const a = lifecycle.acquireMutationLock(dir);
+  const b = lifecycle.acquireMutationLock(dir);
+  const winners = [a, b].filter((l) => l.ok);
+  assert.strictEqual(winners.length, 1,
+    'two contenders both acquired the lock after reclaiming one dead holder');
+  assert.strictEqual(fs.existsSync(winners[0].path), true,
+    "the losing contender deleted the winner's ticket");
+  assert.strictEqual(winners[0].release(), true);
+  assert.deepStrictEqual(ticketsIn(dir), []);
 });
 
-test('an unparseable lock keeps an age-based escape hatch', () => {
+test("reclaiming a dead holder never removes a LIVE contender's ticket", () => {
+  // Reaping is by filename pid and must touch nothing else: a live peer in the
+  // same directory keeps its claim, and still wins the election.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-mixed-'));
+  const pid = absentPid();
+  assert.ok(pid, 'could not find an absent pid to test with');
+  const ghost = plantTicket(dir, { pid, number: 1, hex: 'c'.repeat(32) });
+  const live = plantTicket(dir, { pid: process.pid, number: 1, hex: 'd'.repeat(32) });
+  const mine = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(mine.ok, false, 'a live contender holding a lower number was ignored');
+  assert.strictEqual(mine.error, 'held');
+  assert.strictEqual(fs.existsSync(ghost), false, 'the dead ticket was not reaped');
+  assert.strictEqual(fs.existsSync(live), true, "a live contender's ticket was deleted");
+  fs.unlinkSync(live);
+});
+
+test('release refuses once the ticket on disk is no longer ours', () => {
+  // Nothing else can occupy our unique name, but a rewritten or corrupted
+  // ticket is not ours to delete — the same ownership rule as
+  // lib/refresh-owner.js releaseWorker.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-own-'));
+  const held = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(held.ok, true);
+  fs.writeFileSync(held.path, JSON.stringify({ pid: process.pid, owner: 'someone-else', number: 1 }));
+  assert.strictEqual(held.release(), false, 'release must refuse when the token no longer matches');
+  assert.strictEqual(fs.existsSync(held.path), true, 'release deleted a ticket it does not own');
+});
+
+test('a malformed ticket yields while its contender lives, and never deadlocks once it dies', () => {
+  // An unparseable LIVE record is indeterminate — never permission to proceed.
+  // It needs no age escape hatch: once its process is gone it is reaped by
+  // liveness, so a corrupt ticket cannot block mutations forever.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-corrupt-'));
-  const lockPath = path.join(dir, lifecycle.LOCK_FILE);
-  fs.writeFileSync(lockPath, 'not json at all');
-  // Fresh corruption is still respected...
-  assert.strictEqual(lifecycle.acquireMutationLock(dir).ok, false);
-  // ...but it must not deadlock every future mutation forever, since no pid
-  // can be read from it.
-  const taken = lifecycle.acquireMutationLock(dir, { now: () => Date.now() + lifecycle.LOCK_STALE_MS + 1000 });
-  assert.strictEqual(taken.ok, true);
-  taken.release();
+  const liveGarbage = plantTicket(dir, { pid: process.pid, hex: 'e'.repeat(32), raw: 'not json at all' });
+  const refused = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(refused.ok, false, 'a live contender mid-write was overruled');
+  assert.strictEqual(refused.error, 'held');
+  fs.unlinkSync(liveGarbage);
+
+  const pid = absentPid();
+  assert.ok(pid, 'could not find an absent pid to test with');
+  const deadGarbage = plantTicket(dir, { pid, hex: 'f'.repeat(32), raw: '{ truncated' });
+  const taken = lifecycle.acquireMutationLock(dir);
+  assert.strictEqual(taken.ok, true, 'a corrupt ticket from a dead contender deadlocked the lock');
+  assert.strictEqual(fs.existsSync(deadGarbage), false);
+  assert.strictEqual(taken.release(), true);
 });
 
-test('the lock is created under the data dir, creating it when absent', () => {
+test('the lock directory is created under the data dir, creating it when absent', () => {
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-mk-')), 'nested');
   const l = lifecycle.acquireMutationLock(dir);
   assert.strictEqual(l.ok, true);
-  assert.strictEqual(fs.existsSync(path.join(dir, lifecycle.LOCK_FILE)), true);
-  l.release();
+  assert.strictEqual(fs.existsSync(path.join(dir, lifecycle.LOCK_DIR)), true);
+  assert.strictEqual(path.dirname(l.path), path.join(dir, lifecycle.LOCK_DIR));
+  assert.strictEqual(l.release(), true);
 });
 
 section('D1 — no discovery-time inference path exists (closed by decision)');

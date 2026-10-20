@@ -1287,6 +1287,11 @@ function lifecycleIo(cfg) {
       get: (id) => vault.get(id),
       set: (id, secret) => vault.set(id, secret),
       remove: (id) => vault.remove(id),
+      // Strict three-way presence. The lifecycle needs it to tell an absent
+      // secret from one it merely could not read: `get`/`remove` report both
+      // the same way, so without this a failed delete would be announced as a
+      // successful removal.
+      probe: (id) => vault.probe(id),
     },
     readCache,
     writeCache,

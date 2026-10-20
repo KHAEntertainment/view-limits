@@ -6,7 +6,7 @@
 // adapter contract.
 
 const assert = require('assert');
-const { RECIPES, getRecipe, knownRecipes } = require('../lib/recipes');
+const { RECIPES, getRecipe, knownRecipes, routeNeedsVaultCredential } = require('../lib/recipes');
 
 // Async-aware runner: collects tests then awaits each Promise-returning fn
 // so a rejected async assert becomes a counted failure (not an unhandled
@@ -30,10 +30,10 @@ function test(name, fn) { tests.push({ name, fn }); }
 
 console.log('registry shape + immutability');
 
-// #55 registers openai-compat + anthropic-compat (was: only `built-in`).
-test('registry holds exactly built-in + the two #55 compat recipes', () => {
-  assert.deepStrictEqual([...knownRecipes()].sort(), ['anthropic-compat', 'built-in', 'openai-compat']);
-});
+// #55 registers openai-compat + anthropic-compat; #56 registers
+// alibaba-coding-plan (was: only `built-in`). The registry must be safe to
+// enumerate, immutable, and the built-in pass-through must mirror the existing
+// wire-family adapter contract.
 
 test('compat recipes declare family, options and inference:false', () => {
   for (const id of ['openai-compat', 'anthropic-compat']) {
@@ -44,6 +44,43 @@ test('compat recipes declare family, options and inference:false', () => {
     assert.ok(r.options && r.options.path && r.options.path.required, `${id} path required`);
     assert.strictEqual(typeof r.fetch, 'function');
   }
+});
+
+test('alibaba-coding-plan declares a null family so the family check is skipped', () => {
+  const r = getRecipe('alibaba-coding-plan');
+  assert.strictEqual(r.family, null, 'no wire family: the CLI owns its own auth');
+  assert.strictEqual(r.capabilities.signal, 'quota');
+  assert.strictEqual(r.capabilities.credential, 'cli-managed-auth');
+  assert.strictEqual(r.capabilities.inference, false);
+  assert.ok(r.options && r.options.site && r.options.binary && r.options.timeoutMs, 'declares its options');
+  assert.strictEqual(typeof r.fetch, 'function');
+});
+
+test('every recipe declares whether it needs a vault credential', () => {
+  for (const id of knownRecipes()) {
+    assert.strictEqual(
+      typeof getRecipe(id).capabilities.vaultCredential, 'boolean',
+      `${id} must declare vaultCredential`,
+    );
+  }
+  // Only the CLI-managed-auth recipe opts out; every other recipe keeps the
+  // pre-#56 behaviour of requiring a credential under route.id.
+  assert.strictEqual(getRecipe('alibaba-coding-plan').capabilities.vaultCredential, false);
+  for (const id of ['built-in', 'openai-compat', 'anthropic-compat']) {
+    assert.strictEqual(getRecipe(id).capabilities.vaultCredential, true, id);
+  }
+});
+
+test('routeNeedsVaultCredential is capability-driven, not id-driven', () => {
+  assert.strictEqual(routeNeedsVaultCredential({ monitor: { recipe: 'alibaba-coding-plan' } }), false);
+  // Anything that is not an explicitly-flagged registered recipe still needs a
+  // credential — including a future id nobody has implemented yet.
+  for (const recipe of ['openai-compat', 'anthropic-compat', 'built-in', 'stepfun-pending', undefined]) {
+    assert.strictEqual(routeNeedsVaultCredential({ monitor: { recipe } }), true, String(recipe));
+  }
+  assert.strictEqual(routeNeedsVaultCredential({}), true, 'no monitor');
+  assert.strictEqual(routeNeedsVaultCredential(null), true, 'not a route');
+  assert.strictEqual(routeNeedsVaultCredential({ monitor: 'nope' }), true, 'monitor is not an object');
 });
 
 test('getRecipe ignores prototype keys', () => {

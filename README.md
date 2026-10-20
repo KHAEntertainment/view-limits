@@ -115,6 +115,76 @@ unmonitored. Guided add/probe/remove (including any opt-in discovery request)
 comes with the setup lifecycle in Issue #58. These adapters are verified with
 documented-format fixtures only, not against a live provider account.
 
+## Alibaba Cloud Coding Plan (Bailian CLI)
+
+The Coding Plan caps **model calls** — up to 6,000 per rolling 5 hours, 45,000
+per week and 90,000 per month, all three applying simultaneously — and
+Alibaba documents no quota HTTP endpoint for it. The supported machine-readable
+source is the official Bailian CLI, so this recipe runs one bounded,
+read-only subprocess instead of a request:
+
+```json
+{
+  "id": "bailian-coding-plan",
+  "provider": "alibaba-cloud",
+  "match": { "model": "qwen" },
+  "monitor": {
+    "recipe": "alibaba-coding-plan",
+    "region": "cn-beijing",
+    "recipeOptions": { "site": "domestic" }
+  }
+}
+```
+
+| | |
+|---|---|
+| Command | `bl usage coding-plan --output json` (needs `bl` on PATH, `bl 1.15.0`+) |
+| Also run | `bl auth status --output json` — read-only preflight, tokens masked |
+| Windows | `rolling-5h` / `weekly` / `monthly` requests, tagged `signal: "quota"` |
+| `balance` | always `null` — this is a call quota, not credit |
+
+`recipeOptions`:
+
+- `site`: `domestic` (default) or `international` — the documented commodity.
+- `binary`: `bl` (default) or `bailian`. An enum on purpose: a free-form path
+  in `config.json` would turn a persisted recipe into "run this executable".
+- `timeoutMs`: 1000–30000 (default 10000). Changing it does not invalidate
+  cached status. Changing `site` does.
+
+What the result means:
+
+- `region` is **required** and is a declaration, not an observation. The CLI's
+  JSON payload echoes no region, so `detail.regionVerified` is always `false`;
+  a region of an undocumented shape is refused as `unsupported-region`.
+- A window appears only when the CLI reported **both** `usedQuota` and a
+  positive `totalQuota`. Missing fields are dropped, not guessed, and the
+  CLI's derived `percentage` is never read.
+- `exhausted` needs `remaining` 0 **and** a valid future reset. The 5-hour
+  quota rolls off minute by minute, so a missing reset means "recovery time
+  unknown" — which stays `unknown` (`exhaustion-without-recovery`), never
+  `exhausted`.
+
+**Auth is the CLI's own.** `bl usage coding-plan` authenticates with the
+console credential, which the CLI resolves only from its own config file — view
+-limits neither injects nor stores a secret for this route, and never reads
+that file. Authenticate once yourself:
+
+```sh
+bl auth login --console
+```
+
+Refresh runs no login, no profile switch and no inference: it never invokes
+`bl auth login|logout` or `bl config use|set`, and never passes
+`--console-switch-agent`. Profile selection uses the global `--config`, which
+applies to one invocation only. The child process is spawned with `shell:
+false` and an environment allowlist, so no vault or harness secret crosses
+over, and its stdout/stderr never reach a status.
+
+**Implemented — not live-tested (awaiting owner account).** The fixtures are
+built from the published CLI JSON contract and the documented Coding Plan
+policy. No live Alibaba account was used, and no authenticated read was
+performed.
+
 ## Experimental: Xiaomi Token Plan (Chrome cookie fallback)
 
 > **Experimental — not released; K1 and R1 live-accepted, C1 pending.** This
@@ -356,6 +426,8 @@ node test/phase1-boundary.test.js # cross-surface parity: one CLI, one view mode
 node test/compat-adapters.test.js # openai-/anthropic-compat recipes: auth, parsing, truthfulness (Issue #55)
 node test/bounded-http.test.js    # bounded transport: https, redirects, timeouts, body cap (Issue #55)
 node test/compat-cli.test.js      # custom routes through the real refresh/check CLI (Issue #55)
+node test/alibaba-coding-plan.test.js # Bailian CLI recipe: parsing, truthfulness, argv allowlist (Issue #56)
+node test/alibaba-cli.test.js      # Alibaba route through the real refresh/check CLI (Issue #56)
 ```
 
 ## Version

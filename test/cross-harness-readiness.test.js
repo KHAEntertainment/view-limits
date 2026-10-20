@@ -24,6 +24,7 @@ const os = require('os');
 const { spawnSync } = require('child_process');
 
 const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
+const { BUILT_IN_ROUTES } = require('../lib/config');
 
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const VL = path.join(PLUGIN_ROOT, 'bin', 'vl.js');
@@ -222,8 +223,19 @@ function seedSidecar(dir) {
 }
 
 function seedAll(dir) {
+  seedConfig(dir);
   seedStatus(dir);
   seedSidecar(dir);
+}
+
+// Configure the shipped routes. They are no longer present by default —
+// config.json is assembled by setup — so a readiness test about a CONFIGURED
+// route's identity has to configure it. This also keeps the zero-write
+// assertions honest: config.json exists before the command runs, so the
+// one-time route migration cannot fire during a cache-only read (and it is
+// excluded from those commands anyway).
+function seedConfig(dir) {
+  writeJson(dir, 'config.json', { routes: BUILT_IN_ROUTES });
 }
 
 // ---- fake Traycer CLI runner --------------------------------------------------

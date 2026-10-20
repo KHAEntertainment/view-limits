@@ -30,7 +30,8 @@ const os = require('os');
 const readline = require('readline');
 const { spawn } = require('child_process');
 
-const { loadConfig, dataDir, expandHome, deepMerge, configPath, saveConfig } = require('../lib/config');
+const { loadConfig, dataDir, expandHome, deepMerge, configPath, saveConfig,
+  BUILT_IN_ROUTES, builtInRoute, migrateRoutesFromVault } = require('../lib/config');
 const {
   readCache, writeCache, isFresh, recoveryBoundedFreshUntil,
   tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
@@ -549,10 +550,63 @@ function preflightVault() {
 function storeCredential(id, secret) {
   try {
     vault.set(id, secret);
-    return true;
   } catch {
     return false;
   }
+  // config.json is ASSEMBLED by setup: storing a shipped route's credential is
+  // what puts its row in the document. Doing it here covers every path that
+  // can store one — `setup <id> --key`, the loopback form, the headless
+  // prompt and the native-config import — so "has a credential" and
+  // "configured" cannot drift apart.
+  materializeBuiltInRoute(id);
+  return true;
+}
+
+// Add a shipped route's row to config.json if it is not already there. Custom
+// routes are not handled here: the lifecycle writes those under its own lock.
+function materializeBuiltInRoute(id) {
+  const catalog = builtInRoute(id);
+  if (!catalog) return;
+  // Same lock the lifecycle uses: this is a read-modify-write of config.json,
+  // so a concurrent `provider add` would otherwise lose one of the two edits.
+  const lock = lifecycle.acquireMutationLock(dataDir());
+  if (!lock.ok) {
+    log(`credential stored, but another provider mutation holds the lock — rerun to add the "${id}" route.`);
+    return;
+  }
+  try {
+    // A config we cannot parse is never rewritten, exactly as the lifecycle
+    // refuses it: the credential is stored and the row waits for a readable
+    // document rather than clobbering a hand-edit.
+    const read = readUserConfigStrict();
+    if (!read.ok) {
+      log(`credential stored, but config.json could not be read (${read.reason}) — fix it and rerun to add the "${id}" route.`);
+      return;
+    }
+    const doc = read.doc && typeof read.doc === 'object' ? read.doc : {};
+    const routes = Array.isArray(doc.routes) ? doc.routes : [];
+    if (routes.some((r) => r && r.id === id)) return;
+    doc.routes = [...routes, catalog];
+    saveConfig(doc);
+  } catch (e) {
+    log(`credential stored, but the "${id}" route could not be added to config.json — verify write access and rerun.`);
+  } finally {
+    lock.release();
+  }
+}
+
+// Routes setup may be asked about: everything configured, plus every shipped
+// built-in that has not been added yet. A fresh install has no rows, so
+// without the catalog here setup could not offer the five built-ins at all —
+// and a configured built-in is offered in its CONFIGURED form, not the
+// catalog copy, so a user's edits to it are never shadowed.
+function offerableRoutes(cfg) {
+  const byId = new Map();
+  for (const r of (Array.isArray(cfg.routes) ? cfg.routes : [])) {
+    if (r && r.id) byId.set(r.id, r);
+  }
+  for (const r of BUILT_IN_ROUTES) if (!byId.has(r.id)) byId.set(r.id, builtInRoute(r.id));
+  return [...byId.values()];
 }
 
 function logWriteResults(saved, failed) {
@@ -813,7 +867,7 @@ async function openForm(ids) {
   }
 }
 
-function parseCredentialArgs(cfg, args) {
+function parseCredentialArgs(cfg, args, opts = {}) {
   const parsed = { routeId: null, headless: false, key: null, profile: null, chromeSource: null };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -845,9 +899,16 @@ function parseCredentialArgs(cfg, args) {
     parsed.routeId = arg;
   }
   // xiaomi-token-plan is a known route even before setup appends it (opt-in).
-  const known = parsed.routeId === XIAOMI_ROUTE_ID || cfg.routes.some((route) => route.id === parsed.routeId);
+  // A shipped built-in is likewise known to SETUP before its row exists —
+  // setup is what creates the row, so refusing the id would make the five
+  // built-ins unsettable on a fresh install. `update` is the opposite case:
+  // it rotates a credential that already exists, so a built-in nobody has set
+  // up is genuinely unknown there and the honest list is the configured one.
+  const offerable = opts.offerBuiltIns === true ? offerableRoutes(cfg) : (Array.isArray(cfg.routes) ? cfg.routes : []);
+  const known = parsed.routeId === XIAOMI_ROUTE_ID
+    || offerable.some((route) => route.id === parsed.routeId);
   if (parsed.routeId && !known) {
-    err(`unknown route "${parsed.routeId}" (known: ${cfg.routes.map((route) => route.id).join(', ')})`);
+    err(`unknown route "${parsed.routeId}" (known: ${offerable.map((route) => route.id).join(', ')})`);
   }
   if (parsed.key !== null && !parsed.routeId) err('--key requires a route id.');
   if (parsed.key !== null && parsed.headless) err('--key and --headless cannot be used together.');
@@ -1142,7 +1203,7 @@ function removeXiaomi(cfg, routeId) {
 
 function setup(args) {
   const cfg = loadConfig();
-  const options = parseCredentialArgs(cfg, args);
+  const options = parseCredentialArgs(cfg, args, { offerBuiltIns: true });
 
   // Xiaomi: config + helper build, never the vault or a paste form.
   if (options.routeId === XIAOMI_ROUTE_ID) return setupXiaomi(cfg, options);
@@ -1160,7 +1221,7 @@ function setup(args) {
   const missing = [];
   const imported = [];
   const failed = [];
-  for (const route of cfg.routes) {
+  for (const route of offerableRoutes(cfg)) {
     if (isXiaomi(route)) continue; // Chrome-cookie source: no vault credential
     const imp = cfg.importMap && cfg.importMap[route.id];
     const secret = imp ? readNativeSecret(imp) : null;
@@ -1698,6 +1759,38 @@ function sessionStart() {
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
 const hasFlag = (n) => args.includes(n);
+
+// Commands that may run the one-time route migration (see lib/config.js
+// migrateRoutesFromVault). The list is an ALLOWLIST, not an exclusion, because
+// the commands left out carry a contract the migration would break:
+//
+//   gate     — cache-only and side-effect-free by design, and the hot path.
+//   report / status / snapshot / recommend / config — cache-only reads. The
+//              cross-harness surfaces (#38/#39) assert zero filesystem writes
+//              under dataDir for these, and a migration write would violate
+//              that guarantee for a command whose whole promise is that it
+//              observes without touching anything.
+//   serve    — the credential form's loopback server; not a route-reading path.
+//
+// So a fresh install that has credentials but no config.json resolves no route
+// in `gate` (null -> fail-open, exit 0, which is the designed default) and
+// shows no rows in `report` until the first command below runs. `session-start`
+// is in the list and runs every session, so in practice that window is one
+// session at most. Stated in the PR body because it is a real, visible
+// consequence of keeping cache-only reads write-free.
+const MIGRATING_COMMANDS = new Set(['setup', 'update', 'provider', 'remove', 'refresh', 'check', 'session-start']);
+
+// It fires only when config.json is genuinely absent, and the document it
+// writes is what makes it stop firing. Notices go to stderr so a `--json`
+// command's stdout stays machine-readable.
+if (MIGRATING_COMMANDS.has(cmd)) {
+  const migration = migrateRoutesFromVault({ hasCredential: (id) => vault.probe(id) === 'present' });
+  if (migration.migrated && migration.ids.length) {
+    process.stderr.write(`view-limits: migrated existing credentials into routes: ${migration.ids.join(', ')}\n`);
+  } else if (migration.reason === 'write-failed') {
+    process.stderr.write('view-limits: could not write the migrated route list — rerun once the data dir is writable.\n');
+  }
+}
 
 (async () => {
   switch (cmd) {

@@ -1,0 +1,4 @@
+{
+  "gate": { "enabled": true, "mode": "escalate" },
+  "output": { "enabled": true }
+}

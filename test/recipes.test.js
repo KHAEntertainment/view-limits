@@ -30,8 +30,25 @@ function test(name, fn) { tests.push({ name, fn }); }
 
 console.log('registry shape + immutability');
 
-test('only `built-in` is registered today', () => {
-  assert.deepStrictEqual([...knownRecipes()], ['built-in']);
+// #55 registers openai-compat + anthropic-compat (was: only `built-in`).
+test('registry holds exactly built-in + the two #55 compat recipes', () => {
+  assert.deepStrictEqual([...knownRecipes()].sort(), ['anthropic-compat', 'built-in', 'openai-compat']);
+});
+
+test('compat recipes declare family, options and inference:false', () => {
+  for (const id of ['openai-compat', 'anthropic-compat']) {
+    const r = getRecipe(id);
+    assert.strictEqual(r.family, id);
+    assert.strictEqual(r.capabilities.inference, false);
+    assert.strictEqual(r.capabilities.signal, 'throughput');
+    assert.ok(r.options && r.options.path && r.options.path.required, `${id} path required`);
+    assert.strictEqual(typeof r.fetch, 'function');
+  }
+});
+
+test('getRecipe ignores prototype keys', () => {
+  assert.strictEqual(getRecipe('toString'), null);
+  assert.strictEqual(getRecipe('__proto__'), null);
 });
 
 test('RECIPES is frozen (no late additions)', () => {

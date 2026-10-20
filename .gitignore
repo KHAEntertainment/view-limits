@@ -11,7 +11,7 @@ node_modules/
 /.agent/
 
 # gh-init orchestration environment — local repo/board/milestone cache (env.json).
-# Scoped to this one file, NOT the whole .pi/ directory: .pi/mcp.json is the
-# project-scoped Terminal MCP server config and must stay committable (#45).
+# Scoped to this one file, NOT the whole .pi/ directory, so other .pi/ config
+# stays committable.
 /.pi/github-workflows/env.json
 

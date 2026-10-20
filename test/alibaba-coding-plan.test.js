@@ -348,7 +348,7 @@ test('a hostile profile cannot inject a flag', async () => {
 test('a declared profile is passed with the per-invocation --config flag', async () => {
   const run = runner(quotaOk(healthy));
   const st = await alibaba.fetchStatus(Object.assign({}, CFG, { profile: 'token-plan' }), null, ctx(run));
-  const argv = run.calls[1].args;
+  const argv = run.calls.find((c) => c.args[0] === 'usage').args;
   assert.strictEqual(argv[argv.indexOf('--config') + 1], 'token-plan');
   assert.strictEqual(st.detail.profile, 'token-plan');
 });
@@ -360,6 +360,23 @@ test('with no declared profile the CLI active profile is reported, and no --conf
   const quotaCall = run.calls.find((c) => c.args[0] === 'usage');
   assert.ok(quotaCall, 'the quota command ran');
   assert.ok(!quotaCall.args.includes('--config'), `no --config when undeclared: ${quotaCall.args}`);
+});
+
+test('the auth preflight is scoped to the declared profile, not the active one', async () => {
+  // The declared profile has a console login; the ACTIVE profile does not. A
+  // preflight that ignored the declaration would return auth-required with a
+  // misleading "log in again" hint and never run the quota read.
+  const authPayload = (bin, args) => (args.includes('--config')
+    ? ok(JSON.stringify({ authenticated: true, config: 'token-plan', console: { source: 'config', masked: 'c***n' } }))
+    : ok(JSON.stringify({ authenticated: false, config: 'default' })));
+  const run = runner((bin, args) => (args[0] === 'auth' ? authPayload(bin, args) : ok(JSON.stringify(healthy))));
+  const st = await alibaba.fetchStatus(Object.assign({}, CFG, { profile: 'token-plan' }), null, ctx(run));
+  assert.notStrictEqual(st.detail.reason, 'auth-required', 'a declared authenticated profile must not be refused');
+  assert.strictEqual(st.state, 'healthy');
+  const preflight = run.calls[0];
+  assert.ok(preflight.args.includes('--config'), 'the preflight must carry the declared profile');
+  assert.strictEqual(preflight.args[preflight.args.indexOf('--config') + 1], 'token-plan');
+  assert.strictEqual(st.detail.profile, 'token-plan');
 });
 
 test('recipeOptions.site selects the documented commodity', async () => {

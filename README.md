@@ -165,9 +165,9 @@ What the result means:
   `exhausted`.
 
 **Auth is the CLI's own.** `bl usage coding-plan` authenticates with the
-console credential, which the CLI resolves only from its own config file — view
--limits neither injects nor stores a secret for this route, and never reads
-that file. Authenticate once yourself:
+console credential, which the CLI resolves only from its own config file —
+view-limits neither injects nor stores a secret for this route, and never
+reads that file. Authenticate once yourself:
 
 ```sh
 bl auth login --console

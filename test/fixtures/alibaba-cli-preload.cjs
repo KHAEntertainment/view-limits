@@ -7,7 +7,7 @@
 //   VL_VAULT_IDS     comma-separated route ids that "have" a vault credential
 //   VL_BAILIAN_QUOTA  verbatim stdout for the `usage coding-plan` call
 //   VL_BAILIAN_MODE   ok | missing | exit3 | malformed | nonobject | empty
-//                    | huge | authno | trailing | hang
+//                    | huge | authno | trailing | hang | profiletok
 const fs = require('fs');
 const path = require('path');
 const Module = require('module');
@@ -79,7 +79,15 @@ function fakeSpawn(bin, args, opts) {
   let stdout = '';
   let code = 0;
   if (isAuth) {
-    stdout = MODE === 'authno' ? JSON.stringify({ authenticated: false, config: 'default' }) : AUTH_OK;
+    // 'profiletok': the ACTIVE profile has no console login, but the
+    // `--config token-plan` profile does. A preflight that ignored the
+    // declared profile would refuse a route that is in fact authenticated.
+    if (MODE === 'profiletok') {
+      const scoped = args.includes('--config');
+      stdout = scoped ? AUTH_OK : JSON.stringify({ authenticated: false, config: 'default' });
+    } else {
+      stdout = MODE === 'authno' ? JSON.stringify({ authenticated: false, config: 'default' }) : AUTH_OK;
+    }
     if (MODE === 'exit3') code = 3;
   } else {
     if (QUOTA_OVERRIDE) stdout = QUOTA_OVERRIDE;

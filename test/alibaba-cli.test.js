@@ -29,7 +29,7 @@ const eventsPath = path.join(dir, 'events');
 
 const routes = [
   { id: 'bailian-coding-plan', provider: 'alibaba-cloud', match: { model: 'qwen' }, ttlSeconds: 600,
-    monitor: { recipe: 'alibaba-coding-plan', region: 'cn-beijing' } },
+    monitor: { recipe: 'alibaba-coding-plan', region: 'cn-beijing', profile: 'token-plan' } },
   { id: 'custom-an', provider: 'anthropic-compat', match: { model: 'an-model' }, ttlSeconds: 600,
     monitor: { endpoint: 'https://an.example.com/api', recipe: 'anthropic-compat', recipeOptions: { path: '/v1/models', scope: 'account' } } },
   { id: 'custom-nokey', provider: 'openai-compat', match: { model: 'nokey' }, ttlSeconds: 600,
@@ -43,7 +43,9 @@ function run(args, extraEnv = {}) {
     // A secret in OUR environment: the bounded runner must not forward it.
     OPENAI_API_KEY: 'sk-CANARY-parent-env',
     ANTHROPIC_API_KEY: 'CANARY-parent-anthropic',
-    NODE_OPTIONS: `--require=${preload}`,
+    // Quoted: NODE_OPTIONS is whitespace-split, so a path containing a space
+    // would otherwise be parsed as two arguments.
+    NODE_OPTIONS: `--require="${preload}"`,
     VL_VAULT_IDS: 'custom-an',
     ...extraEnv,
   };
@@ -181,7 +183,7 @@ test('a wedged `bl` is ended by the recipe deadline, not left to hang', () => {
   const r = spawnSync(process.execPath, [cli, 'check', 'hang'], {
     env: {
       PATH: process.env.PATH, HOME: d2, CLAUDE_PLUGIN_DATA: d2,
-      NODE_OPTIONS: `--require=${preload}`, VL_BAILIAN_MODE: 'hang',
+      NODE_OPTIONS: `--require="${preload}"`, VL_BAILIAN_MODE: 'hang',
     },
     encoding: 'utf8', timeout: 20000,
   });
@@ -191,6 +193,18 @@ test('a wedged `bl` is ended by the recipe deadline, not left to hang', () => {
   assert.strictEqual(st.state, 'unknown');
   assert.strictEqual(st.detail.reason, 'cli-timeout');
   assert.ok(elapsed < 15000, `the deadline must fire promptly, took ${elapsed}ms`);
+});
+
+test('a declared authenticated profile is not refused because the active one is not', () => {
+  // Stub answers `auth status` unauthenticated without --config, authenticated
+  // with it. The route must still reach the quota read.
+  resetEvents();
+  const r = run(['check', 'bailian-coding-plan'], { VL_BAILIAN_MODE: 'profiletok' });
+  assert.strictEqual(r.status, 0, `check exited ${r.status}: ${r.stderr}`);
+  const st = JSON.parse(r.stdout);
+  assert.notStrictEqual(st.detail.reason, 'auth-required');
+  const heads = spawns().map((s) => s.args[0]);
+  assert.deepStrictEqual([...new Set(heads)].sort(), ['auth', 'usage'], 'both commands ran');
 });
 
 console.log('report — a vaultless route is not reported as unconfigured');

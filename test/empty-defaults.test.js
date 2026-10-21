@@ -38,6 +38,7 @@ config.DEFAULTS.vault.backend = 'file';
 const { DEFAULTS, BUILT_IN_ROUTES, builtInRoute, loadConfig, saveConfig, configPath } = config;
 const vault = require('../lib/vault');
 const lifecycle = require('../lib/provider-lifecycle');
+const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
 
 const cli = path.resolve(__dirname, '../bin/vl.js');
 const preload = path.join(__dirname, 'fixtures/migration-preload.cjs');
@@ -406,6 +407,107 @@ test('pin 5: no hard links means fail closed — no fallback to rename-over', ()
   assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before, 'the previous document was not restored');
   assert.strictEqual(fs.existsSync(PREV(dir)), false);
   assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.includes('.tmp.')), [], 'a temp file was left behind');
+});
+
+// Readers (PR #82 round 4). A reader takes no lock, and the publisher is
+// usually ANOTHER process, so synchronous I/O in the reader does not exclude
+// it: a whole publish can complete between two of the reader's reads. These
+// run that schedule deterministically — each time the reader misses
+// config.json or .prev, the next scheduled writer step runs before the
+// reader's next read. A step is the real saveConfig under the real lock, or
+// saveConfig's real first step (the move-aside).
+async function onReaderMiss(steps, fn) {
+  const realRead = fs.readFileSync;
+  const misses = [];
+  fs.readFileSync = function readAtBoundary(file, ...rest) {
+    try {
+      return realRead.call(this, file, ...rest);
+    } catch (e) {
+      const name = path.basename(String(file));
+      if (e && e.code === 'ENOENT' && (name === 'config.json' || name === 'config.json.prev')) {
+        misses.push(name);
+        const step = steps.shift();
+        if (step) step();
+      }
+      throw e;
+    }
+  };
+  try {
+    return { value: await fn(), misses };
+  } finally {
+    fs.readFileSync = realRead;
+  }
+}
+const customDoc = (id) => ({
+  routes: [{ id, provider: 'stepplan', monitor: { recipe: 'stepfun-plan' }, retention: 'keep-unmonitored' }],
+  vault: { backend: 'file' }, gate: { mode: 'off' },
+});
+const OLD_DOC = customDoc('custom-old');
+const NEW_DOC = customDoc('custom-new');
+
+test('pin 6: a publish completing between the reader\'s two reads is read, never "no config" (round 4 F1)', async () => {
+  const dir = scratch();
+  // The writer has moved config.json aside; its link and .prev unlink are next.
+  fs.writeFileSync(PREV(dir), JSON.stringify(OLD_DOC));
+  // The shipped darwin default — what a fall-through to DEFAULTS would select.
+  const forced = DEFAULTS.vault.backend;
+  DEFAULTS.vault.backend = 'keychain';
+  try {
+    const { value, misses } = await onReaderMiss([() => underLock(dir, () => saveConfig(NEW_DOC))],
+      () => inDataDir(dir, () => loadConfig()));
+    assert.deepStrictEqual(misses, ['config.json', 'config.json.prev'],
+      'premise: the reader missed config.json, the publish completed, then the reader missed .prev');
+    assert.strictEqual(value.vault.backend, 'file',
+      'a completed publish read as "no config": the vault backend fell back to the default');
+    assert.deepStrictEqual(value.routes.map((r) => r.id), ['custom-new']);
+  } finally {
+    DEFAULTS.vault.backend = forced;
+  }
+});
+
+test('pin 6: back-to-back publishes between reads — the reader keeps reading until it holds a document', async () => {
+  // One extra read of config.json is not enough: a second publish can move it
+  // aside again before that read, and then the document is .prev once more.
+  const dir = scratch();
+  fs.writeFileSync(PREV(dir), JSON.stringify(OLD_DOC));
+  const { value, misses } = await onReaderMiss([
+    () => underLock(dir, () => saveConfig(NEW_DOC)),
+    () => fs.renameSync(path.join(dir, 'config.json'), PREV(dir)),
+  ], () => inDataDir(dir, () => loadConfig()));
+  assert.deepStrictEqual(misses, ['config.json', 'config.json.prev', 'config.json'],
+    'premise: publish 1 completed between the first two reads, publish 2 moved config.json aside before the third');
+  assert.deepStrictEqual(value.routes.map((r) => r.id), ['custom-new'], 'the reader gave up while a document existed');
+});
+
+test('pin 6: with no document the reader stops after a bounded number of reads, without a delay', async () => {
+  const dir = scratch();
+  const { value, misses } = await onReaderMiss([], () => {
+    try { config.readConfigTextIn(dir); return null; } catch (e) { return e.code; }
+  });
+  assert.strictEqual(value, 'ENOENT', 'absence must surface as ENOENT, which every caller treats as "no config"');
+  assert.deepStrictEqual(misses, ['config.json', 'config.json.prev', 'config.json', 'config.json.prev', 'config.json', 'config.json.prev']);
+  assert.deepStrictEqual(fs.readdirSync(dir), [], 'a read wrote to the data dir');
+});
+
+test('pin 7: the runtime snapshot reads the same logical document as loadConfig (round 4 F2)', async () => {
+  const dir = scratch();
+  // A lone .prev: a publish in flight, or one interrupted between its steps.
+  fs.writeFileSync(PREV(dir), JSON.stringify(OLD_DOC));
+  const before = fs.readdirSync(dir).sort();
+  const s = await getRuntimeSnapshot({ refresh: false, dataDir: dir });
+  assert.deepStrictEqual(s.routes.map((r) => r.id), ['custom-old'], 'the snapshot read a lone .prev as "no config"');
+  assert.ok(!s.diagnostics.some((d) => d.code === 'config-corrupt'), JSON.stringify(s.diagnostics));
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), before, 'the snapshot wrote to the data dir');
+  // And mid-publish: the publish completes between the snapshot's two reads.
+  const { value, misses } = await onReaderMiss([() => underLock(dir, () => saveConfig(NEW_DOC))],
+    () => getRuntimeSnapshot({ refresh: false, dataDir: dir }));
+  assert.deepStrictEqual(misses, ['config.json', 'config.json.prev'], 'premise: the publish completed between the reads');
+  assert.deepStrictEqual(value.routes.map((r) => r.id), ['custom-new']);
+  // Corruption is still reported when the document being read is .prev.
+  const bad = scratch();
+  fs.writeFileSync(PREV(bad), '{not json');
+  const c = await getRuntimeSnapshot({ refresh: false, dataDir: bad });
+  assert.ok(c.diagnostics.some((d) => d.code === 'config-corrupt'), 'a corrupt .prev was not reported as corrupt');
 });
 
 test('the lifecycle publish path, called directly with the migration pending, is refused', async () => {

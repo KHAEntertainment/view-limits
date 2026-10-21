@@ -12,7 +12,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawnSync, spawn } = require('child_process');
-const { BUILT_IN_ROUTES } = require('../lib/config');
 
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const VL = path.join(PLUGIN_ROOT, 'bin', 'vl.js');
@@ -37,13 +36,7 @@ function test(name, fn) {
 function scratch() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-cli-'));
   fs.mkdirSync(path.join(dir, 'secrets'), { recursive: true });
-  // The shipped routes are CONFIGURED here on purpose. They are no longer
-  // present by default (config.json is assembled by setup), so a gate test
-  // about resolving `kimi-code-plan` or `openrouter-main` has to configure
-  // them — the guarantee is that a shipped built-in resolves identically when
-  // present, not that the plugin defaults it into existence. Tests that need a
-  // different route list overwrite config.json themselves.
-  writeJson(dir, 'config.json', { gate: { mode: 'deny', injectContext: true }, routes: BUILT_IN_ROUTES });
+  writeJson(dir, 'config.json', { gate: { mode: 'deny', injectContext: true } });
   return dir;
 }
 

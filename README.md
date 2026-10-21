@@ -44,13 +44,6 @@ distributed lock. The legacy timestamp-only `refresh.lock` is no longer used.
 
 ## Providers
 
-These are the routes view-limits **offers**. A fresh install has **no provider
-rows at all** — `config.json` is assembled by setup and pruned by remove, so a
-route exists because you added it, never because the plugin assumed it. Until
-then `vl.js provider list` shows nothing and the gate resolves no route (which
-is an allow: it fails open). See
-[How config.json is assembled](#how-configjson-is-assembled).
-
 | Route | Provider | Signal |
 |---|---|---|
 | `minimax-token-plan` | MiniMax Token Plan | rolling-5h + weekly quota |
@@ -507,43 +500,6 @@ view-limits does not generate master keys.
 
 Non-secret config lives in `~/.claude/plugins/data/*/config.json` (endpoints,
 routes, TTLs, thresholds). `node bin/vl.js config` shows it (secrets masked).
-
-### How config.json is assembled
-
-There are no default provider rows. The five built-ins in the table above are a
-catalog of what setup can add:
-
-- **Setup assembles.** Storing a credential for a built-in writes its row —
-  `vl.js setup kimi-code-plan --key …`, the browser form, the headless prompt
-  and the native-config import all do it, so "has a credential" and
-  "configured" cannot drift apart. `vl.js provider add` does the same for a
-  custom route.
-- **Remove prunes.** `vl.js provider remove <id>` deletes the row for a route
-  the lifecycle owns — a custom route, meaning a non-built-in recipe and a
-  non-shipped id. A **shipped** built-in keeps its configured row and loses only
-  its credential and cached status, because `config.json` merges route arrays by
-  replacement and a shipped id must stay re-addable by setup.
-- **Upgrades migrate once.** Before this, the five built-ins were present in
-  every config whether or not you had credentials for them. So an install with
-  **no `config.json` at all** plus credentials in the vault is an upgrade, not a
-  fresh install: on the first command that assembles or refreshes state
-  (`setup`, `update`, `provider`, `remove`, `refresh`, `check`,
-  `session-start`), rows are materialized for exactly those providers whose
-  credentials are stored. Providers without one get no row. The written document
-  is what stops it running again.
-
-  The trigger is deliberately narrow — `config.json` must be genuinely absent. A
-  config that exists and holds `routes: []` is a choice, and is never
-  resurrected from an old vault. An unparseable config is also present, so it is
-  refused and left exactly as it is rather than overwritten. The write goes
-  through the atomic publish, so either the migrated document lands or nothing
-  does.
-
-  `gate`, `report`, `status`, `snapshot` and `recommend` deliberately do **not**
-  migrate: they are cache-only reads that write nothing under the data dir. On a
-  freshly upgraded install they therefore show no rows until one of the commands
-  above runs — in practice at most one session, since `session-start` is in that
-  list.
 
 ## Hooks
 

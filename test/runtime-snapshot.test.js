@@ -11,7 +11,6 @@ const { spawnSync } = require('child_process');
 
 const { getRuntimeSnapshot, SNAPSHOT_SCHEMA_VERSION } = require('../lib/runtime-snapshot');
 const { parseStrictIsoTimestamp } = require('../lib/gate');
-const { BUILT_IN_ROUTES } = require('../lib/config');
 
 let failures = 0;
 const pendingTests = [];
@@ -39,15 +38,6 @@ function scratch() {
 
 function writeJson(dir, name, value) {
   fs.writeFileSync(path.join(dir, name), typeof value === 'string' ? value : JSON.stringify(value));
-}
-
-// Configure the shipped routes explicitly. They are no longer present by
-// default — config.json is assembled by setup — so a test about what the
-// snapshot reports for a CONFIGURED route has to configure it. The guarantee
-// being pinned is "a shipped built-in is reported identically when present",
-// which is what this writes, rather than "because the plugin defaulted it".
-function seedRoutes(dir, routes = BUILT_IN_ROUTES) {
-  writeJson(dir, 'config.json', { routes });
 }
 
 function snap(dir, opts = {}) {
@@ -472,7 +462,6 @@ console.log('\nruntime snapshot — routes resource state and freshness');
 
 test('fresh exhausted / stale exhausted / unknown freshness — state always verbatim', async () => {
   const dir = scratch();
-  seedRoutes(dir);
   writeJson(dir, 'status.json', {
     updatedAt: iso(0),
     routes: {
@@ -585,7 +574,6 @@ test('malformed status entry → status-entry-malformed, all resource facts unkn
 
 test('status.json corrupt → routes still listed, resources unknown, status-cache-corrupt', async () => {
   const dir = scratch();
-  seedRoutes(dir);
   writeJson(dir, 'status.json', '{corrupt');
   const s = await snap(dir);
   assert.ok(diagCodes(s).includes('status-cache-corrupt@routes'));
@@ -598,13 +586,7 @@ test('config.json corrupt → defaults in effect + config-corrupt diagnostic', a
   writeJson(dir, 'config.json', '{bad');
   const s = await snap(dir);
   assert.ok(diagCodes(s).includes('config-corrupt@routes'));
-  // "Defaults in effect" now means NO routes. The shipped built-ins are a
-  // catalog that setup assembles into config.json, not rows an unreadable
-  // config falls back to — inventing rows here would report monitoring for
-  // providers the user may never have set up. The contract under test is the
-  // diagnostic: a config we could not parse must be visible as corrupt rather
-  // than silently indistinguishable from absence.
-  assert.deepStrictEqual(s.routes, [], 'a corrupt config must fall back to the empty default, not invent rows');
+  assert.ok(s.routes.some((r) => r.id === 'kimi-code-plan'), 'defaults still applied');
 });
 
 test('unreadable status.json (non-ENOENT) → status-cache-corrupt, not silent absence', async () => {
@@ -629,7 +611,7 @@ test('unreadable config.json (non-ENOENT) → config-corrupt, defaults in effect
     const s = await snap(dir);
     assert.ok(diagCodes(s).includes('config-corrupt@routes'),
       'read failure must surface as corrupt, not absence');
-    assert.deepStrictEqual(s.routes, [], 'an unreadable config must fall back to the empty default, not invent rows');
+    assert.ok(s.routes.some((r) => r.id === 'kimi-code-plan'), 'defaults still applied');
   } finally {
     fs.chmodSync(path.join(dir, 'config.json'), 0o600);
   }

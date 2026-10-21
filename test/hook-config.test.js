@@ -58,12 +58,7 @@ function gate(tool = 'Agent') {
   return run(gateArgs, { input: JSON.stringify({ tool_name: tool, tool_input: { model: 'kimi-k2' } }) });
 }
 function settings(mode, injectContext) {
-  // The route is CONFIGURED here: shipped routes are no longer present by
-  // default (config.json is assembled by setup), and a gate test about denying
-  // on `kimi-code-plan` needs that route to exist. The hook contract under
-  // test is unchanged — only the fixture now states its premise instead of
-  // inheriting it from a default.
-  return { gate: { mode, injectContext }, routes: [route] };
+  return { gate: { mode, injectContext } };
 }
 
 (async () => {

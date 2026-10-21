@@ -11,6 +11,10 @@
 //   vl.js check <routeId>             live-check one route (JSON).
 //   vl.js setup [<routeId> [--key K]] audit + auto-import + loopback form / stdin.
 //   vl.js remove <routeId>            delete a credential.
+//   vl.js provider add|update|remove|list
+//                                     shared custom-provider lifecycle (#58):
+//                                     validate → read-only probe → persist, with
+//                                     stable headless statuses and exit codes.
 //   vl.js config                      show effective config (secrets masked).
 //   vl.js snapshot --json [--refresh] normalized runtime snapshot; --refresh
 //                                     adds bounded Traycer CLI live reads.
@@ -43,6 +47,12 @@ const { validateMonitor } = require('../lib/monitor-schema');
 // fetch, no secret either) is covered without another code change. Every
 // route whose recipe does not declare the flag behaves exactly as before.
 const { routeNeedsVaultCredential } = require('../lib/recipes');
+// Issue #58: one lifecycle service for custom-provider setup / probe / update /
+// removal. `bin/vl.js` stays the thin transport: it parses argv, injects the io
+// (config, vault, cache, lock, probe) and prints; every decision is the
+// service's.
+const lifecycle = require('../lib/provider-lifecycle');
+const { getOptionSpec } = require('../lib/recipes/option-specs');
 const { getRuntimeSnapshot, defaultReadStatus } = require('../lib/runtime-snapshot');
 const { recommend } = require('../lib/recommend');
 const { makeJevTransport } = require('../lib/jev-openrouter');
@@ -269,10 +279,20 @@ function isUnmonitored(route, cfg) {
 function unmonitoredBlock(cfg) {
   // Returns '' or newline-joined lines with NO leading/trailing newline —
   // callers own the separator (renderInventory has no trailing newline).
-  return cfg.routes
+  const lines = cfg.routes
     .filter((r) => !isXiaomi(r) && isCustomMonitored(r) && isUnmonitored(r, cfg))
-    .map((r) => `    ${r.id}: unmonitored — no documented quota source`)
-    .join('\n');
+    .map((r) => `    ${r.id}: unmonitored — no documented quota source`);
+  // #58: a route the user explicitly chose to keep after a probe found nothing
+  // to monitor. Its recipe may well be monitorable in principle, so it is NOT
+  // covered by the capability filter above — without this line it would render
+  // as an ordinary unknown row and the explicit choice would be invisible.
+  const kept = new Set(cfg.routes
+    .filter((r) => !isXiaomi(r) && r && r.retention === lifecycle.RETENTION.KEEP && !isUnmonitored(r, cfg))
+    .map((r) => r.id));
+  for (const id of kept) {
+    lines.push(`    ${id}: unmonitored — kept by explicit choice (no usable quota signal at setup)`);
+  }
+  return lines.join('\n');
 }
 
 function entryFor(route, status, source) {
@@ -362,7 +382,12 @@ async function refresh(quiet, fromSessionStart = false) {
 
     const cacheEntries = {};
     for (const route of configured) cacheEntries[route.id] = entryFor(route, statuses[route.id], route.provider);
-    const doc = writeCache(cacheEntries);
+    // Issue #58: pass the routes so each entry carries its `configRevision`.
+    // This is the production WRITER that #54 left unwired — without it the
+    // field is never published and `lib/gate.js`'s obsolete-config guard has
+    // nothing to read, so a cached exhaustion could outlive an edit to the
+    // route it describes.
+    const doc = writeCache(cacheEntries, { routes: configured });
     if (!quiet) {
       // Render the just-observed Xiaomi state; the cache keeps ttlSeconds 0
       // for the gate, display freshness marks this process's observation.
@@ -814,7 +839,7 @@ function parseCredentialArgs(cfg, args) {
       i += 1;
       continue;
     }
-    if (arg.startsWith('--')) err(`unknown option "${arg}".`);
+    if (arg.startsWith('--')) err(`unknown option "${redactFlagToken(arg)}".`);
     if (!arg.trim()) err('route id must not be empty.');
     if (parsed.routeId) err('only one route can be selected at a time.');
     parsed.routeId = arg;
@@ -870,6 +895,37 @@ function readUserConfig() {
   } catch {
     return {};
   }
+}
+
+// Like readUserConfig, but tells absent apart from broken (Issue #58).
+//
+// readUserConfig deliberately swallows everything and returns `{}` so a
+// malformed config can never crash a read path. That is wrong for a WRITE: a
+// lifecycle write replaces config.json wholesale, so starting from `{}`
+// because of one typo would silently discard every setting the user put
+// there. The lifecycle refuses in that case; see userConfigBlocked in
+// lib/provider-lifecycle.js.
+//
+//   { ok: true, doc }            absent (first run, doc = {}) or well-formed
+//   { ok: false, reason }        'malformed' | 'not-an-object' | 'unreadable'
+function readUserConfigStrict() {
+  let raw;
+  try {
+    raw = fs.readFileSync(configPath(), 'utf8');
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return { ok: true, doc: {} };
+    return { ok: false, reason: 'unreadable' };
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: 'malformed' };
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    return { ok: false, reason: 'not-an-object' };
+  }
+  return { ok: true, doc };
 }
 
 // Append/refresh the opt-in route + pinned provider settings + explicit
@@ -1174,7 +1230,309 @@ function remove(routeId) {
     removeXiaomi(cfg, routeId);
     return;
   }
-  log(vault.remove(routeId) ? `removed credential for "${routeId}"` : `no credential for "${routeId}"`);
+  // Issue #58: one removal service for every non-Xiaomi route. It clears the
+  // vault key, the cached observation, and — for a CUSTOM (monitor-bearing)
+  // route — the config entry. A shipped built-in keeps today's semantics: its
+  // credential and cache row go, the configured route stays.
+  //
+  // It performs NO native logout: no subprocess is spawned and no other tool's
+  // credential store is read or written, so a recipe that authenticates
+  // through its own CLI keeps that CLI's session untouched.
+  //
+  // `remove` keeps its documented exit codes (0 on success or nothing-to-do,
+  // 1 on failure); the stable lifecycle exit-code map belongs to
+  // `vl.js provider remove`.
+  const result = lifecycle.removeProvider({ routeId }, lifecycleIo(cfg));
+  if (result.status === lifecycle.STATUS.NOT_FOUND) {
+    log(`no credential for "${routeId}"`);
+    return;
+  }
+  if (!result.ok) {
+    log(`could not remove "${routeId}": ${result.error}`);
+    if (result.recovery) log(result.recovery);
+    process.exitCode = 1;
+    return;
+  }
+  const cleared = [];
+  if (result.removed.credential) cleared.push('credential');
+  if (result.removed.config) cleared.push('route config');
+  if (result.removed.cache) cleared.push('cached status');
+  log(cleared.length
+    ? `removed ${cleared.join(', ')} for "${routeId}"`
+    : `no credential for "${routeId}"`);
+  if (result.status === lifecycle.STATUS.CACHE_STALE_WARNING) log(result.error);
+}
+
+// ---- provider lifecycle (#58) ------------------------------------------------
+//
+// `vl.js provider add|update|remove|list` is the shared custom-provider
+// lifecycle surface. Everything here is argv parsing, io injection and
+// rendering; the ordering, validation, probe classification, retention gate and
+// partial-write recovery all live in lib/provider-lifecycle.js so a future
+// dashboard can reuse them unchanged.
+//
+// Headless by construction: no prompt, no stdin read. A non-monitorable probe
+// outcome returns `retention-choice-required` (exit 2) with nothing persisted
+// rather than waiting for an answer.
+
+function lifecycleIo(cfg) {
+  return {
+    // Re-read on every call so a step that follows a config write sees it.
+    effectiveRoutes: () => loadConfig().routes,
+    readUserConfig,
+    readUserConfigStrict,
+    saveConfig,
+    vault: {
+      assertWritable: () => vault.assertWritable(),
+      get: (id) => vault.get(id),
+      set: (id, secret) => vault.set(id, secret),
+      remove: (id) => vault.remove(id),
+      // Strict three-way presence. The lifecycle needs it to tell an absent
+      // secret from one it merely could not read: `get`/`remove` report both
+      // the same way, so without this a failed delete would be announced as a
+      // successful removal.
+      probe: (id) => vault.probe(id),
+    },
+    readCache,
+    writeCache,
+    lock: () => lifecycle.acquireMutationLock(dataDir()),
+    // The probe is the recipe's OWN read-only fetch, resolved exactly as
+    // refresh and check resolve it. There is no separate discovery transport
+    // and no inference path: see the D1 decision in README.md.
+    probe: async (route, token) => {
+      const adapter = getAdapter(route.provider, route, cfg);
+      const status = await adapter.fetchStatus(
+        cfg.providers[route.provider], token, { threshold: cfg.gate.constrainedThreshold },
+      );
+      return { status, capability: adapter.capability };
+    },
+    now: () => Date.now(),
+  };
+}
+
+const PROVIDER_VALUE_FLAGS = Object.freeze({
+  '--label': 'label',
+  '--provider': 'provider',
+  '--recipe': 'recipe',
+  '--endpoint': 'endpoint',
+  '--model': 'model',
+  '--account': 'account',
+  '--profile': 'profile',
+  '--region': 'region',
+  '--key': 'key',
+});
+
+// `--key=sk-…` is not supported syntax (values are separate argv tokens), but
+// a user will type it, and the unknown-option error echoes the token back. Any
+// `--flag=value` form therefore has its value half redacted before it is
+// printed: a mistyped credential must not land in stderr, a terminal
+// scrollback or a captured log.
+function redactFlagToken(arg) {
+  const text = String(arg);
+  const eq = text.indexOf('=');
+  return eq < 0 ? text : `${text.slice(0, eq)}=<redacted>`;
+}
+
+function parseProviderArgs(args) {
+  const out = {
+    json: false, routeId: null, retention: null, optionPairs: [], matchPairs: {},
+    ttlSeconds: undefined,
+  };
+  for (const field of Object.values(PROVIDER_VALUE_FLAGS)) out[field] = undefined;
+  const needValue = (flag, value) => {
+    if (typeof value !== 'string' || !value.trim() || value.startsWith('--')) {
+      err(`${flag} requires a non-empty value.`);
+    }
+    return value;
+  };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--json') { out.json = true; continue; }
+    if (arg === '--keep-unmonitored' || arg === '--clear-credential') {
+      const choice = arg === '--keep-unmonitored' ? lifecycle.RETENTION.KEEP : lifecycle.RETENTION.CLEAR;
+      if (out.retention !== null && out.retention !== choice) {
+        err('--keep-unmonitored and --clear-credential cannot be used together.');
+      }
+      out.retention = choice;
+      continue;
+    }
+    if (arg === '--option') {
+      const value = needValue(arg, args[i + 1]);
+      const eq = value.indexOf('=');
+      if (eq < 1) err('--option requires key=value.');
+      out.optionPairs.push([value.slice(0, eq), value.slice(eq + 1)]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--match-model' || arg === '--match-harness') {
+      const key = arg === '--match-model' ? 'model' : 'harness';
+      out.matchPairs[key] = needValue(arg, args[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg === '--ttl') {
+      const value = needValue(arg, args[i + 1]);
+      if (!/^\d+$/.test(value)) err('--ttl requires a non-negative integer (seconds).');
+      out.ttlSeconds = Number(value);
+      i += 1;
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(PROVIDER_VALUE_FLAGS, arg)) {
+      const field = PROVIDER_VALUE_FLAGS[arg];
+      if (out[field] !== undefined) err(`duplicate ${arg} option.`);
+      out[field] = needValue(arg, args[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--')) err(`unknown option "${redactFlagToken(arg)}".`);
+    if (!arg.trim()) err('route id must not be empty.');
+    if (out.routeId) err('only one route can be selected at a time.');
+    out.routeId = arg;
+  }
+  return out;
+}
+
+// Coerce `--option k=v` strings using the recipe's declared option spec, so an
+// integer option (timeoutMs) is not rejected for arriving as a string. An
+// option the recipe does not declare is passed through unchanged and refused by
+// the schema with its own message.
+function coerceRecipeOptions(recipeId, pairs) {
+  if (!pairs.length) return undefined;
+  const spec = getOptionSpec(recipeId) || {};
+  const out = {};
+  for (const [k, v] of pairs) {
+    const s = spec[k];
+    if (s && s.type === 'integer') {
+      if (!/^-?\d+$/.test(v)) err(`--option ${k} must be an integer.`);
+      out[k] = Number(v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function providerUsage() {
+  return 'usage: vl.js provider add --label <label> --recipe <recipe> [--provider P] [--endpoint URL] ' +
+    '[--model M] [--account A] [--profile P] [--region R] [--option k=v]... [--match-model M] ' +
+    '[--match-harness H] [--ttl S] [--key K] [--keep-unmonitored|--clear-credential] [--json]\n' +
+    '       vl.js provider update <routeId> [same mutable flags] [--key K] ' +
+    '[--keep-unmonitored|--clear-credential] [--json]\n' +
+    '       vl.js provider remove <routeId> [--json]\n' +
+    '       vl.js provider list [--json]';
+}
+
+// Xiaomi's Chrome-cookie source has its own bespoke setup/update/remove paths
+// (helper build, Keychain grant, private-state reset). Routing it through the
+// generic lifecycle would clear the wrong state, so it is refused here.
+function refuseXiaomiLifecycle(cfg, routeId) {
+  if (!routeId) return;
+  const route = cfg.routes.find((r) => r.id === routeId);
+  if (routeId === XIAOMI_ROUTE_ID || (route && isXiaomi(route))) {
+    err(`${routeId} is a Chrome-cookie source — use /view-limits:setup, :update or "vl.js remove ${routeId}".`);
+  }
+}
+
+function renderLifecycleText(result) {
+  const lines = [];
+  if (result.command === 'list') {
+    for (const row of result.routes) {
+      const bits = [row.custom ? `recipe ${row.recipe}` : 'built-in'];
+      if (row.retention) bits.push(row.retention);
+      bits.push(row.needsCredential ? (row.hasCredential ? 'credential stored' : 'no credential') : 'no credential needed');
+      if (row.configObsolete) bits.push('cached status is config-obsolete');
+      lines.push(`  ${row.id} (${row.provider}) — ${bits.join(', ')}`);
+    }
+    if (!result.routes.length) lines.push('  no routes configured');
+    return lines.join('\n');
+  }
+  lines.push(`  ${result.command} ${result.id || ''} → ${result.status}`.trimEnd());
+  if (result.probe) lines.push(`  probe: ${result.probe.outcome}${result.probe.reason ? ` (${result.probe.reason})` : ''}`);
+  if (result.persisted) {
+    const done = Object.entries(result.persisted).filter(([, v]) => v).map(([k]) => k);
+    lines.push(`  persisted: ${done.length ? done.join(', ') : 'nothing'}`);
+  }
+  if (result.removed) {
+    const done = Object.entries(result.removed).filter(([, v]) => v === true).map(([k]) => k);
+    lines.push(`  removed: ${done.length ? done.join(', ') : 'nothing'}`);
+    lines.push('  native CLI login: untouched (no logout is ever performed)');
+  }
+  if (result.configRevision) lines.push(`  configRevision: ${result.configRevision}`);
+  if (result.error) lines.push(`  ${result.error}`);
+  if (result.recovery) lines.push(`  recovery: ${result.recovery}`);
+  if (result.detail) lines.push(`  ${result.detail}`);
+  return lines.join('\n');
+}
+
+function emitLifecycleResult(result, json) {
+  process.stdout.write(json
+    ? JSON.stringify(result, null, 2) + '\n'
+    : renderLifecycleText(result) + '\n');
+  process.exitCode = lifecycle.exitCodeFor(result.status);
+}
+
+async function providerCmd(args) {
+  const sub = args[0];
+  if (!['add', 'update', 'remove', 'list'].includes(sub)) err(providerUsage());
+  const cfg = loadConfig();
+  const opts = parseProviderArgs(args.slice(1));
+  const io = lifecycleIo(cfg);
+
+  if (sub === 'list') {
+    if (opts.routeId) err(providerUsage());
+    return emitLifecycleResult(lifecycle.listProviders(io), opts.json);
+  }
+  if (sub === 'remove') {
+    if (!opts.routeId) err('vl.js provider remove requires a route id.');
+    refuseXiaomiLifecycle(cfg, opts.routeId);
+    return emitLifecycleResult(lifecycle.removeProvider({ routeId: opts.routeId }, io), opts.json);
+  }
+
+  const match = Object.keys(opts.matchPairs).length ? opts.matchPairs : undefined;
+  if (sub === 'add') {
+    if (opts.routeId) err('vl.js provider add takes --label, not a route id.');
+    if (!opts.label) err('vl.js provider add requires --label.');
+    if (!opts.recipe) err('vl.js provider add requires --recipe.');
+    const result = await lifecycle.setupProvider({
+      label: opts.label,
+      provider: opts.provider,
+      recipe: opts.recipe,
+      endpoint: opts.endpoint,
+      model: opts.model,
+      account: opts.account,
+      profile: opts.profile,
+      region: opts.region,
+      recipeOptions: coerceRecipeOptions(opts.recipe, opts.optionPairs),
+      match,
+      ttlSeconds: opts.ttlSeconds,
+      key: opts.key,
+      retention: opts.retention,
+    }, io);
+    return emitLifecycleResult(result, opts.json);
+  }
+  // update
+  if (!opts.routeId) err('vl.js provider update requires a route id.');
+  refuseXiaomiLifecycle(cfg, opts.routeId);
+  const existing = cfg.routes.find((r) => r.id === opts.routeId);
+  const existingRecipe = existing && existing.monitor && existing.monitor.recipe;
+  const result = await lifecycle.updateProvider({
+    routeId: opts.routeId,
+    provider: opts.provider,
+    recipe: opts.recipe,
+    endpoint: opts.endpoint,
+    model: opts.model,
+    account: opts.account,
+    profile: opts.profile,
+    region: opts.region,
+    // `--option` replaces the recipe's full option set rather than merging, so
+    // what is written is exactly what was asked for.
+    recipeOptions: coerceRecipeOptions(opts.recipe || existingRecipe || '', opts.optionPairs),
+    match,
+    ttlSeconds: opts.ttlSeconds,
+    key: opts.key,
+    retention: opts.retention,
+  }, io);
+  return emitLifecycleResult(result, opts.json);
 }
 
 // ---- snapshot ---------------------------------------------------------------
@@ -1355,6 +1713,7 @@ const hasFlag = (n) => args.includes(n);
     case 'check': return check(args[0]);
     case 'setup': return setup(args);
     case 'update': return update(args);
+    case 'provider': return providerCmd(args);
     case 'serve': return serve(Number(args[0]), args[1], args.slice(2));
     case 'session-start': return sessionStart();
     case 'remove': return remove(args[0]);
@@ -1362,6 +1721,6 @@ const hasFlag = (n) => args.includes(n);
     case 'snapshot': return snapshot(args);
     case 'recommend': return recommendCmd(args);
     default:
-      return err('usage: vl.js status|report [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js status|report [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
   }
 })();

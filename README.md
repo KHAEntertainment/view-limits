@@ -16,6 +16,10 @@ orchestrator fans work out across models on different provider accounts.
 - **`/view-limits:update [route-id]`** — rotate existing keys: opens the form for
   configured routes, or one route, e.g. `/view-limits:update kimi-code-plan`.
   Rotation always requests a replacement; it never reimports a native key.
+- **`vl.js provider add|update|remove|list`** — the custom-provider lifecycle:
+  validate, probe the quota source read-only, then persist. Headless, with
+  stable statuses and exit codes. See
+  [Adding a custom provider](#adding-updating-and-removing-a-custom-provider).
 - An optional **`PreToolUse` hook** resolves sub-agent dispatch (`Agent`/`Task`,
   Traycer `create_agent`/`configure_agent`/`fork_agent`) to a route/account. It is
   off by default; advisory and deny modes are available under [Hooks](#hooks).
@@ -111,9 +115,138 @@ Requests are HTTPS-only. Redirects are refused, and the body (64 KiB) and time
 are capped. Provider error text is never surfaced. `recipeOptions` that look
 like credentials, by name or value, are rejected. The key lives in the vault
 under the route `id` like any other route. A route without a key is skipped as
-unmonitored. Guided add/probe/remove (including any opt-in discovery request)
-comes with the setup lifecycle in Issue #58. These adapters are verified with
-documented-format fixtures only, not against a live provider account.
+unmonitored. Guided add / probe / remove is
+[the provider lifecycle](#adding-updating-and-removing-a-custom-provider)
+(no discovery-time inference request is performed — see
+[Why there is no inference probe](#why-there-is-no-inference-probe)).
+These adapters are verified with documented-format fixtures only, not against a
+live provider account.
+
+## Adding, updating and removing a custom provider
+
+`vl.js provider` is one lifecycle service shared by the CLI today and any later
+management surface. Every operation **validates, then probes the quota source
+read-only, then persists** — in that order, so a source that cannot be read
+never reaches `config.json` and never disturbs a route that already works.
+
+```sh
+# add: the label becomes the route id `custom-<slug>`
+vl.js provider add --label acme-plan --recipe openai-compat \
+  --endpoint https://api.acme.example --option path=/v1/models \
+  --option scope=account --match-model acme --key "$KEY" --json
+
+vl.js provider list --json                      # what is configured, and whether
+                                                # a cached row still matches it
+vl.js provider update custom-acme-plan --key "$NEW_KEY" --json
+vl.js provider remove custom-acme-plan --json
+```
+
+Flags: `--label` (add) or a route id (update / remove); `--recipe`, `--provider`,
+`--endpoint`, `--model`, `--account`, `--profile`, `--region`;
+`--option k=v` (repeatable, the recipe's declared `recipeOptions`);
+`--match-model`, `--match-harness`, `--ttl`; `--key`; `--keep-unmonitored` /
+`--clear-credential`; `--json`.
+
+**Identity.** The id is `custom-<slug>` derived from a validated label. A label
+that normalizes onto an existing id is **refused, never overwritten**, and a
+label that would impersonate a built-in family (`kimi-`, `glm-`, `stepfun-`, …)
+is rejected up front. The identity survives an endpoint, model, account or key
+change — `id`, `provider` and `recipe` are immutable, because a different recipe
+is a different quota source and therefore a different route.
+
+**The probe is the recipe's own read-only fetch** — the same call `refresh` and
+`check` make, resolved through the same resolver. One `GET` for a compat recipe,
+one bounded CLI read for `alibaba-coding-plan`, and no request at all for
+`stepfun-plan`. Never an inference request.
+
+**Nothing to monitor requires an explicit choice.** When the probe reports no
+usable capacity signal — an unmonitored recipe, a diagnostic-only scope, an
+auth failure, a timeout — the command **persists nothing** and exits
+`retention-choice-required`. It never prompts and never waits on stdin. Rerun
+with one of:
+
+- `--keep-unmonitored` — register the route anyway. It is marked
+  `retention: "keep-unmonitored"` at route level (never inside `monitor`, so
+  the flag cannot change a cached observation's validity) and `report` names it
+  explicitly, so the probe's verdict stays visible instead of looking like an
+  ordinary unknown row. The flag records **what the probe found at setup
+  time**; it is not a state policy. The route stays configured, `refresh` and
+  `check` still read it, and if the source later does report real capacity that
+  observation is published like any other — an annotation never invents a
+  state, and never suppresses a genuine one. A route whose *recipe* documents
+  no quota source (`stepfun-plan`) can never report capacity, but that comes
+  from the recipe's `monitorable: false` capability, not from this flag.
+- `--clear-credential` — abandon it. On `add` nothing was ever stored; on
+  `update` the credential, the route and its cached row are all removed.
+
+> **`--key` is visible in the process list and your shell history.** It is the
+> same trade-off as `vl.js setup <routeId> --key`, and the value goes straight
+> into the vault — but on a shared machine prefer adding the route first with a
+> source that needs no credential, or rotate afterwards from a shell whose
+> history is off. A mistyped `--key=value` (one token) is rejected as unknown
+> syntax with its value redacted, so the key is not echoed back.
+
+**Partial writes are recoverable.** Persistence is vault → config → cache and
+each stage is reported:
+
+| Fails | Result | State afterwards |
+| --- | --- | --- |
+| vault | `persist-failed`, stage `vault` | nothing written |
+| config | `persist-failed`, stage `config` | the credential is rolled back — removed on an add, restored to the previous key on a rotation. A rotation whose previous value is unreadable says so rather than claiming a rollback |
+| cache | `cache-stale-warning`, exit `0` | route and credential stand; the next refresh replaces the stale row |
+
+Rerunning the same command finishes the job. Mutations are serialized by a
+`provider-lifecycle.lock` in the data dir (exclusive create, with a single
+takeover of a lock whose holder died), so two concurrent commands cannot
+interleave a read-modify-write of `config.json`; the loser exits `lock-busy`.
+
+**Removal clears only what view-limits owns**: the route entry (for a custom
+route), the vault key (only when the recipe keeps one with us), and the cached
+row. **No native logout is ever performed** — the lifecycle spawns no
+subprocess and reads no other tool's credential store, so a recipe that
+authenticates through its own CLI (`alibaba-coding-plan`) keeps that CLI's
+session exactly as it was. `vl.js remove <built-in>` is unchanged apart from
+also dropping the stale cache row: the credential goes, the configured route
+stays.
+
+**Revision checks.** Every mutation publishes the route's `configRevision`, and
+`refresh` stamps it onto each cache entry. A cached observation whose revision
+no longer matches the configured route is *config-obsolete*: `provider list`
+reports it, and the gate treats it exactly like a stale entry — allow, schedule
+a refresh, never deny. So editing a route's endpoint, account, profile, region
+or a revision-bearing recipe option cannot leave an old `exhausted` reading
+blocking dispatch. Ephemeral options (`timeoutMs`) do not invalidate the cache,
+and an entry written before this field existed keeps time-only freshness.
+
+Statuses and exit codes (one JSON document under `--json`):
+
+| Status | Exit | Meaning |
+| --- | --- | --- |
+| `ok` | `0` | the operation completed |
+| `cache-stale-warning` | `0` | completed; only the cache row could not be updated |
+| `retention-choice-required` | `2` | nothing to monitor; nothing persisted, choose a retention flag |
+| `id-collision` | `3` | that id exists; nothing was overwritten |
+| `invalid-route` | `4` | rejected by validation (label, endpoint, option, immutable field) |
+| `unsupported-recipe` | `4` | the recipe id is not in the fixed registry |
+| `vault-unavailable` | `5` | the credential store could not be written |
+| `persist-failed` | `5` | a write failed; see `stage`, `rollback` and `recovery` |
+| `lock-busy` | `6` | another mutation is in progress |
+| `not-found` | `7` | no such route |
+
+Exit `1` stays reserved for bad arguments, as everywhere else in the CLI.
+
+### Why there is no inference probe
+
+The design allowed one explicitly opted-in, bounded inference request at
+discovery time *where provider terms permit it*. **It is deliberately not
+implemented**, and this is a decision rather than an omission: no recipe in the
+fixed registry has terms that clearly permit it. Alibaba's Coding Plan policy
+restricts inference to interactive coding tools, `stepfun-plan` documents no
+quota source at all, and `openai-compat` / `anthropic-compat` point at
+user-supplied endpoints whose terms view-limits cannot know. Shipping an unwired
+opt-in would be dead code carrying a standing invitation to attach it to a
+refresh path later. There is therefore no inference endpoint, no discovery
+transport and no opt-in flag anywhere in `lib/`.
 
 ## Alibaba Cloud Coding Plan (Bailian CLI)
 
@@ -183,12 +316,17 @@ over, and its stdout/stderr never reach a status.
 **Implemented — not live-tested (awaiting owner account).** The fixtures are
 built from the published CLI JSON contract and the documented Coding Plan
 policy. No live Alibaba account was used, and no authenticated read was
-performed.
+performed. Live verification is tracked in
+[#53](https://github.com/KHAEntertainment/view-limits/issues/53) and is not a
+release blocker.
 
 ## StepFun Step Plan (unmonitored)
 
 > **Implemented — not live-tested (awaiting owner account).** Classification
 > below is documentation-based (StepFun's published docs), not a live probe.
+> Live verification is tracked in
+> [#53](https://github.com/KHAEntertainment/view-limits/issues/53) and is not a
+> release blocker.
 
 StepFun's Step Plan is a credit-based subscription. The published
 documentation (`platform.stepfun.ai/step-plan`, `/step-code`, and the API
@@ -422,7 +560,10 @@ vl.js report [--json]             # render cached status
 vl.js check <routeId>             # live-check one route (JSON)
 vl.js setup [<routeId>]           # initial setup (missing keys / one route)
 vl.js update [<routeId>]          # rotate existing keys
-vl.js remove <routeId>            # delete a credential
+vl.js remove <routeId>            # delete a credential (+ its stale cache row)
+vl.js provider add|update|remove|list   # custom-provider lifecycle (validate →
+                                  #   read-only probe → persist); stable
+                                  #   headless statuses and exit codes
 vl.js config                      # effective config (secrets masked)
 vl.js snapshot --json [--refresh] # diagnostic runtime snapshot
 vl.js recommend --json            # advisory recommendation (Jev-dormant by default)
@@ -439,6 +580,7 @@ vl.js recommend --json            # advisory recommendation (Jev-dormant by defa
 | `snapshot --json` | `0` (one pretty JSON envelope on stdout) | `1` when `--json` is missing or any other flag is passed |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |
 | `setup` / `update` / `remove` | `0` | `1` on bad args or credential-storage failure |
+| `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found — see [the lifecycle section](#adding-updating-and-removing-a-custom-provider) |
 | `session-start` / `config` | `0` | `0` (purely advisory; surface failures via the receipt/sidecar instead) |
 | unknown command | n/a | `1` with the full usage line on stderr |
 
@@ -463,6 +605,9 @@ node test/compat-cli.test.js      # custom routes through the real refresh/check
 node test/alibaba-coding-plan.test.js # Bailian CLI recipe: parsing, truthfulness, argv allowlist (Issue #56)
 node test/alibaba-cli.test.js      # Alibaba route through the real refresh/check CLI (Issue #56)
 node test/step-plan.test.js        # stepfun-plan unmonitored classification, CLI (Issue #57)
+node test/provider-lifecycle.test.js     # lifecycle service: ordering, retention gate, recovery (Issue #58)
+node test/provider-lifecycle-cli.test.js # add/update/remove through the real CLI, no native logout (Issue #58)
+node test/config-revision.test.js        # configRevision writer + gate reader, depth-2 secret rejection (Issue #58)
 ```
 
 ## Version

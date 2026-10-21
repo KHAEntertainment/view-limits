@@ -252,9 +252,15 @@ test('a refreshing surface and a cache-reading surface observe byte-identical vi
   const doc = JSON.parse(afterRefresh.stdout);
   assert.deepStrictEqual(Object.keys(doc).sort(), ['routes', 'updatedAt']);
   assert.deepStrictEqual(Object.keys(doc.routes), ['kimi-code-plan']);
+  // `configRevision` is the ADDITIVE field #58 wired refresh to publish (the
+  // writer half of QA M3 from #54, which lib/gate.js now reads to refuse a
+  // deny on an obsolete observation). It is pinned exactly, not matched as a
+  // subset: the diagnostic JSON contract is additive-only, so a renamed or
+  // removed key must still fail here. Cross-surface parity is unaffected —
+  // both surfaces above produce byte-identical documents.
   assert.deepStrictEqual(
     Object.keys(doc.routes['kimi-code-plan']).sort(),
-    ['freshUntil', 'observedAt', 'routeId', 'source', 'status'],
+    ['configRevision', 'freshUntil', 'observedAt', 'routeId', 'source', 'status'],
   );
   assert.strictEqual(doc.routes['kimi-code-plan'].status.state, 'healthy');
 

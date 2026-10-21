@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process');
+const { BUILT_IN_ROUTES } = require('../lib/config');
 
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const VL = path.join(PLUGIN_ROOT, 'bin', 'vl.js');
@@ -29,6 +30,14 @@ function scratch() {
 
 function writeJson(dir, name, value) {
   fs.writeFileSync(path.join(dir, name), typeof value === 'string' ? value : JSON.stringify(value));
+}
+
+// Configure the shipped routes. A candidate exists because a route is
+// configured, and shipped routes are no longer present by default —
+// config.json is assembled by setup — so a test about scoring
+// `kimi-code-plan` against `deepseek-direct` has to configure them.
+function seedRoutes(dir, extra = {}) {
+  writeJson(dir, 'config.json', { routes: BUILT_IN_ROUTES, ...extra });
 }
 
 // Recursive relative listing of a directory (files hashed so in-place
@@ -99,6 +108,7 @@ console.log('recommend cli — single JSON document, dormant Jev, zero I/O');
 
 test('vl recommend --json → exit 0, one JSON doc, jev dormant, exhausted route rejected', () => {
   const dir = scratch();
+  seedRoutes(dir);
   seedStatus(dir);
   const r = runRecommend(['--json'], dir);
   assert.strictEqual(r.status, 0, `exit ${r.status}; stderr=${r.stderr}`);
@@ -130,6 +140,7 @@ test('a configured jev block still stays dormant — no transport, no network', 
   const dir = scratch();
   seedStatus(dir);
   writeJson(dir, 'config.json', {
+    routes: BUILT_IN_ROUTES,
     jev: { model: 'acme/jev-1.13', baseUrl: 'https://example.invalid', catalogUrl: 'https://example.invalid/models' },
   });
   const r = runRecommend(['--json'], dir);
@@ -177,6 +188,7 @@ test('F2: non-object --task/--policy JSON → exit 1 and NO recommendation docum
 
 test('F2: explicit object --policy deep-merges ({} keeps strict requirements)', () => {
   const dir = scratch();
+  seedRoutes(dir);
   seedStatus(dir);
   const r = runRecommend(['--json', '--policy', '{}'], dir);
   assert.strictEqual(r.status, 0, `exit ${r.status}; stderr=${r.stderr}`);

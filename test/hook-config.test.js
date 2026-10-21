@@ -58,7 +58,12 @@ function gate(tool = 'Agent') {
   return run(gateArgs, { input: JSON.stringify({ tool_name: tool, tool_input: { model: 'kimi-k2' } }) });
 }
 function settings(mode, injectContext) {
-  return { gate: { mode, injectContext } };
+  // The route is CONFIGURED here: shipped routes are no longer present by
+  // default (config.json is assembled by setup), and a gate test about denying
+  // on `kimi-code-plan` needs that route to exist. The hook contract under
+  // test is unchanged — only the fixture now states its premise instead of
+  // inheriting it from a default.
+  return { gate: { mode, injectContext }, routes: [route] };
 }
 
 (async () => {
@@ -173,8 +178,19 @@ function settings(mode, injectContext) {
       assert.ok(!fs.existsSync(path.join(dir, 'refresh-workers')));
     }
     for (const raw of [null, 'null', '[]', 'false', '42', '{broken']) {
-      if (raw === null) fs.rmSync(configPath, { force: true });
-      else fs.writeFileSync(configPath, raw);
+      if (raw === null) {
+        // No config.json at all is a first use, so SessionStart runs the
+        // one-time migration (Issue #81). The guard blocks every vault read,
+        // so the vault is unreadable: it must write nothing, say so, and
+        // leave the migration to retry — never publish an empty route list.
+        fs.rmSync(configPath, { force: true });
+        const result = run(refreshArgs);
+        assert.strictEqual(result.stdout, '');
+        assert.match(result.stderr, /credential vault could not be read, so existing routes were not migrated — nothing was changed; this retries on the next command\./);
+        assert.ok(!fs.existsSync(configPath), 'an unreadable vault must not publish a config');
+        continue;
+      }
+      fs.writeFileSync(configPath, raw);
       silent(run(refreshArgs));
     }
 

@@ -512,9 +512,21 @@ test('removal is resumable: a failed config publication keeps the cleared creden
 // `fileDelete` swallows every unlink error and returns false. So a delete that
 // FAILED is byte-for-byte indistinguishable from a secret that was never
 // there, if all you have is get() and remove(). Here the secret is provably
-// still on disk and the delete provably failed, which is the case a read-back
+// still on disk, cannot be READ (get() is null — the premise is asserted, not
+// assumed), and the delete provably failed: exactly the case a read-back
 // would have announced as a successful removal — leaving an orphaned
 // credential behind a deleted route.
+function realVaultRead(dir, id) {
+  const script = `const v = require(${JSON.stringify(path.resolve(__dirname, '../lib/vault'))});` +
+    `process.stdout.write(JSON.stringify({ get: v.get(${JSON.stringify(id)}), probe: v.probe(${JSON.stringify(id)}) }));`;
+  const r = spawnSync(process.execPath, ['-e', script], {
+    env: { PATH: process.env.PATH, HOME: dir, CLAUDE_PLUGIN_DATA: dir, VIEW_LIMITS_MASTER_KEY: MASTER },
+    encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.strictEqual(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
 test('a credential that could not be deleted is reported as failed, not removed (real vault)', () => {
   if (typeof process.getuid === 'function' && process.getuid() === 0) {
     console.log('    (skipped: running as root, where mode bits do not deny)');
@@ -525,11 +537,16 @@ test('a credential that could not be deleted is reported as failed, not removed 
   const secrets = path.join(dir, 'secrets');
   const blob = path.join(secrets, 'custom-acme-plan.enc');
   assert.strictEqual(fs.existsSync(blob), true, 'the add did not store a credential to delete');
-  // r-x: the blob can still be STAT'd (so presence is provable) but the
-  // directory cannot be written, so unlink fails. This is exactly the shape of
-  // a vault that is intact and inaccessible.
+  assert.strictEqual(realVaultRead(dir, 'custom-acme-plan').get, KEY_A, 'premise: the stored key reads back first');
+  // The blob is 000, so get() reads NOTHING — the null-read hazard — while the
+  // directory is r-x, so the blob can still be STAT'd (presence is provable)
+  // but not unlinked. This is a vault that is intact and inaccessible.
+  fs.chmodSync(blob, 0o000);
   fs.chmodSync(secrets, 0o500);
   try {
+    const premise = realVaultRead(dir, 'custom-acme-plan');
+    assert.strictEqual(premise.get, null, 'premise: the real vault must read the locked blob as null');
+    assert.strictEqual(premise.probe, 'present', 'premise: the strict probe must still see the blob');
     const r = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json']);
     assert.strictEqual(r.status, 5, r.stderr);
     assert.strictEqual(r.json.stage, 'vault');
@@ -543,6 +560,7 @@ test('a credential that could not be deleted is reported as failed, not removed 
     assert.ok(routeById(dir, 'custom-acme-plan'), 'the route entry must survive a failed vault stage');
   } finally {
     fs.chmodSync(secrets, 0o700);
+    fs.chmodSync(blob, 0o600);
   }
   // Idempotent: once the vault is reachable again the same command finishes.
   const again = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json']);

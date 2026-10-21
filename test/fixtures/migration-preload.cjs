@@ -91,6 +91,46 @@ if (process.env.VL_TEST_BEFORE_FIRST_LOCK) {
   };
 }
 
+// An outside actor deleting config.json at an exact publish boundary
+// (VL_TEST_DELETE_CONFIG_AT = 'before-move' | 'before-link'). Deterministic, no
+// sleeps: the delete happens immediately before the REAL call at that step of
+// lib/config.js saveConfig — moving config.json aside, or linking the new
+// document in — and the real call then runs unchanged. Journaled to
+// VL_TEST_HOOK_JOURNAL.
+if (process.env.VL_TEST_DELETE_CONFIG_AT) {
+  const path = require('path');
+  const at = process.env.VL_TEST_DELETE_CONFIG_AT;
+  const outsideDelete = (target) => {
+    let removed = false;
+    try { fs.unlinkSync(target); removed = true; } catch { /* nothing there */ }
+    journal(process.env.VL_TEST_HOOK_JOURNAL, JSON.stringify({ at, removed }));
+  };
+  // 'before-move' fires at the FIRST publishing step, whichever shape it has:
+  // moving config.json aside (the shipped protocol), or renaming a temp file
+  // onto config.json (the check-then-rename form it replaced) — so the same
+  // test proves the protocol and turns red against the old shape.
+  let moved = false;
+  const realRename = fs.renameSync;
+  fs.renameSync = function renameAtBoundary(from, to) {
+    const f = path.basename(String(from));
+    const t = path.basename(String(to));
+    const firstStep = (f === 'config.json' && t === 'config.json.prev') || (f.startsWith('config.json.tmp.') && t === 'config.json');
+    if (at === 'before-move' && !moved && firstStep) {
+      moved = true;
+      outsideDelete(path.join(path.dirname(String(to)), 'config.json'));
+    }
+    return realRename.apply(this, arguments);
+  };
+  const realLink = fs.linkSync;
+  fs.linkSync = function linkAtBoundary(from, to) {
+    if (at === 'before-link' && path.basename(String(to)) === 'config.json'
+        && path.basename(String(from)).startsWith('config.json.tmp.')) {
+      outsideDelete(String(to));
+    }
+    return realLink.apply(this, arguments);
+  };
+}
+
 // A form server that dies before it listens.
 if (process.argv[2] === 'serve' && process.env.VL_TEST_SERVE_EXIT) {
   process.exit(Number(process.env.VL_TEST_SERVE_EXIT));

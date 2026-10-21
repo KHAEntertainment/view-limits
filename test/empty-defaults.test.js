@@ -252,28 +252,165 @@ section('the write-level guard: only the migration may create config.json');
 
 // The invariant itself, not the dispatcher wiring: an absent config.json means
 // the migration has not resolved, so ANY publish that would create the file is
-// refused — whatever command, list or caller it came from.
+// refused — whatever command, list or caller it came from — and every publish
+// runs under the provider mutation lock.
+
+// Run fn with this data dir AND the real mutation lock held, as every in-protocol
+// publisher does.
+function underLock(dir, fn) {
+  return inDataDir(dir, () => {
+    const lock = lifecycle.acquireMutationLock(dir);
+    assert.ok(lock.ok, 'premise: the test holds the mutation lock');
+    try { return fn(); } finally { lock.release(); }
+  });
+}
+const PREV = (dir) => path.join(dir, 'config.json.prev');
+const docAt = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
+
 test('saveConfig refuses to CREATE config.json without the migration capability', () => {
   const dir = scratch();
-  inDataDir(dir, () => {
+  underLock(dir, () => {
     assert.throws(() => saveConfig({ routes: [] }), (e) => e.code === 'CONFIG_MIGRATION_PENDING');
     assert.throws(() => saveConfig({ routes: [] }, { capability: { capability: 'view-limits first config publish' } }),
       (e) => e.code === 'CONFIG_MIGRATION_PENDING', 'a look-alike capability must not pass: identity, not shape');
     assert.throws(() => saveConfig({ routes: [] }, { capability: 'view-limits first config publish' }),
       (e) => e.code === 'CONFIG_MIGRATION_PENDING', 'a string must not pass');
     assert.strictEqual(fs.existsSync(configPath()), false, 'a refused publish created config.json');
-    assert.deepStrictEqual(fs.readdirSync(dir), [], 'a refused publish left a temp file or created anything');
+    assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.startsWith('config.json')), [],
+      'a refused publish left a temp file or created anything');
     saveConfig({ routes: [] }, { capability: config.FIRST_PUBLISH });
-    assert.deepStrictEqual(JSON.parse(fs.readFileSync(configPath(), 'utf8')), { routes: [] });
+    assert.deepStrictEqual(docAt(configPath()), { routes: [] });
+    // The first publish is create-only: a second one loses, it never overwrites.
+    assert.throws(() => saveConfig({ routes: ['x'] }, { capability: config.FIRST_PUBLISH }), (e) => e.code === 'EEXIST');
+    assert.deepStrictEqual(docAt(configPath()), { routes: [] });
     // Once it exists, ordinary publishers replace it as before.
     saveConfig({ routes: [], gate: { mode: 'off' } });
-    assert.deepStrictEqual(JSON.parse(fs.readFileSync(configPath(), 'utf8')), { routes: [], gate: { mode: 'off' } });
+    assert.deepStrictEqual(docAt(configPath()), { routes: [], gate: { mode: 'off' } });
   });
 });
 
-test('the publish paths a command reaches are refused too, with the migration pending', async () => {
-  // The lifecycle's own publish, called directly with no dispatcher in front:
-  // persistRoute -> io.saveConfig must not create config.json.
+test('pin 1: no publish happens outside the provider mutation lock', () => {
+  const dir = scratch();
+  underLock(dir, () => saveConfig({ routes: [] }, { capability: config.FIRST_PUBLISH }));
+  const before = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+  inDataDir(dir, () => {
+    assert.throws(() => saveConfig({ routes: [], gate: { mode: 'deny' } }), (e) => e.code === 'CONFIG_LOCK_REQUIRED');
+    assert.throws(() => saveConfig({ routes: [] }, { capability: config.FIRST_PUBLISH }), (e) => e.code === 'CONFIG_LOCK_REQUIRED');
+  });
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before, 'an unlocked publish changed config.json');
+  // Released means released: holding it once does not license a later publish.
+  inDataDir(dir, () => assert.throws(() => saveConfig({ routes: [] }), (e) => e.code === 'CONFIG_LOCK_REQUIRED'));
+});
+
+test('pin 2: a normal publish leaves no .prev, so a later outside delete re-arms the migration', () => {
+  const dir = upgradeWith('kimi-code-plan');
+  underLock(dir, () => {
+    saveConfig({ routes: [] }, { capability: config.FIRST_PUBLISH });
+    saveConfig({ routes: [], gate: { mode: 'off' } });
+  });
+  assert.strictEqual(fs.existsSync(PREV(dir)), false, 'a normal publish left config.json.prev behind');
+  // A stale .prev planted BESIDE config.json is a leftover, not a document:
+  // the next publish removes it rather than letting it outlive config.json.
+  fs.writeFileSync(PREV(dir), '{"routes":[{"id":"stale"}]}');
+  underLock(dir, () => saveConfig({ routes: [], gate: { mode: 'off' } }));
+  assert.strictEqual(fs.existsSync(PREV(dir)), false, 'a stale .prev survived a publish beside config.json');
+  // Outside delete: nothing may keep the migration disarmed now.
+  fs.unlinkSync(path.join(dir, 'config.json'));
+  assert.strictEqual(inDataDir(dir, () => config.configPresence()), 'absent');
+  const r = run(dir, ['provider', 'list', '--json']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan'], 'the migration stayed disarmed after the delete');
+});
+
+test('pin 3: a crash between move-aside and link is recovered by the next writer, never a lockout', () => {
+  const dir = scratch();
+  const prior = { routes: [{ id: 'custom-prior', provider: 'stepplan', monitor: { recipe: 'stepfun-plan' }, retention: 'keep-unmonitored' }],
+    vault: { backend: 'file' }, gate: { mode: 'off' } };
+  // Exactly what an interrupted publish leaves: config.json moved aside, the
+  // new document never linked in.
+  fs.writeFileSync(PREV(dir), JSON.stringify(prior));
+  // Readers see the document, read-only — no transient empty config.
+  assert.strictEqual(inDataDir(dir, () => config.configPresence()), 'present');
+  assert.deepStrictEqual(inDataDir(dir, () => loadConfig().routes.map((r) => r.id)), ['custom-prior']);
+  const list = run(dir, ['provider', 'list', '--json']);
+  assert.strictEqual(list.status, 0, list.stderr);
+  assert.deepStrictEqual(list.json.routes.map((r) => r.id), ['custom-prior']);
+  assert.strictEqual(fs.existsSync(path.join(dir, 'config.json')), false, 'a read wrote config.json');
+  // A normal writer proceeds from the recovered document.
+  const add = run(dir, ['provider', 'add', '--label', 'after', '--provider', 'stepplan', '--recipe', 'stepfun-plan', '--keep-unmonitored', '--json']);
+  assert.strictEqual(add.status, 0, `the crash state locked the user out: ${add.stdout}${add.stderr}`);
+  assert.deepStrictEqual(routeIds(dir), ['custom-prior', 'custom-after']);
+  assert.strictEqual(fs.existsSync(PREV(dir)), false, 'recovery left config.json.prev behind');
+});
+
+function deleteAt(dir, at, args) {
+  const hook = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-del-')), 'hook');
+  const r = run(dir, args, journals(), { VL_TEST_DELETE_CONFIG_AT: at, VL_TEST_HOOK_JOURNAL: hook });
+  const fired = fs.existsSync(hook) ? fs.readFileSync(hook, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  return { r, fired };
+}
+const ADD_AFTER = ['provider', 'add', '--label', 'after', '--provider', 'stepplan', '--recipe', 'stepfun-plan', '--keep-unmonitored'];
+
+test('pin 4: config.json deleted right BEFORE the move-aside — refused (exit 8), and the migration still runs', () => {
+  // The R3-1 interleaving: the publisher saw config.json, an outside actor
+  // deletes it, and the publisher continues. It must not create the file.
+  const dir = upgradeWith('kimi-code-plan');
+  run(dir, ['provider', 'list', '--json']);
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ routes: [], vault: { backend: 'file' }, gate: { mode: 'off' } }));
+  assert.deepStrictEqual(routeIds(dir), [], 'premise: a config.json with no rows, and a stored Kimi credential');
+  const { r, fired } = deleteAt(dir, 'before-move', ADD_AFTER);
+  assert.deepStrictEqual(fired, [{ at: 'before-move', removed: true }], 'premise: the outside delete happened at the boundary');
+  assert.strictEqual(r.status, 8, `a non-capability writer was not refused: ${r.stdout}${r.stderr}`);
+  assert.ok(`${r.stdout}${r.stderr}`.includes(REFUSAL.slice('view-limits: '.length)), 'not the same refusal message');
+  assert.strictEqual(fs.existsSync(path.join(dir, 'config.json')), false, 'the writer CREATED config.json and disarmed the migration');
+  assert.strictEqual(fs.existsSync(PREV(dir)), false);
+  const next = run(dir, ['provider', 'list', '--json']);
+  assert.strictEqual(next.status, 0, next.stderr);
+  assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan'], 'the migration did not run after the delete');
+});
+
+test('pin 4: config.json deleted BETWEEN move-aside and link — nothing to delete; the replace completes', () => {
+  const dir = seeded([]);
+  const { r, fired } = deleteAt(dir, 'before-link', [...ADD_AFTER, '--json']);
+  assert.deepStrictEqual(fired, [{ at: 'before-link', removed: false }],
+    'config.json was still there to delete after it had been moved aside');
+  assert.strictEqual(r.status, 0, `${r.stdout}${r.stderr}`);
+  assert.deepStrictEqual(routeIds(dir), ['custom-after'], 'this was a replace of an existing document');
+  assert.strictEqual(fs.existsSync(PREV(dir)), false);
+});
+
+test('pin 5: no hard links means fail closed — no fallback to rename-over', () => {
+  const dir = scratch();
+  underLock(dir, () => saveConfig({ routes: [] }, { capability: config.FIRST_PUBLISH }));
+  const before = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+  const realLink = fs.linkSync;
+  const realRename = fs.renameSync;
+  const renames = [];
+  fs.linkSync = (from, to) => {
+    if (path.basename(String(from)).startsWith('config.json.tmp.')) { const e = new Error('EPERM'); e.code = 'EPERM'; throw e; }
+    return realLink(from, to);
+  };
+  fs.renameSync = (from, to) => { renames.push([path.basename(String(from)), path.basename(String(to))]); return realRename(from, to); };
+  try {
+    underLock(dir, () => assert.throws(() => saveConfig({ routes: [], gate: { mode: 'deny' } }), (e) => e.code === 'CONFIG_LINK_UNSUPPORTED'));
+    const fresh = scratch();
+    underLock(fresh, () => assert.throws(() => saveConfig({ routes: [] }, { capability: config.FIRST_PUBLISH }),
+      (e) => e.code === 'CONFIG_LINK_UNSUPPORTED'));
+    assert.strictEqual(fs.existsSync(path.join(fresh, 'config.json')), false);
+  } finally {
+    fs.linkSync = realLink;
+    fs.renameSync = realRename;
+  }
+  assert.ok(!renames.some(([from, to]) => from.startsWith('config.json.tmp.') && to === 'config.json'),
+    `a temp file was renamed over config.json: ${JSON.stringify(renames)}`);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before, 'the previous document was not restored');
+  assert.strictEqual(fs.existsSync(PREV(dir)), false);
+  assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.includes('.tmp.')), [], 'a temp file was left behind');
+});
+
+test('the lifecycle publish path, called directly with the migration pending, is refused', async () => {
+  // No dispatcher in front: persistRoute -> io.saveConfig must not create
+  // config.json, and reports the same migration-pending status.
   const dir = scratch();
   const prev = { data: process.env.CLAUDE_PLUGIN_DATA, key: process.env.VIEW_LIMITS_MASTER_KEY };
   process.env.CLAUDE_PLUGIN_DATA = dir;
@@ -287,13 +424,33 @@ test('the publish paths a command reaches are refused too, with the migration pe
       vault: { assertWritable() {}, get: () => null, set() {}, remove() {}, probe: () => 'absent' },
       readCache: () => ({ routes: {} }), writeCache() {},
     });
-    assert.strictEqual(r.status, lifecycle.STATUS.PERSIST_FAILED, `the lifecycle publish was not refused: ${JSON.stringify(r)}`);
-    assert.strictEqual(r.stage, 'config');
+    assert.strictEqual(r.status, lifecycle.STATUS.MIGRATION_PENDING, `the lifecycle publish was not refused: ${JSON.stringify(r)}`);
+    assert.strictEqual(lifecycle.exitCodeFor(r.status), 8);
     assert.strictEqual(fs.existsSync(configPath()), false, 'the lifecycle created config.json with the migration pending');
   } finally {
     if (prev.data === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = prev.data;
     if (prev.key === undefined) delete process.env.VIEW_LIMITS_MASTER_KEY; else process.env.VIEW_LIMITS_MASTER_KEY = prev.key;
   }
+});
+
+test('setup <id> --key exits 1 when its row does not materialize, as bare setup does', () => {
+  // The credential is stored; the row is not (the lock is busy). Exit 0 here
+  // would tell a script the route exists while the gate stays fail-open.
+  const dir = seeded([]);
+  const held = lifecycle.acquireMutationLock(dir);
+  assert.ok(held.ok);
+  try {
+    const r = run(dir, ['setup', 'kimi-code-plan', '--key', KEY_A]);
+    assert.strictEqual(r.status, 1, `a row-less store reported success: ${r.stderr}`);
+    assert.match(r.stderr, /the credential for "kimi-code-plan" is stored, but its route is not configured yet — run: vl\.js setup \(with no route id\) to add it\./);
+    assert.strictEqual(inDataDir(dir, () => vault.get('kimi-code-plan')), KEY_A, 'premise: the credential was stored');
+    assert.ok(!routeIds(dir).includes('kimi-code-plan'), 'premise: the row did not materialize');
+  } finally {
+    held.release();
+  }
+  const ok = run(dir, ['setup', 'kimi-code-plan', '--key', KEY_A]);
+  assert.strictEqual(ok.status, 0, ok.stderr);
+  assert.ok(routeIds(dir).includes('kimi-code-plan'));
 });
 
 test('a fresh install loads zero routes, and reading writes nothing', () => {

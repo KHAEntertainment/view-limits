@@ -31,7 +31,7 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 
 const { loadConfig, dataDir, expandHome, deepMerge, configPath, saveConfig,
-  BUILT_IN_ROUTES, builtInRoute } = require('../lib/config');
+  BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence } = require('../lib/config');
 const {
   readCache, writeCache, isFresh, recoveryBoundedFreshUntil,
   tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
@@ -1018,11 +1018,24 @@ function parseCredentialArgs(cfg, args, opts = {}) {
   return parsed;
 }
 
+// A shipped route's credential is only half the job: its row is what makes it
+// monitored. Read the row off disk after the store — materializeBuiltInRoute
+// reports its own failures by logging, so success is observed, not assumed —
+// and exit 1 when it is missing, exactly as bare setup does in that state.
+function requireRowAfterStore(id) {
+  if (!builtInRoute(id)) return;
+  const routes = loadConfig().routes;
+  if (Array.isArray(routes) && routes.some((r) => r && r.id === id)) return;
+  log(`the credential for "${id}" is stored, but its route is not configured yet — run: vl.js setup (with no route id) to add it.`);
+  process.exitCode = 1;
+}
+
 function setupOne(cfg, options, allowImport) {
   const id = options.routeId;
   if (options.key !== null) {
     if (!storeCredential(id, options.key)) err(`could not store credential for "${id}" — verify vault access and try again.`);
     log(`stored credential for "${id}"`);
+    requireRowAfterStore(id);
     return;
   }
   if (allowImport) {
@@ -1031,6 +1044,7 @@ function setupOne(cfg, options, allowImport) {
     if (native) {
       if (!storeCredential(id, native)) err(`could not import credential for "${id}" — verify vault access and try again.`);
       log(`imported from native config: ${id}`);
+      requireRowAfterStore(id);
       return;
     }
   }
@@ -1047,7 +1061,7 @@ function setupOne(cfg, options, allowImport) {
 
 function readUserConfig() {
   try {
-    const doc = JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+    const doc = JSON.parse(readConfigText());
     return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : {};
   } catch {
     return {};
@@ -1068,7 +1082,7 @@ function readUserConfig() {
 function readUserConfigStrict() {
   let raw;
   try {
-    raw = fs.readFileSync(configPath(), 'utf8');
+    raw = readConfigText();
   } catch (e) {
     if (e && e.code === 'ENOENT') return { ok: true, doc: {} };
     return { ok: false, reason: 'unreadable' };
@@ -1127,7 +1141,15 @@ function writeXiaomiSourceProfile(patch) {
   user.xiaomi = user.xiaomi && typeof user.xiaomi === 'object' && !Array.isArray(user.xiaomi)
     ? { ...user.xiaomi } : {};
   Object.assign(user.xiaomi, patch);
-  saveConfig(user);
+  saveConfigLocked(user);
+}
+
+// config.json is published only under the provider mutation lock (lib/config.js
+// saveConfig). For a writer that does not already hold it.
+function saveConfigLocked(doc) {
+  const lock = lifecycle.acquireMutationLock(dataDir());
+  if (!lock.ok) err('another provider change is in progress, so config.json was not changed — rerun shortly.');
+  try { saveConfig(doc); } finally { lock.release(); }
 }
 
 // Private state reset with the F2 refusal surfaced as one fixed actionable
@@ -1226,7 +1248,7 @@ async function setupXiaomi(cfg, options) {
   // stale rejected-bundle digest or key-failure suppression. Runs BEFORE the
   // config commit so a refusal cannot leave a switched selection behind (N2).
   resetXiaomiStateOrFail();
-  saveConfig(planned);
+  saveConfigLocked(planned);
   log(`configured Chrome cookie source for ${XIAOMI_ROUTE_ID} (profile ${profile})`);
   log('run /view-limits to fetch current usage.');
 }
@@ -1282,7 +1304,7 @@ function removeXiaomi(cfg, routeId) {
   // When another Xiaomi alias still needs the shared source/profile/provider
   // metadata, it is intentionally retained.
   user.routes = remaining;
-  saveConfig(user);
+  saveConfigLocked(user);
   // Drop any cached counts so no orphan row can render old Xiaomi numbers.
   try {
     const cache = readCache();
@@ -1463,14 +1485,8 @@ function lifecycleIo(cfg) {
     saveConfig,
     // Three-way, like the vault probe. A stat that fails for any reason other
     // than ENOENT is NOT absence, so the migration must never treat it as one.
-    configPresence: () => {
-      try {
-        fs.statSync(configPath());
-        return 'present';
-      } catch (e) {
-        return e && e.code === 'ENOENT' ? 'absent' : 'unreadable';
-      }
-    },
+    // An in-flight or interrupted publish (config.json.prev alone) is present.
+    configPresence,
     vault: {
       assertWritable: () => vault.assertWritable(),
       get: (id) => vault.get(id),
@@ -1660,6 +1676,8 @@ function renderLifecycleText(result) {
 }
 
 function emitLifecycleResult(result, json) {
+  // One refusal text for an unresolved migration, wherever it was detected.
+  if (result && result.status === lifecycle.STATUS.MIGRATION_PENDING) result = { ...result, error: MIGRATION_PENDING_REFUSAL };
   process.stdout.write(json
     ? JSON.stringify(result, null, 2) + '\n'
     : renderLifecycleText(result) + '\n');

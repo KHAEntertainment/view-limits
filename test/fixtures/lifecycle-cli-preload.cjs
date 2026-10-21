@@ -11,9 +11,10 @@
 //
 //   VL_FAKE_STATUS        HTTP status for every fetch (default 200)
 //   VL_FAKE_HEADERS       JSON object of response headers
-//   VL_FAIL_CONFIG_RENAME fail the atomic config publication at its rename, as
-//                         a full disk would — the only way to exercise the
-//                         config stage now that saveConfig is temp+rename
+//   VL_FAIL_CONFIG_RENAME fail the atomic config publication at its publish step
+//                         (the create-only link of the temp file), as a full
+//                         disk would — the only way to exercise the config
+//                         stage now that saveConfig is temp + move-aside + link
 //                         (chmod on config.json no longer blocks a rename, and
 //                         a read-only data dir fails earlier, at the lock).
 //   VL_TEST_FORCE_SPAWN   test-only tripwire proof: deliberately attempt a
@@ -71,13 +72,15 @@ if (process.env.VL_TEST_FORCE_SPAWN === '1') {
 }
 
 if (process.env.VL_FAIL_CONFIG_RENAME === '1') {
+  // The publication point is the create-only link of a temp file onto
+  // config.json (lib/config.js saveConfig: move aside, then link). Fail exactly
+  // that step; restoring the moved-aside document is left to work, as a real
+  // ENOSPC on the new data would.
+  const isPublish = (from, to) => path.basename(String(to)) === 'config.json'
+    && path.basename(String(from)).startsWith('config.json.tmp.');
+  const fail = () => { const e = new Error('ENOSPC: no space left on device, link'); e.code = 'ENOSPC'; throw e; };
+  const realLink = fs.linkSync;
+  fs.linkSync = (from, to) => (isPublish(from, to) ? fail() : realLink(from, to));
   const realRename = fs.renameSync;
-  fs.renameSync = (from, to) => {
-    if (path.basename(String(to)) === 'config.json') {
-      const e = new Error('ENOSPC: no space left on device, rename');
-      e.code = 'ENOSPC';
-      throw e;
-    }
-    return realRename(from, to);
-  };
+  fs.renameSync = (from, to) => (isPublish(from, to) ? fail() : realRename(from, to));
 }

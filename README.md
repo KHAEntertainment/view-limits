@@ -551,10 +551,12 @@ catalog of what setup can add:
   cannot be read is never treated as absent, because the document it would
   write is what disables the migration for good.
 
-  For the same reason, **only the migration creates `config.json`; deleting
-  `config.json` by hand while a command runs is unsupported.** The rule is
-  enforced on the write itself: while the file is absent, every other publish
-  is refused, whichever command or code path it comes from. On top of
+  For the same reason, **only the migration creates `config.json`.** The rule is
+  enforced on the write itself, under the provider mutation lock: every other
+  publish first moves the current file aside and then links the new one in
+  create-only, so it can replace the file but never create it — even if
+  `config.json` is deleted while the command runs. That command is then refused
+  (exit `8`) and the next command runs the migration. On top of
   that, while the migration is unresolved (the vault could not be read, the
   lock was busy, or the write failed), every command that could write
   `config.json` — `setup`, `update`, `remove`, `provider add|update|remove`

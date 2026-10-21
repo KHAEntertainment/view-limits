@@ -911,6 +911,11 @@ test('a write that fails mid-publication leaves the previous document intact', (
   const target = path.join(dir, 'config.json');
   const original = JSON.stringify({ routes: [{ id: 'my-route', provider: 'kimi' }], vault: { backend: 'file' } }, null, 1);
   fs.writeFileSync(target, original);
+  // Every publish runs under the provider mutation lock (Issue #81), so the
+  // fixture holds the real one — taken before the fault is injected, since the
+  // lock writes its own ticket. The property under test is unchanged.
+  const lock = lifecycle.acquireMutationLock(dir);
+  assert.ok(lock.ok, 'premise: the test holds the mutation lock');
   const realWrite = fs.writeFileSync;
   try {
     fs.writeFileSync = (file, ...rest) => {
@@ -926,6 +931,7 @@ test('a write that fails mid-publication leaves the previous document intact', (
     assert.throws(() => saveConfig({ routes: [], vault: {} }), /ENOSPC/);
   } finally {
     fs.writeFileSync = realWrite;
+    lock.release();
     if (prevDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = prevDataDir;
   }

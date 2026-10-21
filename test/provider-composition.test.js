@@ -487,14 +487,25 @@ test('vl report --json keeps the raw cache document (v1 JSON compatibility)', ()
   const r = spawnSync(process.execPath, [VL, 'report', '--json'], { env, encoding: 'utf8', timeout: 5000 });
   assert.strictEqual(r.status, 0, r.stderr || String(r.error));
   const parsed = JSON.parse(r.stdout);
-  assert.deepStrictEqual(parsed, cacheDoc, 'report --json is the raw status.json document — full precision');
+  // [#80] Additive pin move: every route status now carries the derived
+  // measurement basis (`basis` is the ONLY new key — this route's balance
+  // basis derives `balance`; all other fields are the raw cache values).
+  const expectedDoc = JSON.parse(JSON.stringify(cacheDoc));
+  expectedDoc.routes['kimi-code-plan'].status.basis = 'balance';
+  assert.deepStrictEqual(parsed, expectedDoc,
+    'report --json is the raw status.json document plus the additive #80 basis — full precision');
   assert.ok(!('caller' in parsed) && !('schemaVersion' in parsed), 'not the snapshot envelope');
-  // [#15] Semantic pin: --json is the unchanged-from-base raw cache
+  // [#15][#80] Semantic pin: --json is the unchanged-from-base raw cache
   // document with no new envelope — equal to status.json after JSON
-  // serialization, NOT byte-identical to the on-disk bytes.
+  // serialization with only the additive derived `basis` key per route,
+  // NOT byte-identical to the on-disk bytes.
   const rawStatus = require('fs').readFileSync(require('path').join(dir, 'status.json'), 'utf8').trim();
-  assert.strictEqual(JSON.stringify(JSON.parse(r.stdout)), JSON.stringify(JSON.parse(rawStatus)),
-    'report --json must be semantically equal to status.json');
+  const rawNoBasis = JSON.parse(JSON.stringify(JSON.parse(rawStatus)));
+  delete rawNoBasis.routes['kimi-code-plan'].status.basis;
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(parsed)), expectedDoc,
+    'report --json must be semantically equal to status.json + additive #80 basis');
+  assert.deepStrictEqual(rawNoBasis, JSON.parse(JSON.stringify(cacheDoc)),
+    'the pinned raw status.json itself stays basis-free (basis is injected at render, not cached)');
 });
 
 console.log('\nprovider composition — v1 compatibility (AC6)');

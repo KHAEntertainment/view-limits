@@ -105,7 +105,7 @@ function assertNoSecrets(root, extra = []) {
     return;
   }
 
-  await test('one Chrome read + exactly one usage/detail pair on success; counts displayed as unknown', async () => {
+  await test('one Chrome read + exactly one usage/detail pair on success; state derived from the token window', async () => {
     const s = scratch('success');
     try {
       let reads = 0;
@@ -116,7 +116,8 @@ function assertNoSecrets(root, extra = []) {
       assert.strictEqual(ctx.xiaomiDeps.transport.calls.length, 2, 'one usage + one detail');
       assert.strictEqual(ctx.xiaomiDeps.transport.calls[0].url.endsWith('/usage'), true);
       assert.strictEqual(ctx.xiaomiDeps.transport.calls[1].url.endsWith('/detail'), true);
-      assert.strictEqual(st.state, 'unknown');
+      assert.strictEqual(st.state, 'healthy', '#80: derived from the fixture token window');
+      assert.strictEqual(st.basis, 'token-count');
       assert.strictEqual(st.windows.length, 1);
       assert.strictEqual(st.windows[0].type, 'tokens');
       assert.strictEqual(st.detail.error, undefined);
@@ -162,7 +163,7 @@ function assertNoSecrets(root, extra = []) {
       const ctx3 = s.ctx();
       const third = await xiaomiSession.fetchStatus(s.cfg, s.cfg.routes[0], ctx3);
       assert.strictEqual(ctx3.xiaomiDeps.transport.calls.length, 2, 'changed same-length token becomes eligible');
-      assert.strictEqual(third.state, 'unknown');
+      assert.strictEqual(third.state, 'healthy', '#80: resumed counts derive the same state');
       assert.strictEqual(third.windows.length, 1, 'recovery resumes with fresh counts');
       assert.strictEqual(readRejected(s.dataDir), null, 'rejection cleared after acceptance');
       assertNoSecrets(s.dataDir, ['z'.repeat(30)]);
@@ -253,7 +254,7 @@ function assertNoSecrets(root, extra = []) {
       assert.strictEqual(xiaomiSession.readSuppressed(s.dataDir), false);
       const third = await xiaomiSession.fetchStatus(s.cfg, s.cfg.routes[0], ctx2);
       assert.strictEqual(reads, 2, 'attempted again after reset');
-      assert.strictEqual(third.state, 'unknown');
+      assert.strictEqual(third.state, 'healthy', '#80: retried read derives state from the token window');
       assert.strictEqual(third.windows.length, 1);
     } finally {
       s.fx.close();

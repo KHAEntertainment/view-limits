@@ -634,10 +634,16 @@ const route = (id) => ({ id, provider: 'fake', account: 'test', match: { model: 
     writeNative(ctx.home, 'native-one.json', NATIVE);
     writeNative(ctx.home, 'native-two.json', REPLACEMENT);
     withVault(ctx, (vault) => vault.set('route-two', OLD));
+    // Bare setup also offers the catalog built-ins (Issue #81), so it opens the
+    // form for them. Stub the spawn, as the update-arguments test does: an
+    // unstubbed run left a real form server listening and ran a real `open`.
+    const spawnLog = path.join(ctx.dir, 'spawn.log');
     const result = run(ctx, ['setup'], { env: {
       NODE_OPTIONS: `--require=${PRELOAD}`,
       VL_FAIL_VAULT_ROUTE: 'route-two',
       VL_THROW_SENTINEL: THROW_SENTINEL,
+      VL_SPAWN_LOG: spawnLog,
+      VL_SPAWN_STUB: '1',
     } });
     assert.strictEqual(result.status, 1);
     assert.match(result.stderr, /imported from native config: route-one/);
@@ -645,6 +651,12 @@ const route = (id) => ({ id, provider: 'fake', account: 'test', match: { model: 
     assertResultSecretsHidden(result);
     assert.strictEqual(withVault(ctx, (vault) => vault.get('route-one')), NATIVE);
     assert.strictEqual(withVault(ctx, (vault) => vault.get('route-two')), OLD);
+    const spawned = fs.existsSync(spawnLog)
+      ? fs.readFileSync(spawnLog, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)) : [];
+    const served = spawned.filter((e) => path.basename(e.args[0] || '') === 'vl.js' && e.args[1] === 'serve');
+    assert.deepStrictEqual(served.map((e) => e.args.slice(4)),
+      [['minimax-token-plan', 'kimi-code-plan', 'glm-coding-plan', 'deepseek-direct', 'openrouter-main']],
+      'the form must be offered for exactly the catalog built-ins');
   });
 })().finally(() => {
   fs.rmSync(ROOT, { recursive: true, force: true });

@@ -229,6 +229,25 @@ test('DEFAULTS ships no routes, and the catalog holds the five built-ins', () =>
   assert.ok(Object.isFrozen(BUILT_IN_ROUTES), 'the catalog must be frozen');
 });
 
+test('the catalog is frozen all the way down: no row and no match is mutable through the export', () => {
+  // Object.isFrozen(BUILT_IN_ROUTES) alone passed while every row was mutable,
+  // and builtInRoute() copies from those rows into setup and the migration.
+  for (const row of BUILT_IN_ROUTES) {
+    assert.ok(Object.isFrozen(row), `catalog row ${row.id} is mutable`);
+    assert.ok(Object.isFrozen(row.match), `catalog row ${row.id}'s match is mutable`);
+  }
+  const kimi = BUILT_IN_ROUTES.find((r) => r.id === 'kimi-code-plan');
+  assert.throws(() => { 'use strict'; kimi.match.model = 'changed-through-export'; }, TypeError,
+    'a strict-mode write through the export must throw');
+  assert.throws(() => { 'use strict'; kimi.provider = 'changed-through-export'; }, TypeError);
+  assert.strictEqual(builtInRoute('kimi-code-plan').match.model, 'kimi',
+    'a mutation through the export reached the copies setup writes');
+  // Copies stay the caller's own, so freezing the source costs callers nothing.
+  const copy = builtInRoute('kimi-code-plan');
+  copy.match.model = 'mine';
+  assert.strictEqual(builtInRoute('kimi-code-plan').match.model, 'kimi');
+});
+
 test('a fresh install loads zero routes, and reading writes nothing', () => {
   const dir = scratch();
   inDataDir(dir, () => {
@@ -545,6 +564,152 @@ test('negative: a configured install with an unreadable vault never shows the mi
       `${args[0]} showed the migration notice on a configured install`);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before, `${args[0]} rewrote config.json`);
   }
+});
+
+section('real CLI — an unresolved migration refuses every command that writes config');
+
+// The miss that sent round 1 back: migrateFromVault aborted correctly, and
+// then `provider add` ran anyway, published config.json, and disarmed the
+// migration for good. So the matrix crosses an unreadable vault with EVERY
+// command, in both directions.
+const REFUSAL = 'view-limits: not run: stored credentials have not been migrated into routes yet (the credential vault could not be read, or another provider change is in progress), and this command would change the configuration before they are. Your stored credentials are untouched and nothing was written. Make sure the vault is accessible (for example, unlock the Keychain), then rerun this command.';
+const CONFIG_WRITERS = [
+  ['setup'],
+  ['setup', 'glm-coding-plan', '--key', KEY_B],
+  ['update'],
+  ['update', 'kimi-code-plan'],
+  ['remove', 'kimi-code-plan'],
+  ['provider', 'add', '--label', 'new-plan', '--provider', 'stepplan', '--recipe', 'stepfun-plan', '--keep-unmonitored'],
+  ['provider', 'update', 'custom-new-plan', '--match-model', 'x'],
+  ['provider', 'remove', 'kimi-code-plan'],
+];
+const READERS = [
+  ['refresh'], ['refresh', '--quiet', '--session-start'], ['check', 'kimi-code-plan'], ['session-start'],
+  ['report'], ['status'], ['snapshot', '--json'], ['recommend', '--json'], ['provider', 'list', '--json'],
+];
+
+function assertRefused(dir, args, r) {
+  const label = args.join(' ');
+  assert.strictEqual(r.status, 8, `${label}: expected the migration-pending refusal (exit 8); got ${r.status}: ${r.stderr}`);
+  assert.strictEqual(fs.existsSync(path.join(dir, 'config.json')), false, `${label} wrote config.json`);
+  const text = `${r.stdout}${r.stderr}`;
+  assert.ok(!text.includes(dir), `${label}: the refusal carried a data-dir path`);
+  assert.doesNotMatch(text, /EACCES|EPERM|ENOENT|Error:|sk-/, `${label}: the refusal carried errno, error text or credential material`);
+}
+
+test('with the vault unreadable, every config-writing command is refused: exit 8, nothing written', () => {
+  if (IS_ROOT) { console.log('    (skipped: root ignores mode bits)'); return; }
+  const dir = upgradeWith('kimi-code-plan');
+  withLockedSecrets(dir, () => {
+    for (const args of CONFIG_WRITERS) {
+      const r = run(dir, args);
+      assertRefused(dir, args, r);
+      assert.ok(r.stderr.includes(`${REFUSAL}\n`), `${args.join(' ')}: the refusal text changed shape: ${r.stderr}`);
+    }
+    // --json keeps stdout machine-readable: one document with a stable status.
+    const j = run(dir, ['provider', 'add', '--label', 'new-plan', '--provider', 'stepplan',
+      '--recipe', 'stepfun-plan', '--keep-unmonitored', '--json']);
+    assertRefused(dir, ['provider', 'add', '--json'], j);
+    assert.deepStrictEqual(j.json, { command: 'add', ok: false, status: 'migration-pending', error: REFUSAL.slice('view-limits: '.length) });
+  });
+  // Access returns: the migration was never disarmed, so it completes.
+  const later = run(dir, ['provider', 'list', '--json']);
+  assert.strictEqual(later.status, 0, later.stderr);
+  assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan'], 'the stored credential lost its route');
+});
+
+test('with the vault unreadable, read-only and cache-only commands still run and write no config', () => {
+  if (IS_ROOT) { console.log('    (skipped: root ignores mode bits)'); return; }
+  const dir = upgradeWith('kimi-code-plan');
+  withLockedSecrets(dir, () => {
+    for (const args of READERS) {
+      const r = run(dir, args);
+      assert.notStrictEqual(r.status, 8, `${args.join(' ')} was refused, but it never writes config`);
+      assert.notStrictEqual(r.status, null, `${args.join(' ')} timed out`);
+      assert.ok(!r.stderr.includes('not run: stored credentials'), `${args.join(' ')} printed the refusal`);
+      assert.strictEqual(fs.existsSync(path.join(dir, 'config.json')), false, `${args.join(' ')} wrote config.json`);
+    }
+  });
+});
+
+test('a migration that is lock-busy refuses config writers the same way (keyed on retry, not the reason)', () => {
+  const dir = upgradeWith('kimi-code-plan');
+  const held = lifecycle.acquireMutationLock(dir);
+  assert.ok(held.ok, 'premise: the test holds the mutation lock');
+  try {
+    const args = ['provider', 'add', '--label', 'new-plan', '--provider', 'stepplan', '--recipe', 'stepfun-plan', '--keep-unmonitored'];
+    const r = run(dir, args);
+    assertRefused(dir, args, r);
+    assert.notStrictEqual(r.status, 6, 'an unresolved migration is not an ordinary lock-busy');
+  } finally {
+    held.release();
+  }
+});
+
+test('negative: a READABLE vault never triggers the refusal', () => {
+  for (const dir of [upgradeWith('kimi-code-plan'), scratch()]) {
+    const r = run(dir, ['provider', 'add', '--label', 'new-plan', '--provider', 'stepplan',
+      '--recipe', 'stepfun-plan', '--keep-unmonitored', '--json']);
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('not run: stored credentials'));
+    assert.ok(routeIds(dir).includes('custom-new-plan'));
+  }
+});
+
+section('real CLI — a stored credential whose row failed to materialize is repaired by bare setup');
+
+// The other four built-ins are configured and stored, so bare setup has
+// nothing missing and opens no form; only kimi can be row-less.
+function setUpOthers() {
+  const others = BUILT_IN_ROUTES.map((r) => r.id).filter((id) => id !== 'kimi-code-plan');
+  const dir = seeded(others.map((id) => builtInRoute(id)));
+  inDataDir(dir, () => { for (const id of others) vault.set(id, `sk-${id}-TEST-81`); });
+  return dir;
+}
+
+function rowlessKimi() {
+  const dir = setUpOthers();
+  const held = lifecycle.acquireMutationLock(dir);
+  assert.ok(held.ok, 'premise: the test holds the mutation lock');
+  const r = run(dir, ['setup', 'kimi-code-plan', '--key', KEY_A]);
+  assert.match(r.stderr, /credential stored, but another provider mutation holds the lock — rerun to add the "kimi-code-plan" route\./);
+  assert.strictEqual(inDataDir(dir, () => vault.get('kimi-code-plan')), KEY_A, 'premise: the credential was stored');
+  assert.ok(!routeIds(dir).includes('kimi-code-plan'), 'premise: the row did not materialize');
+  return { dir, held };
+}
+
+test('lock busy after the vault write, then a bare setup rerun, and the row exists', () => {
+  const { dir, held } = rowlessKimi();
+  // Still busy: bare setup must not claim everything is present.
+  const busy = run(dir, ['setup']);
+  assert.strictEqual(busy.status, 1, busy.stderr);
+  assert.match(busy.stderr, /stored credentials still have no route: kimi-code-plan/);
+  assert.doesNotMatch(busy.stderr, /all credentials present/, 'a false "all present" while a credential has no row');
+  held.release();
+  const r = run(dir, ['setup']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.ok(routeIds(dir).includes('kimi-code-plan'), 'bare setup did not repair the row its own message promised');
+  assert.match(r.stderr, /added the missing route for stored credentials: kimi-code-plan/);
+  assert.match(r.stderr, /all credentials present\./);
+  assert.deepStrictEqual(r.j.read(r.j.browser), [], 'nothing was missing, so no form should open');
+});
+
+test('update points a row-less stored credential at bare setup instead of "unknown route"', () => {
+  const { dir, held } = rowlessKimi();
+  held.release();
+  const one = run(dir, ['update', 'kimi-code-plan']);
+  assert.strictEqual(one.status, 1);
+  assert.match(one.stderr, /"kimi-code-plan" has a stored credential but no route yet — run: vl\.js setup \(with no route id\) to add it\./);
+  assert.doesNotMatch(one.stderr, /unknown route/);
+  // Nothing else stored, so bare update has no form to open.
+  const alone = scratch();
+  fs.writeFileSync(path.join(alone, 'config.json'), JSON.stringify({ routes: [], vault: { backend: 'file' }, gate: { mode: 'off' } }));
+  inDataDir(alone, () => vault.set('kimi-code-plan', KEY_A));
+  const bare = run(alone, ['update']);
+  assert.strictEqual(bare.status, 0, bare.stderr);
+  assert.match(bare.stderr, /stored credentials with no route yet: kimi-code-plan — run: vl\.js setup \(with no route id\) to add them\./);
+  assert.doesNotMatch(bare.stderr, /no credentials to update/, 'a false "no credentials" while one is stored');
+  assert.ok(!routeIds(alone).includes('kimi-code-plan'), 'update must point at the repair, not perform it');
 });
 
 section('real CLI — lock order: migration, then the command, in one process');

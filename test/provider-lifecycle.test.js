@@ -779,6 +779,7 @@ test('every status maps to a stable code, and 1 stays reserved for bad args', ()
       'persist-failed': 5,
       'lock-busy': 6,
       'not-found': 7,
+      'migration-pending': 8,
     },
   );
   assert.strictEqual(lifecycle.exitCodeFor('something-unknown'), 1);

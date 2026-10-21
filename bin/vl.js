@@ -609,6 +609,18 @@ function offerableRoutes(cfg) {
   return [...byId.values()];
 }
 
+// Shipped built-ins whose credential is stored but which have no row in
+// config.json. The drift setup exists to prevent, and the state a row that
+// failed to materialize after its vault write leaves behind. A vault that
+// cannot answer is treated as "nothing found", never as a reason to throw.
+function rowlessCredentials(cfg) {
+  const configured = new Set((Array.isArray(cfg.routes) ? cfg.routes : []).map((r) => r && r.id));
+  return BUILT_IN_ROUTES.map((r) => r.id).filter((id) => {
+    if (configured.has(id)) return false;
+    try { return vault.has(id); } catch { return false; }
+  });
+}
+
 function logWriteResults(saved, failed) {
   if (saved.length) log(`stored credentials for: ${saved.join(', ')}`);
   if (failed.length) {
@@ -966,6 +978,12 @@ function parseCredentialArgs(cfg, args, opts = {}) {
   const known = parsed.routeId === XIAOMI_ROUTE_ID
     || offerable.some((route) => route.id === parsed.routeId);
   if (parsed.routeId && !known) {
+    // A shipped built-in whose credential is stored but whose row is missing
+    // (a row that failed to materialize after the vault write) is not
+    // "unknown": the repair exists, so name it instead.
+    if (rowlessCredentials(cfg).includes(parsed.routeId)) {
+      err(`"${parsed.routeId}" has a stored credential but no route yet — run: vl.js setup (with no route id) to add it.`);
+    }
     err(`unknown route "${parsed.routeId}" (known: ${offerable.map((route) => route.id).join(', ')})`);
   }
   if (parsed.key !== null && !parsed.routeId) err('--key requires a route id.');
@@ -1275,6 +1293,13 @@ function setup(args) {
   // Single route: `vl.js setup <routeId> [--key K]`
   if (options.routeId) return setupOne(cfg, options, true);
 
+  // Repair first: a shipped route whose credential is stored but whose row
+  // never materialized (the lock was busy, or config.json was unreadable, after
+  // the vault write) gets its row now. materializeBuiltInRoute is idempotent,
+  // and this is the rerun its own failure message tells the user to do.
+  const rowlessBefore = rowlessCredentials(cfg);
+  for (const id of rowlessBefore) materializeBuiltInRoute(id);
+
   // Initial setup: re-import native, then open the form for whatever's missing.
   const missing = [];
   const imported = [];
@@ -1295,8 +1320,17 @@ function setup(args) {
     log(`could not import credentials for: ${failed.join(', ')} — verify vault access and try again.`);
     process.exitCode = 1;
   }
+  // Report from the POST-state, re-read from disk: "present" is only true if
+  // every stored credential also has its row.
+  const rowlessAfter = rowlessCredentials(loadConfig());
+  const repaired = rowlessBefore.filter((id) => !rowlessAfter.includes(id));
+  if (repaired.length) log(`added the missing route for stored credentials: ${repaired.join(', ')}`);
+  if (rowlessAfter.length) {
+    log(`stored credentials still have no route: ${rowlessAfter.join(', ')} — rerun setup once no other provider change is running and config.json is readable.`);
+    process.exitCode = 1;
+  }
   if (!missing.length) {
-    if (!failed.length) log('all credentials present.');
+    if (!failed.length && !rowlessAfter.length) log('all credentials present.');
     return;
   }
   log(`missing credentials for: ${missing.join(', ')}`);
@@ -1329,8 +1363,10 @@ async function update(args) {
 
   // Rotate existing credentials: open the form for configured routes.
   const existing = cfg.routes.filter((r) => !isXiaomi(r) && vault.has(r.id));
+  const rowless = rowlessCredentials(cfg);
+  if (rowless.length) log(`stored credentials with no route yet: ${rowless.join(', ')} — run: vl.js setup (with no route id) to add them.`);
   if (!existing.length) {
-    if (!xiaomiConfigured) log('no credentials to update — run /view-limits:setup first.');
+    if (!xiaomiConfigured && !rowless.length) log('no credentials to update — run /view-limits:setup first.');
     return;
   }
   log(`updating credentials for: ${existing.map((r) => r.id).join(', ')}`);
@@ -1871,6 +1907,20 @@ const MIGRATING_COMMANDS = new Set(['setup', 'update', 'provider', 'remove', 're
 // no credential material, because it reaches the user on the SessionStart path.
 const MIGRATION_VAULT_UNREADABLE = 'the credential vault could not be read, so stored credentials were not migrated into routes and no configuration was written — this retries on the next command.';
 
+// Commands that can write config.json. While the migration is unresolved they
+// are refused: any document they published would disarm the migration for
+// good, and the credentials it exists to rescue would never get their routes.
+// Read-only and cache-only commands (refresh, check, session-start, report,
+// status, snapshot, recommend, gate, provider list) never write config and
+// keep running.
+function writesConfig(command, rest) {
+  if (command === 'provider') return ['add', 'update', 'remove'].includes(rest[0]);
+  return command === 'setup' || command === 'update' || command === 'remove';
+}
+
+// Fixed text: no path, no errno, no vault error text, no credential material.
+const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been migrated into routes yet (the credential vault could not be read, or another provider change is in progress), and this command would change the configuration before they are. Your stored credentials are untouched and nothing was written. Make sure the vault is accessible (for example, unlock the Keychain), then rerun this command.';
+
 // It fires only when config.json is genuinely absent, and the document it
 // writes is what makes it stop firing. Notices go to stderr so a `--json`
 // command's stdout stays machine-readable. `session-start` is the exception:
@@ -1887,6 +1937,17 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     process.stderr.write('view-limits: another provider change is in progress, so existing routes were not migrated yet — this retries on the next command.\n');
   } else if (migration.reason === 'write-failed') {
     process.stderr.write('view-limits: could not write the migrated route list — nothing was changed; rerun once the data dir is writable.\n');
+  }
+  // One predicate, keyed on `retry` rather than on the reason string, so a
+  // future retry reason cannot be forgotten here.
+  if (migration.retry === true && writesConfig(cmd, args)) {
+    const status = lifecycle.STATUS.MIGRATION_PENDING;
+    if (cmd === 'provider' && args.includes('--json')) {
+      process.stdout.write(JSON.stringify({ command: args[0], ok: false, status, error: MIGRATION_PENDING_REFUSAL }, null, 2) + '\n');
+    } else {
+      process.stderr.write(`view-limits: ${MIGRATION_PENDING_REFUSAL}\n`);
+    }
+    process.exit(lifecycle.exitCodeFor(status));
   }
 }
 

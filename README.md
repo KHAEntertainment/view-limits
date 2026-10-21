@@ -517,7 +517,11 @@ catalog of what setup can add:
   `vl.js setup kimi-code-plan --key …`, the browser form, the headless prompt
   and the native-config import all do it, so "has a credential" and
   "configured" cannot drift apart. `vl.js provider add` does the same for a
-  custom route. Setup is the only command that *offers* the catalog: the
+  custom route. If the row cannot be written after the credential is stored
+  (another provider change holds the lock, or `config.json` is unreadable),
+  a bare `vl.js setup` adds it on the next run, and it reports "all
+  credentials present" only once every stored credential has its row.
+  Setup is the only command that *offers* the catalog: the
   browser form accepts a built-in with no row yet and creates the row when you
   submit a key. `update`, `check` and `provider update` work only on routes
   that are already configured.
@@ -546,6 +550,16 @@ catalog of what setup can add:
   one-line notice, and tries again on the next such command. A credential that
   cannot be read is never treated as absent, because the document it would
   write is what disables the migration for good.
+
+  For the same reason, while the migration is unresolved (the vault could not
+  be read, the lock was busy, or the write failed), every command that could
+  write `config.json` — `setup`, `update`, `remove` and
+  `provider add|update|remove` — is **refused with exit `8`** and writes
+  nothing. Publishing any document then would disable the migration and leave
+  the stored credentials without routes. Your credentials are untouched; make
+  the vault accessible and rerun. Read-only and cache-only commands
+  (`refresh`, `check`, `session-start`, `report`, `status`,
+  `snapshot`, `recommend`, `gate`, `provider list`) keep running.
 
   The migration takes the same mutation lock as `provider add|update|remove`
   and setup, and re-checks that `config.json` is still absent once it holds the
@@ -645,8 +659,8 @@ vl.js recommend --json            # advisory recommendation (Jev-dormant by defa
 | `check <routeId>` | `0` (one JSON `NormalizedStatus` on stdout) | `1` on unknown route, missing credential, or classified adapter error (one-line `view-limits: check <id> failed: …` on stderr; never a stack trace) |
 | `snapshot --json` | `0` (one pretty JSON envelope on stdout) | `1` when `--json` is missing or any other flag is passed |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |
-| `setup` / `update` / `remove` | `0` | `1` on bad args or credential-storage failure |
-| `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found — see [the lifecycle section](#adding-updating-and-removing-a-custom-provider) |
+| `setup` / `update` / `remove` | `0` | `1` on bad args or credential-storage failure; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)) |
+| `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)) — see [the lifecycle section](#adding-updating-and-removing-a-custom-provider) |
 | `session-start` / `config` | `0` | `0` (purely advisory; surface failures via the receipt/sidecar instead) |
 | unknown command | n/a | `1` with the full usage line on stderr |
 

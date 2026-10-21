@@ -186,7 +186,7 @@ function settings(mode, injectContext) {
         fs.rmSync(configPath, { force: true });
         const result = run(refreshArgs);
         assert.strictEqual(result.stdout, '');
-        assert.match(result.stderr, /credential vault could not be read, so existing routes were not migrated — nothing was changed; this retries on the next command\./);
+        assert.strictEqual(result.stderr, 'view-limits: the credential vault could not be read, so stored credentials were not migrated into routes and no configuration was written — this retries on the next command.\n');
         assert.ok(!fs.existsSync(configPath), 'an unreadable vault must not publish a config');
         continue;
       }

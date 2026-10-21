@@ -1414,11 +1414,12 @@ function lifecycleIo(cfg) {
     vault: {
       assertWritable: () => vault.assertWritable(),
       get: (id) => vault.get(id),
-      // DIRECT on purpose — never route this through storeCredential(). The
-      // lifecycle calls it while HOLDING the mutation lock, and storeCredential
-      // takes that same lock to materialize a built-in row. Routing it there
-      // would nest the acquire, and since the lock never waits, every
-      // `provider add` would then fail lock-busy.
+      // DIRECT on purpose — never route this through storeCredential(). That
+      // helper returns false instead of throwing, so a failed write would be
+      // read as stored and a route published with no credential behind it; and
+      // for a shipped id it takes the mutation lock to materialize a row, which
+      // the lifecycle already HOLDS here — the lock never waits, so that nested
+      // acquire would fail busy.
       set: (id, secret) => vault.set(id, secret),
       remove: (id) => vault.remove(id),
       // Strict three-way presence. The lifecycle needs it to tell an absent
@@ -1821,6 +1822,19 @@ function sessionStart() {
     process.exit(0);
   }
   if (hasCreds) process.exit(0);
+  // The one-time migration could not run this session. "No credentials
+  // configured" would be false on an upgrade whose keys are stored but
+  // unreadable, so say what actually happened. systemMessage is shown to the
+  // user and never enters the model's context; the text is fixed, with no
+  // path, error text or credential material in it.
+  if (migration && migration.reason === 'vault-unreadable') {
+    process.stdout.write(JSON.stringify({ systemMessage: `view-limits: ${MIGRATION_VAULT_UNREADABLE}` }));
+    process.exit(0);
+  }
+  // Another process (the async SessionStart refresh) holds the migration
+  // lock and may be migrating right now: the state is in flux, so say nothing
+  // rather than a nudge that could be wrong. It is re-evaluated next session.
+  if (migration && migration.reason === 'lock-busy') process.exit(0);
   process.stdout.write(JSON.stringify({
     systemMessage: 'view-limits: no credentials configured yet. Run /view-limits:setup to add your provider keys.',
   }));
@@ -1853,15 +1867,22 @@ const hasFlag = (n) => args.includes(n);
 // consequence of keeping cache-only reads write-free.
 const MIGRATING_COMMANDS = new Set(['setup', 'update', 'provider', 'remove', 'refresh', 'check', 'session-start']);
 
+// Fixed text, pinned verbatim by the tests: no path, no vault error text and
+// no credential material, because it reaches the user on the SessionStart path.
+const MIGRATION_VAULT_UNREADABLE = 'the credential vault could not be read, so stored credentials were not migrated into routes and no configuration was written — this retries on the next command.';
+
 // It fires only when config.json is genuinely absent, and the document it
 // writes is what makes it stop firing. Notices go to stderr so a `--json`
-// command's stdout stays machine-readable.
+// command's stdout stays machine-readable. `session-start` is the exception:
+// a hook's stderr is not shown to the user, so it reports through its own
+// systemMessage instead (see sessionStart).
+let migration = null;
 if (MIGRATING_COMMANDS.has(cmd)) {
-  const migration = lifecycle.migrateFromVault(lifecycleIo(loadConfig()));
+  migration = lifecycle.migrateFromVault(lifecycleIo(loadConfig()));
   if (migration.migrated && migration.ids.length) {
     process.stderr.write(`view-limits: migrated existing credentials into routes: ${migration.ids.join(', ')}\n`);
   } else if (migration.reason === 'vault-unreadable') {
-    process.stderr.write('view-limits: the credential vault could not be read, so existing routes were not migrated — nothing was changed; this retries on the next command.\n');
+    if (cmd !== 'session-start') process.stderr.write(`view-limits: ${MIGRATION_VAULT_UNREADABLE}\n`);
   } else if (migration.reason === 'lock-busy') {
     process.stderr.write('view-limits: another provider change is in progress, so existing routes were not migrated yet — this retries on the next command.\n');
   } else if (migration.reason === 'write-failed') {

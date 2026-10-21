@@ -470,7 +470,7 @@ test('a TRANSIENTLY UNREADABLE real vault migrates nothing, and migrates once it
     assert.deepStrictEqual(r.json.routes, []);
     assert.strictEqual(fs.existsSync(path.join(dir, 'config.json')), false,
       'an unreadable vault published a config, which disarms the migration forever');
-    assert.match(r.stderr, /vault could not be read/);
+    assert.strictEqual(r.stderr, `${UNREADABLE_NOTICE}\n`, 'the notice changed shape or gained text');
   } finally {
     fs.chmodSync(secrets, 0o700);
   }
@@ -494,6 +494,56 @@ test('routes: [] and {} are choices, never resurrected from the vault', () => {
     fs.writeFileSync(path.join(dir, 'config.json'), doc);
     run(dir, ['provider', 'list', '--json']);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), doc, `${doc} was rewritten`);
+  }
+});
+
+section('real CLI — the unreadable-vault notice: where it lands, what it says, when');
+
+// Verbatim on purpose: a notice that silently changes shape is a user-facing
+// regression, so any rewording has to change this line too.
+const UNREADABLE_NOTICE = 'view-limits: the credential vault could not be read, so stored credentials were not migrated into routes and no configuration was written — this retries on the next command.';
+const NO_CREDS_NUDGE = JSON.stringify({ systemMessage: 'view-limits: no credentials configured yet. Run /view-limits:setup to add your provider keys.' });
+
+function withLockedSecrets(dir, fn) {
+  const secrets = path.join(dir, 'secrets');
+  fs.chmodSync(secrets, 0o000);
+  try { return fn(); } finally { fs.chmodSync(secrets, 0o700); }
+}
+
+test('session-start reports an unreadable vault in its systemMessage, exactly, and nowhere else', () => {
+  if (IS_ROOT) { console.log('    (skipped: root ignores mode bits)'); return; }
+  const dir = upgradeWith('kimi-code-plan');
+  const r = withLockedSecrets(dir, () => run(dir, ['session-start']));
+  assert.strictEqual(r.status, 0, r.stderr);
+  // stdout is the hook's JSON. systemMessage is shown to the user; nothing
+  // goes to additionalContext, so nothing enters the model's context.
+  assert.strictEqual(r.stdout, JSON.stringify({ systemMessage: UNREADABLE_NOTICE }));
+  assert.strictEqual(r.stderr, '', 'session-start must not also print the notice to stderr');
+  assert.ok(!r.stdout.includes(dir), 'the notice carried a data-dir path');
+  assert.doesNotMatch(r.stdout, /EACCES|EPERM|Error|sk-/, 'the notice carried error text or credential material');
+  assert.strictEqual(fs.existsSync(path.join(dir, 'config.json')), false, 'an unreadable vault published a config');
+});
+
+test('negative: a readable fresh install gets the setup nudge, never the unreadable notice', () => {
+  const dir = scratch();
+  const r = run(dir, ['session-start']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(r.stdout, NO_CREDS_NUDGE);
+  assert.strictEqual(r.stderr, '');
+  assert.deepStrictEqual(routeIds(dir), [], 'the fresh install was not resolved to routes: []');
+});
+
+test('negative: a configured install with an unreadable vault never shows the migration notice', () => {
+  if (IS_ROOT) { console.log('    (skipped: root ignores mode bits)'); return; }
+  const dir = upgradeWith('kimi-code-plan');
+  run(dir, ['provider', 'list', '--json']);
+  assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan'], 'premise: the install is configured');
+  const before = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+  for (const args of [['session-start'], ['provider', 'list', '--json']]) {
+    const r = withLockedSecrets(dir, () => run(dir, args));
+    assert.ok(!`${r.stdout}${r.stderr}`.includes('could not be read, so stored credentials'),
+      `${args[0]} showed the migration notice on a configured install`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before, `${args[0]} rewrote config.json`);
   }
 });
 

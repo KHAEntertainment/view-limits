@@ -300,6 +300,36 @@ test('rerunning after the failure completes the add', () => {
   assert.ok(routeById(dir, 'custom-acme-plan'));
 });
 
+// The lifecycle's vault.set must be the REAL write, so a write that throws
+// reaches it. Routed through bin/vl.js storeCredential() — which returns false
+// instead of throwing, and also takes the mutation lock the lifecycle already
+// holds — a failed write was read as success and a route was published with
+// no credential behind it. Nothing is injected: secrets/ exists and is r-x, so
+// the real file vault's temp-file write fails with EACCES.
+test('a vault write that really fails stops the add at the vault stage (real vault)', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    console.log('    (skipped: running as root, where mode bits do not deny)');
+    return;
+  }
+  const dir = freshDir();
+  const secrets = path.join(dir, 'secrets');
+  fs.mkdirSync(secrets, { mode: 0o700 });
+  fs.chmodSync(secrets, 0o500);
+  try {
+    const r = run(dir, ADD_ACME);
+    assert.strictEqual(r.status, 5, `a failed vault write was not reported: ${r.stdout}${r.stderr}`);
+    assert.strictEqual(r.json.status, 'persist-failed');
+    assert.strictEqual(r.json.stage, 'vault');
+    assert.strictEqual(routeById(dir, 'custom-acme-plan'), null,
+      'a route was published with no credential behind it');
+    assert.doesNotMatch(r.stderr, /holds the lock/, 'the credential write re-entered the mutation lock');
+    assert.ok(!JSON.stringify(r.json).includes(KEY_A), 'the credential appeared in the result');
+  } finally {
+    fs.chmodSync(secrets, 0o700);
+  }
+  assert.deepStrictEqual(secretFiles(dir), [], 'a partial credential file was left behind');
+});
+
 test('a failed publication leaves the existing config.json byte-identical', () => {
   const dir = freshDir();
   assert.strictEqual(run(dir, ADD_ACME).status, 0);

@@ -248,6 +248,54 @@ test('the catalog is frozen all the way down: no row and no match is mutable thr
   assert.strictEqual(builtInRoute('kimi-code-plan').match.model, 'kimi');
 });
 
+section('the write-level guard: only the migration may create config.json');
+
+// The invariant itself, not the dispatcher wiring: an absent config.json means
+// the migration has not resolved, so ANY publish that would create the file is
+// refused — whatever command, list or caller it came from.
+test('saveConfig refuses to CREATE config.json without the migration capability', () => {
+  const dir = scratch();
+  inDataDir(dir, () => {
+    assert.throws(() => saveConfig({ routes: [] }), (e) => e.code === 'CONFIG_MIGRATION_PENDING');
+    assert.throws(() => saveConfig({ routes: [] }, { capability: { capability: 'view-limits first config publish' } }),
+      (e) => e.code === 'CONFIG_MIGRATION_PENDING', 'a look-alike capability must not pass: identity, not shape');
+    assert.throws(() => saveConfig({ routes: [] }, { capability: 'view-limits first config publish' }),
+      (e) => e.code === 'CONFIG_MIGRATION_PENDING', 'a string must not pass');
+    assert.strictEqual(fs.existsSync(configPath()), false, 'a refused publish created config.json');
+    assert.deepStrictEqual(fs.readdirSync(dir), [], 'a refused publish left a temp file or created anything');
+    saveConfig({ routes: [] }, { capability: config.FIRST_PUBLISH });
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(configPath(), 'utf8')), { routes: [] });
+    // Once it exists, ordinary publishers replace it as before.
+    saveConfig({ routes: [], gate: { mode: 'off' } });
+    assert.deepStrictEqual(JSON.parse(fs.readFileSync(configPath(), 'utf8')), { routes: [], gate: { mode: 'off' } });
+  });
+});
+
+test('the publish paths a command reaches are refused too, with the migration pending', async () => {
+  // The lifecycle's own publish, called directly with no dispatcher in front:
+  // persistRoute -> io.saveConfig must not create config.json.
+  const dir = scratch();
+  const prev = { data: process.env.CLAUDE_PLUGIN_DATA, key: process.env.VIEW_LIMITS_MASTER_KEY };
+  process.env.CLAUDE_PLUGIN_DATA = dir;
+  process.env.VIEW_LIMITS_MASTER_KEY = MASTER;
+  try {
+    const r = await lifecycle.setupProvider({
+      label: 'direct', provider: 'stepplan', recipe: 'stepfun-plan', retention: lifecycle.RETENTION.KEEP,
+    }, {
+      effectiveRoutes: () => [], readUserConfig: () => ({}), readUserConfigStrict: () => ({ ok: true, doc: {} }),
+      saveConfig, lock: () => lifecycle.acquireMutationLock(dir),
+      vault: { assertWritable() {}, get: () => null, set() {}, remove() {}, probe: () => 'absent' },
+      readCache: () => ({ routes: {} }), writeCache() {},
+    });
+    assert.strictEqual(r.status, lifecycle.STATUS.PERSIST_FAILED, `the lifecycle publish was not refused: ${JSON.stringify(r)}`);
+    assert.strictEqual(r.stage, 'config');
+    assert.strictEqual(fs.existsSync(configPath()), false, 'the lifecycle created config.json with the migration pending');
+  } finally {
+    if (prev.data === undefined) delete process.env.CLAUDE_PLUGIN_DATA; else process.env.CLAUDE_PLUGIN_DATA = prev.data;
+    if (prev.key === undefined) delete process.env.VIEW_LIMITS_MASTER_KEY; else process.env.VIEW_LIMITS_MASTER_KEY = prev.key;
+  }
+});
+
 test('a fresh install loads zero routes, and reading writes nothing', () => {
   const dir = scratch();
   inDataDir(dir, () => {
@@ -400,7 +448,10 @@ test('a provider add that completes before the migration locks is never erased',
           addDone = true;
           const theirs = lifecycle.acquireMutationLock(dir);
           assert.ok(theirs.ok, 'premise: the concurrent writer took the lock');
-          saveConfig({ routes: [{ id: 'custom-theirs', provider: 'stepplan', monitor: { recipe: 'stepfun-plan' } }] });
+          // Another process whose migration won: only a migration may CREATE
+          // config.json (the write-level guard), so it holds the capability.
+          saveConfig({ routes: [{ id: 'custom-theirs', provider: 'stepplan', monitor: { recipe: 'stepfun-plan' } }] },
+            { capability: config.FIRST_PUBLISH });
           assert.strictEqual(theirs.release(), true);
         }
         return lifecycle.acquireMutationLock(dir);
@@ -656,6 +707,26 @@ test('negative: a READABLE vault never triggers the refusal', () => {
   }
 });
 
+test('a DIRECTLY invoked serve is refused before it listens, and writes nothing', async () => {
+  // Not through setup: a parent-path test passes while the bypass stays open.
+  // `serve <port> <nonce> <ids…>` is a command the dispatcher accepts, and its
+  // POST materializes a built-in row, so it is a config writer like the rest.
+  if (IS_ROOT) { console.log('    (skipped: root ignores mode bits)'); return; }
+  const dir = upgradeWith('kimi-code-plan');
+  const port = await freePort();
+  const r = withLockedSecrets(dir, () => run(dir, ['serve', String(port), 'nonce-81', 'glm-coding-plan']));
+  assert.notStrictEqual(r.status, null, 'serve started listening instead of refusing (timed out)');
+  assertRefused(dir, ['serve'], r);
+  assert.ok(r.stderr.includes(`${REFUSAL}\n`), `the refusal text changed shape: ${r.stderr}`);
+  const probe = await request(port, 'GET');
+  assert.strictEqual(probe.status, 0, 'something is listening on the refused form port');
+  assert.strictEqual(probe.error, 'ECONNREFUSED');
+  // Access returns: the migration was never disarmed.
+  const later = run(dir, ['provider', 'list', '--json']);
+  assert.strictEqual(later.status, 0, later.stderr);
+  assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan']);
+});
+
 section('real CLI — a stored credential whose row failed to materialize is repaired by bare setup');
 
 // The other four built-ins are configured and stored, so bare setup has
@@ -710,6 +781,28 @@ test('update points a row-less stored credential at bare setup instead of "unkno
   assert.match(bare.stderr, /stored credentials with no route yet: kimi-code-plan — run: vl\.js setup \(with no route id\) to add them\./);
   assert.doesNotMatch(bare.stderr, /no credentials to update/, 'a false "no credentials" while one is stored');
   assert.ok(!routeIds(alone).includes('kimi-code-plan'), 'update must point at the repair, not perform it');
+});
+
+test('a credential removed between the repair scan and its lock gets no row, and no "added" report', () => {
+  // Deterministic, not a sleep: the preload runs a REAL `provider remove` to
+  // completion at setup's first lock acquire — after the repair loop decided
+  // Kimi was owed a row, before materializeBuiltInRoute holds the lock.
+  const dir = setUpOthers();
+  inDataDir(dir, () => vault.set('kimi-code-plan', KEY_A));
+  assert.ok(!routeIds(dir).includes('kimi-code-plan'), 'premise: kimi is row-less');
+  const hook = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-hook-')), 'hook');
+  const r = run(dir, ['setup', '--headless'], journals(), {
+    VL_TEST_BEFORE_FIRST_LOCK: JSON.stringify(['provider', 'remove', 'kimi-code-plan', '--json']),
+    VL_TEST_HOOK_JOURNAL: hook,
+  });
+  assert.notStrictEqual(r.status, null, `setup timed out: ${r.stderr}`);
+  const fired = fs.existsSync(hook) ? fs.readFileSync(hook, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  assert.strictEqual(fired.length, 1, 'premise: the interleaved remove never ran');
+  assert.strictEqual(fired[0].status, 0, `premise: the interleaved remove failed: ${fired[0].stdout}`);
+  assert.strictEqual(inDataDir(dir, () => vault.probe('kimi-code-plan')), 'absent', 'premise: the remove cleared the credential');
+  assert.ok(!routeIds(dir).includes('kimi-code-plan'), 'a row was published for a credential that is no longer stored');
+  assert.match(r.stderr, /the "kimi-code-plan" credential is no longer stored, so its route was not added\./);
+  assert.doesNotMatch(r.stderr, /added the missing route/, 'a false "added" report for a row that does not exist');
 });
 
 section('real CLI — lock order: migration, then the command, in one process');

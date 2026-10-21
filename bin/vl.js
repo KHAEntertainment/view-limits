@@ -575,6 +575,20 @@ function materializeBuiltInRoute(id) {
     return;
   }
   try {
+    // Re-check the prerequisite INSIDE the lock. A caller decided this row was
+    // owed before it held the lock (bare setup's repair scans first), and a
+    // concurrent `provider remove` can delete the credential in between. A row
+    // is published only for a credential that is stored right now.
+    let state;
+    try { state = vault.probe(id); } catch { state = 'unreadable'; }
+    if (state === 'absent') {
+      log(`the "${id}" credential is no longer stored, so its route was not added.`);
+      return;
+    }
+    if (state !== 'present') {
+      log(`the credential vault could not be re-read to confirm the "${id}" credential, so its route was not added — rerun setup once the vault is accessible.`);
+      return;
+    }
     // A config we cannot parse is never rewritten, exactly as the lifecycle
     // refuses it: the credential is stored and the row waits for a readable
     // document rather than clobbering a hand-edit.
@@ -589,6 +603,12 @@ function materializeBuiltInRoute(id) {
     doc.routes = [...routes, catalog];
     saveConfig(doc);
   } catch (e) {
+    if (e && e.code === 'CONFIG_MIGRATION_PENDING') {
+      // The write-level guard (lib/config.js saveConfig): config.json does not
+      // exist, so the one-time migration has not resolved and must create it.
+      log(`credential stored, but its route was not added yet: config.json must first be created by the one-time route migration — rerun setup to complete it.`);
+      return;
+    }
     log(`credential stored, but the "${id}" route could not be added to config.json — verify write access and rerun.`);
   } finally {
     lock.release();
@@ -1322,8 +1342,12 @@ function setup(args) {
   }
   // Report from the POST-state, re-read from disk: "present" is only true if
   // every stored credential also has its row.
-  const rowlessAfter = rowlessCredentials(loadConfig());
-  const repaired = rowlessBefore.filter((id) => !rowlessAfter.includes(id));
+  const after = loadConfig();
+  const rowlessAfter = rowlessCredentials(after);
+  // "Added" is read off the rows that now exist, not inferred from leaving the
+  // row-less set: a credential removed meanwhile leaves that set too, with no row.
+  const rowsAfter = new Set((Array.isArray(after.routes) ? after.routes : []).map((r) => r && r.id));
+  const repaired = rowlessBefore.filter((id) => rowsAfter.has(id));
   if (repaired.length) log(`added the missing route for stored credentials: ${repaired.join(', ')}`);
   if (rowlessAfter.length) {
     log(`stored credentials still have no route: ${rowlessAfter.join(', ')} — rerun setup once no other provider change is running and config.json is readable.`);
@@ -1893,7 +1917,11 @@ const hasFlag = (n) => args.includes(n);
 //              under dataDir for these, and a migration write would violate
 //              that guarantee for a command whose whole promise is that it
 //              observes without touching anything.
-//   serve    — the credential form's loopback server; not a route-reading path.
+//
+// `serve` IS in the list, although it reads no routes: its POST writes config.json
+// (it materializes a built-in row), so a directly invoked `serve` must migrate or
+// be refused like every other config writer. A parent-spawned child finds
+// config.json already present and pays one stat.
 //
 // So a fresh install that has credentials but no config.json resolves no route
 // in `gate` (null -> fail-open, exit 0, which is the designed default) and
@@ -1901,7 +1929,7 @@ const hasFlag = (n) => args.includes(n);
 // is in the list and runs every session, so in practice that window is one
 // session at most. Stated in the PR body because it is a real, visible
 // consequence of keeping cache-only reads write-free.
-const MIGRATING_COMMANDS = new Set(['setup', 'update', 'provider', 'remove', 'refresh', 'check', 'session-start']);
+const MIGRATING_COMMANDS = new Set(['setup', 'update', 'provider', 'remove', 'refresh', 'check', 'session-start', 'serve']);
 
 // Fixed text, pinned verbatim by the tests: no path, no vault error text and
 // no credential material, because it reaches the user on the SessionStart path.
@@ -1915,7 +1943,11 @@ const MIGRATION_VAULT_UNREADABLE = 'the credential vault could not be read, so s
 // keep running.
 function writesConfig(command, rest) {
   if (command === 'provider') return ['add', 'update', 'remove'].includes(rest[0]);
-  return command === 'setup' || command === 'update' || command === 'remove';
+  // `serve` too: its POST stores a credential and materializes a built-in row.
+  // setup/update only spawn it after they passed this gate, but the dispatcher
+  // accepts `serve <port> <nonce> <ids…>` directly, so the gate must be here,
+  // before it listens — not assumed from the parent.
+  return command === 'setup' || command === 'update' || command === 'remove' || command === 'serve';
 }
 
 // Fixed text: no path, no errno, no vault error text, no credential material.

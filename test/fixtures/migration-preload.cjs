@@ -67,6 +67,30 @@ cp.spawn = (cmd, args, opts) => {
   return realSpawn(cmd, args, opts);
 };
 
+// A deterministic interleaving, not a sleep (VL_TEST_BEFORE_FIRST_LOCK = a JSON
+// argv for bin/vl.js). At this process's FIRST mutation-lock acquire, before
+// the real acquire runs, that REAL command runs to completion in a child — so
+// "a concurrent writer lands between the caller's scan and its lock" happens
+// every time. The lock itself is not replaced: the original acquire runs next.
+// The child's outcome is journaled to VL_TEST_HOOK_JOURNAL.
+if (process.env.VL_TEST_BEFORE_FIRST_LOCK) {
+  const lifecycle = require('../../lib/provider-lifecycle');
+  const realAcquire = lifecycle.acquireMutationLock;
+  let fired = false;
+  lifecycle.acquireMutationLock = function acquireAfterInterleaving(dir) {
+    if (!fired) {
+      fired = true;
+      const argv = JSON.parse(process.env.VL_TEST_BEFORE_FIRST_LOCK);
+      const env = { ...process.env };
+      delete env.VL_TEST_BEFORE_FIRST_LOCK;
+      const r = cp.spawnSync(process.execPath, [require('path').join(__dirname, '../../bin/vl.js'), ...argv],
+        { env, encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
+      journal(process.env.VL_TEST_HOOK_JOURNAL, JSON.stringify({ argv, status: r.status, stdout: r.stdout }));
+    }
+    return realAcquire.apply(this, arguments);
+  };
+}
+
 // A form server that dies before it listens.
 if (process.argv[2] === 'serve' && process.env.VL_TEST_SERVE_EXIT) {
   process.exit(Number(process.env.VL_TEST_SERVE_EXIT));

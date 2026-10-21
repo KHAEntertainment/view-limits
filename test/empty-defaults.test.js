@@ -739,10 +739,12 @@ test('pin 8: the PreToolUse gate path never reads strictly, never takes The lock
   assert.strictEqual(fs.existsSync(path.join(absent, lockModule.LOCK_DIR)), false, 'the gate wrote a lock ticket');
 });
 
-test('pin 8: the real CLI read commands never take the lock on a present or lone-.prev config', () => {
-  // report (/view-limits), snapshot, check and session-start — run for real,
-  // with the real file vault (they do read credentials) and outbound network
-  // refused. Every lock acquire in the process is journaled; there must be none.
+test('pin 8: UNCONTENDED READ WORKLOAD — gate, report, snapshot, check and session-start take the lock 0 times', () => {
+  // The load-bearing hot-path property, as its own test. The PreToolUse gate,
+  // report (/view-limits), snapshot, check and session-start run for real —
+  // the real file vault (they read credentials), outbound network refused —
+  // on a present config and on a lone .prev. Every lock acquire in each
+  // process is journaled; acquireCount must be 0 for every one.
   const doc = { routes: [builtInRoute('kimi-code-plan')], vault: { backend: 'file' }, gate: { mode: 'deny' } };
   // The document first: a strict credential write with NO document proves
   // absence under the lock, which would leave the lock directory behind.
@@ -752,15 +754,31 @@ test('pin 8: the real CLI read commands never take the lock on a present or lone
   const lone = scratch();
   fs.writeFileSync(PREV(lone), JSON.stringify(doc));
   inDataDir(lone, () => vault.set('kimi-code-plan', KEY_A));
+  for (const dir of [present, lone]) {
+    fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({
+      updatedAt: new Date().toISOString(),
+      routes: { 'kimi-code-plan': {
+        routeId: 'kimi-code-plan', observedAt: new Date(Date.now() - 60000).toISOString(),
+        freshUntil: new Date(Date.now() + 300000).toISOString(), source: 'kimi',
+        status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+      } },
+    }));
+  }
   const strictJournal = path.join(__dirname, 'fixtures/strict-journal.cjs');
   for (const dir of [present, lone]) {
-    for (const args of [['report'], ['snapshot', '--json'], ['check', 'kimi-code-plan'], ['session-start']]) {
+    for (const args of [['gate'], ['report'], ['snapshot', '--json'], ['check', 'kimi-code-plan'], ['session-start']]) {
       const journal = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-strict-')), 'journal');
-      const r = run(dir, args, journals(), {
-        NODE_OPTIONS: `--require=${preload} --require=${strictJournal}`,
-        VL_STRICT_JOURNAL: journal, VL_STRICT_JOURNAL_VAULT: 'pass',
+      const j = journals();
+      const r = spawnSync(process.execPath, [cli, ...args], {
+        env: envFor(dir, j, {
+          NODE_OPTIONS: `--require=${preload} --require=${strictJournal}`,
+          VL_STRICT_JOURNAL: journal, VL_STRICT_JOURNAL_VAULT: 'pass',
+        }),
+        input: args[0] === 'gate' ? JSON.stringify({ tool_name: 'Agent', tool_input: { model: 'kimi-k2' } }) : '',
+        encoding: 'utf8', timeout: 20000,
       });
       assert.ok(r.status !== null, `${args.join(' ')} did not finish`);
+      if (args[0] === 'gate') assert.match(r.stdout, /"permissionDecision":"deny"/, `premise: the gate ran its full path: ${r.stdout}${r.stderr}`);
       const calls = fs.existsSync(journal) ? fs.readFileSync(journal, 'utf8').split('\n').filter(Boolean) : [];
       assert.deepStrictEqual(calls.filter((c) => c.startsWith('acquireMutationLock')), [],
         `${args.join(' ')} on ${dir === lone ? 'a lone .prev' : 'a present config'} took the lock: ${calls}`);

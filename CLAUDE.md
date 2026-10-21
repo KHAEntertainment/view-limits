@@ -58,7 +58,7 @@ above is the durable entry point, and the GitHub issues are the durable backlog.
 
 - `lib/` — **transport-neutral core** (no Claude hook APIs):
   - `adapters/*.js` — one per provider; raw response → `NormalizedStatus`
-  - `normalize.js` — the shared status shape (`state`, `windows`, `balance`, `resetAt`, `detail`)
+  - `normalize.js` — the shared status shape (`state`, `windows`, `balance`, `resetAt`, `detail`, optional `basis`)
   - `routes.js` — route/account resolution (`resolveRoute(model, context)`)
   - `cache.js` — `status.json` read/write + freshness + single-flight refresh lock
   - `gate.js` — pure deny / allow / context decision

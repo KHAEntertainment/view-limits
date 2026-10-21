@@ -274,17 +274,25 @@ async function until(predicate, deadlineMs = 5000) {
     assert.strictEqual(json.status, 0, json.stderr);
     const doc = JSON.parse(json.stdout);
     const entry = doc.routes[XIOMI_ID];
-    assert.strictEqual(entry.status.state, 'unknown');
+    assert.strictEqual(entry.status.state, 'healthy', 'derived from the fresh token window');
+    assert.strictEqual(entry.status.basis, 'token-count');
     assert.strictEqual(entry.status.windows[0].remaining, FRESH_COUNTS, 'fresh live counts, not the cached ones');
     assert.notStrictEqual(entry.observedAt, '2000-01-01T00:00:00.000Z');
     assert.ok(Date.parse(entry.freshUntil) > Date.now() - 1000, 'just-observed entry renders fresh');
-    assert.deepStrictEqual(doc.routes[KIMI_ID], seededCache().routes[KIMI_ID], 'other providers untouched');
+    const kimiJson = { ...doc.routes[KIMI_ID] };
+    assert.strictEqual(kimiJson.status.basis, 'quota-window', '#80: derived basis is additive on every JSON route');
+    const kimiExpected = seededCache().routes[KIMI_ID];
+    assert.deepStrictEqual(
+      { ...kimiJson, status: { ...kimiJson.status, basis: undefined } },
+      { ...kimiExpected, status: { ...kimiExpected.status, basis: undefined } },
+      'other providers untouched apart from the additive derived basis',
+    );
     assert.strictEqual(fetches(ctx).length, 2, 'one usage + one detail per report');
 
     clearFetches(ctx);
     const text = run(ctx, ['report']);
     assert.strictEqual(text.status, 0, text.stderr);
-    assert.match(text.stdout, /xiaomi-token-plan: unknown · tokens 75%/);
+    assert.match(text.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/);
     assert.doesNotMatch(text.stdout, /xiaomi-token-plan:[^\n]*\(stale\)/, 'live Xiaomi observation is not marked stale');
     assert.ok(!text.stdout.includes('rotate via'), 'xiaomi rows never get the rotate hint');
     assert.strictEqual(fetches(ctx).length, 2, 'text report performs its own single pair');
@@ -342,7 +350,7 @@ async function until(predicate, deadlineMs = 5000) {
     clearFetches(ctx);
     const out = run(ctx, ['refresh']);
     assert.strictEqual(out.status, 0, out.stderr);
-    assert.match(out.stdout, /xiaomi-token-plan: unknown · tokens 75%/);
+    assert.match(out.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/);
     assert.ok(!out.stdout.includes(String(OLD_COUNTS)));
     assert.ok(!out.stdout.includes('(stale)'));
     assert.strictEqual(fetches(ctx).length, 2);
@@ -470,7 +478,8 @@ async function until(predicate, deadlineMs = 5000) {
     const ok = run(ctx, ['check', XIOMI_ID]);
     assert.strictEqual(ok.status, 0, ok.stderr);
     const st = JSON.parse(ok.stdout);
-    assert.strictEqual(st.state, 'unknown');
+    assert.strictEqual(st.state, 'healthy');
+    assert.strictEqual(st.basis, 'token-count');
     assert.strictEqual(st.windows[0].remaining, FRESH_COUNTS);
 
     const auth = run(ctx, ['check', XIOMI_ID], { env: { VL_XIAOMI_FETCH_MODE: 'auth' } });
@@ -648,13 +657,20 @@ async function until(predicate, deadlineMs = 5000) {
     assert.ok(!json.stdout.includes(String(OLD_COUNTS)), 'no old Xiaomi counts anywhere in JSON');
     const doc = JSON.parse(json.stdout);
     assert.strictEqual(doc.routes[XIOMI_ID].status.windows[0].remaining, FRESH_COUNTS, 'live counts replace the canonical row');
-    assert.deepStrictEqual(doc.routes[KIMI_ID], seededCache().routes[KIMI_ID], 'non-Xiaomi rows untouched');
+    const kimiJson2 = { ...doc.routes[KIMI_ID] };
+    assert.strictEqual(kimiJson2.status.basis, 'quota-window', '#80: derived basis is additive on every JSON route');
+    const kimiExpected2 = seededCache().routes[KIMI_ID];
+    assert.deepStrictEqual(
+      { ...kimiJson2, status: { ...kimiJson2.status, basis: undefined } },
+      { ...kimiExpected2, status: { ...kimiExpected2.status, basis: undefined } },
+      'non-Xiaomi rows untouched apart from the additive derived basis',
+    );
 
     const text = run(ctx, ['report']);
     assert.strictEqual(text.status, 0, text.stderr);
     assert.ok(!text.stdout.includes('orphan-xiaomi'), 'source-stamped orphan stripped from text');
     assert.ok(!text.stdout.includes('renamed-xiaomi'), 'tokens-provenance orphan stripped from text');
-    assert.match(text.stdout, /xiaomi-token-plan: unknown · tokens 75%/);
+    assert.match(text.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/);
     noVaultForXiaomi(ctx, true);
     console.log('  ✓ normal text/JSON reports strip orphan and renamed Xiaomi cache rows');
   } finally {
@@ -692,7 +708,7 @@ async function until(predicate, deadlineMs = 5000) {
   try {
     const ok = run(ctx, ['report']);
     assert.strictEqual(ok.status, 0, ok.stderr);
-    assert.match(ok.stdout, /xiaomi-token-plan: unknown · tokens 75%/, 'first-run success renders live counts');
+    assert.match(ok.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/, 'first-run success renders live counts');
     const okJson = run(ctx, ['report', '--json']);
     assert.strictEqual(JSON.parse(okJson.stdout).routes[XIOMI_ID].status.windows[0].remaining, FRESH_COUNTS);
     const failed = run(ctx, ['report'], { env: { VL_XIAOMI_FETCH_MODE: 'auth' } });
@@ -708,7 +724,7 @@ async function until(predicate, deadlineMs = 5000) {
     fs.writeFileSync(path.join(ctx.dir, 'status.json'), 'garbage{{{not-json');
     const ok = run(ctx, ['report']);
     assert.strictEqual(ok.status, 0, ok.stderr);
-    assert.match(ok.stdout, /xiaomi-token-plan: unknown · tokens 75%/, 'corrupt-cache success renders live counts');
+    assert.match(ok.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/, 'corrupt-cache success renders live counts');
     assert.match(ok.stdout, /status-cache-corrupt/, 'corruption stays visible as a diagnostic');
     const okJson = JSON.parse(run(ctx, ['report', '--json']).stdout);
     assert.strictEqual(okJson.routes[XIOMI_ID].status.windows[0].remaining, FRESH_COUNTS);
@@ -751,8 +767,8 @@ async function until(predicate, deadlineMs = 5000) {
     assert.strictEqual(refresh.status, 0, refresh.stderr);
     assert.strictEqual(fetches(ctx).length, 2, 'refresh also shares ONE pair across aliases');
     assert.strictEqual(keyReads(ctx).length, 1, 'refresh: ONE key acquisition');
-    assert.match(refresh.stdout, /xiaomi-token-plan: unknown · tokens 75%/);
-    assert.match(refresh.stdout, /xiaomi-custom: unknown · tokens 75%/);
+    assert.match(refresh.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/);
+    assert.match(refresh.stdout, /xiaomi-custom: healthy · tokens 75% \(token count\)/);
     const cached = readStatus(ctx);
     assert.strictEqual(cached.routes[XIOMI_ID].status.windows[0].remaining, FRESH_COUNTS);
     assert.deepStrictEqual(cached.routes['xiaomi-custom'].status, cached.routes[XIOMI_ID].status);

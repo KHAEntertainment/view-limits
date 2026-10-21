@@ -48,10 +48,11 @@ const json = (body) => ({ outcome: 'json', httpStatus: 200, body });
 (async () => {
   console.log('xiaomi adapter — envelopes, counts, failures, redaction');
 
-  await test('valid plan counts → one tokens window, state unknown, no error, no guessed reset', async () => {
+  await test('valid plan counts → one tokens window, healthy (>=20%), token-count basis, no guessed reset', async () => {
     const s = scripted({ usage: json(usageBody()), detail: json(detailBody()) });
     const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get });
-    assert.strictEqual(st.state, 'unknown');
+    assert.strictEqual(st.state, 'healthy');
+    assert.strictEqual(st.basis, 'token-count');
     assert.strictEqual(st.windows.length, 1);
     assert.deepStrictEqual(st.windows[0], {
       type: 'tokens',
@@ -63,14 +64,46 @@ const json = (body) => ({ outcome: 'json', httpStatus: 200, body });
     assert.strictEqual(st.balance, null);
     assert.strictEqual(st.detail.error, undefined, 'valid counts carry no fictitious error');
     assert.strictEqual(st.detail.expired, false);
+    assert.strictEqual(st.detail.currentPeriodEnd, '2026-11-07 23:59:59', 'period end disclosed');
     assert.deepStrictEqual(s.calls, ['usage', 'detail']);
+  });
+
+  // #80 four-state matrix: threshold 0.2 from config (default fallback).
+  for (const [label, used, expected] of [
+    ['exactly 20% remaining → healthy (threshold is strict <)', 800, 'healthy'],
+    ['19.9% remaining → constrained', 801, 'constrained'],
+    ['7% remaining → constrained', 930, 'constrained'],
+    ['0 remaining → exhausted', 1000, 'exhausted'],
+  ]) {
+    await test(`state derivation — ${label}`, async () => {
+      const item = { name: 'plan_total_token', used, limit: 1000 };
+      const s = scripted({ usage: json(usageBody(item)), detail: json(detailBody()) });
+      const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get });
+      assert.strictEqual(st.state, expected);
+      assert.strictEqual(st.basis, 'token-count');
+      assert.strictEqual(st.resetAt, null, 'period end is never a reset');
+      if (expected === 'exhausted') {
+        assert.strictEqual(st.windows[0].remaining, 0);
+        assert.strictEqual(st.detail.currentPeriodEnd, '2026-11-07 23:59:59');
+      }
+    });
+  }
+
+  await test('ctx.threshold overrides the 0.2 fallback', async () => {
+    const item = { name: 'plan_total_token', used: 600, limit: 1000 };
+    const s = scripted({ usage: json(usageBody(item)), detail: json(detailBody()) });
+    const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get, threshold: 0.5 });
+    assert.strictEqual(st.state, 'constrained', '40% remaining is below a 0.5 threshold');
+    const s2 = scripted({ usage: json(usageBody(item)), detail: json(detailBody()) });
+    const st2 = await fetchStatus({}, CREDENTIALS, { consoleGet: s2.get });
+    assert.strictEqual(st2.state, 'healthy', '40% remaining is above the 0.2 default');
   });
 
   await test('compensation and monthUsage never become windows or route state', async () => {
     const s = scripted({ usage: json(usageBody()), detail: json(detailBody()) });
     const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get });
     assert.strictEqual(st.windows.length, 1);
-    assert.strictEqual(st.state, 'unknown', 'unresolved compensation keeps state unknown');
+    assert.strictEqual(st.state, 'healthy', 'compensation items never change the derived state');
     assert.ok(!JSON.stringify(st).includes('compensation_total_token'));
     assert.ok(!JSON.stringify(st).includes('monthUsage'));
   });
@@ -79,8 +112,10 @@ const json = (body) => ({ outcome: 'json', httpStatus: 200, body });
     const s = scripted({ usage: json(usageBody()), detail: json(detailBody({ currentPeriodEnd: '2026-11-07', expired: true })) });
     const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get });
     assert.strictEqual(st.state, 'unknown');
+    assert.strictEqual(st.basis, 'none');
     assert.deepStrictEqual(st.windows, []);
     assert.strictEqual(st.detail.expired, true);
+    assert.strictEqual(st.detail.currentPeriodEnd, '2026-11-07', 'period end still disclosed when expired');
     assert.strictEqual(st.detail.error, undefined);
   });
 
@@ -96,6 +131,7 @@ const json = (body) => ({ outcome: 'json', httpStatus: 200, body });
       const s = scripted({ usage: json(usage), detail: json(detailBody()) });
       const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get });
       assert.strictEqual(st.state, 'unknown');
+      assert.strictEqual(st.basis, 'none');
       assert.deepStrictEqual(st.windows, []);
       assert.strictEqual(st.detail.error, 'console response unrecognized');
     });
@@ -178,7 +214,7 @@ const json = (body) => ({ outcome: 'json', httpStatus: 200, body });
     assert.ok(!encoded.includes(echoedString), 'string echo must not leak');
     assert.ok(!encoded.includes(String(echoedNumber)), 'numeric echo must not leak');
     assert.ok(!encoded.includes('leaked'), 'arbitrary property names must not leak');
-    assert.strictEqual(st.state, 'unknown');
+    assert.strictEqual(st.state, 'healthy');
     assert.strictEqual(st.windows[0].remaining, 28368322580);
   });
 
@@ -193,7 +229,7 @@ const json = (body) => ({ outcome: 'json', httpStatus: 200, body });
       };
     };
     const st = await fetchStatus({}, CREDENTIALS, { transport });
-    assert.strictEqual(st.state, 'unknown');
+    assert.strictEqual(st.state, 'healthy');
     assert.strictEqual(seen.length, 2);
     for (const { url, options } of seen) {
       assert.ok(Object.values(URLS).includes(url), 'only allowlisted console URLs');

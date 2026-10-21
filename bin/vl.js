@@ -54,6 +54,7 @@ const { routeNeedsVaultCredential } = require('../lib/recipes');
 const lifecycle = require('../lib/provider-lifecycle');
 const { getOptionSpec } = require('../lib/recipes/option-specs');
 const { getRuntimeSnapshot, defaultReadStatus } = require('../lib/runtime-snapshot');
+const { basisOf } = require('../lib/normalize');
 const { recommend } = require('../lib/recommend');
 const { makeJevTransport } = require('../lib/jev-openrouter');
 const { traycerEnvCallerContext } = require('../lib/traycer-adapter');
@@ -418,6 +419,21 @@ async function refresh(quiet, fromSessionStart = false) {
 // This command joins the view model's pre-formatted text lines; the view
 // object is the contract for text (today) and JSON / HTML (Phase 3-4).
 
+// #80 — every status exposes its measurement basis in diagnostic JSON:
+// `quota-window | token-count | balance | none`. Adapters that declare one
+// keep it verbatim; the rest get the derived label. Additive only — no
+// existing field is renamed or removed.
+function withBasis(status) {
+  if (!status || typeof status !== 'object' || Array.isArray(status)) return status;
+  return { ...status, basis: basisOf(status) };
+}
+
+function withBasisEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return entry;
+  if (!entry.status || typeof entry.status !== 'object' || Array.isArray(entry.status)) return entry;
+  return { ...entry, status: withBasis(entry.status) };
+}
+
 function cliCallerContext() {
   return { host: os.hostname(), surface: 'cli', ...traycerEnvCallerContext(process.env) };
 }
@@ -465,9 +481,9 @@ async function reportCmd(args) {
     const routes = {};
     for (const [id, entry] of Object.entries(cache.routes || {})) {
       if (isXiaomiEntry(id, entry)) continue;
-      routes[id] = entry;
+      routes[id] = withBasisEntry(entry);
     }
-    Object.assign(routes, liveEntries);
+    for (const [id, entry] of Object.entries(liveEntries)) routes[id] = withBasisEntry(entry);
     process.stdout.write(JSON.stringify({ ...cache, routes }, null, 2) + '\n');
     return;
   }
@@ -497,7 +513,7 @@ async function check(routeId) {
     const detail = st && st.detail && typeof st.detail === 'object' ? st.detail : {};
     if (detail.reauth) err(`check ${routeId} failed: ${reauthNote(detail.reauth)}`);
     if (detail.error) err(`check ${routeId} failed: ${detail.error}`);
-    process.stdout.write(JSON.stringify(st, null, 2) + '\n');
+    process.stdout.write(JSON.stringify(withBasis(st), null, 2) + '\n');
     return;
   }
   // #57: unmonitored-recipe routes (vaultCredential:false) document no quota
@@ -516,7 +532,7 @@ async function check(routeId) {
     const hint = e && e.status === 401 ? ` (rotate via /view-limits:update ${routeId})` : '';
     err(`check ${routeId} failed: ${msg}${hint}`);
   }
-  process.stdout.write(JSON.stringify(st, null, 2) + '\n');
+  process.stdout.write(JSON.stringify(withBasis(st), null, 2) + '\n');
 }
 
 // ---- setup ------------------------------------------------------------------

@@ -74,6 +74,12 @@ const HAPPY_RESPONSES = {
 function fixture(responses) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-traycer-cli-'));
   fs.mkdirSync(path.join(dir, 'data'));
+  // The config.json every install has after its first command (Issue #81:
+  // `{routes: []}` until setup adds a row). With none at all the snapshot
+  // truthfully reports config-inconclusive — a lock-free read cannot tell a
+  // never-configured install from a publish in flight (PR #82 round 5) — and
+  // these cases are about the Traycer reads, not about that state.
+  fs.writeFileSync(path.join(dir, 'data', 'config.json'), JSON.stringify({ routes: [] }));
   fs.mkdirSync(path.join(dir, 'bin'));
   const stub = path.join(dir, 'bin', 'traycer');
   fs.writeFileSync(stub, '#!/usr/bin/env node\n' + STUB_SOURCE, { mode: 0o755 });
@@ -132,8 +138,11 @@ test('cache-only snapshot with full Traycer env never invokes the CLI; env seeds
   assert.deepStrictEqual(doc.sessions, [], 'no live rows cache-only');
   assert.ok(!doc.diagnostics.some((d) => d.code === 'live-reads-unavailable'));
   // No filesystem writes under the data dir either.
+  // Exactly the fixture's config.json, byte-identical: nothing added or changed.
   const dataFiles = fs.readdirSync(path.join(dir, 'data'));
-  assert.deepStrictEqual(dataFiles, [], `cache-only snapshot wrote files: ${dataFiles}`);
+  assert.deepStrictEqual(dataFiles, ['config.json'], `cache-only snapshot wrote files: ${dataFiles}`);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'data', 'config.json'), 'utf8'), JSON.stringify({ routes: [] }),
+    'cache-only snapshot changed config.json');
 });
 
 test('--refresh without a Traycer identity → live-reads-unavailable, stub untouched', () => {

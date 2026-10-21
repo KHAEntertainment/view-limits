@@ -38,6 +38,7 @@ config.DEFAULTS.vault.backend = 'file';
 const { DEFAULTS, BUILT_IN_ROUTES, builtInRoute, loadConfig, saveConfig, configPath } = config;
 const vault = require('../lib/vault');
 const lifecycle = require('../lib/provider-lifecycle');
+const lockModule = require('../lib/lock');
 const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
 
 const cli = path.resolve(__dirname, '../bin/vl.js');
@@ -480,13 +481,20 @@ test('pin 6: back-to-back publishes between reads — the reader keeps reading u
 });
 
 test('pin 6: with no document the reader stops after a bounded number of reads, without a delay', async () => {
+  // Lax: six lock-free reads, then INCONCLUSIVE — it cannot tell absent from a
+  // publish it never caught. Strict: one more round under the lock, then ENOENT.
   const dir = scratch();
-  const { value, misses } = await onReaderMiss([], () => {
+  const lax = await onReaderMiss([], () => {
     try { config.readConfigTextIn(dir); return null; } catch (e) { return e.code; }
   });
-  assert.strictEqual(value, 'ENOENT', 'absence must surface as ENOENT, which every caller treats as "no config"');
-  assert.deepStrictEqual(misses, ['config.json', 'config.json.prev', 'config.json', 'config.json.prev', 'config.json', 'config.json.prev']);
-  assert.deepStrictEqual(fs.readdirSync(dir), [], 'a read wrote to the data dir');
+  assert.strictEqual(lax.value, 'CONFIG_INCONCLUSIVE', 'a lax reader claimed absence it cannot prove');
+  assert.deepStrictEqual(lax.misses, ['config.json', 'config.json.prev', 'config.json', 'config.json.prev', 'config.json', 'config.json.prev']);
+  const strict = await onReaderMiss([], () => {
+    try { config.readConfigTextIn(dir, { strict: true }); return null; } catch (e) { return e.code; }
+  });
+  assert.strictEqual(strict.value, 'ENOENT', 'absence proven under the lock must surface as ENOENT');
+  assert.strictEqual(strict.misses.length, 8, `six lock-free reads, then one round under the lock: ${strict.misses}`);
+  assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.startsWith('config.json')), [], 'a read wrote config.json');
 });
 
 test('pin 7: the runtime snapshot reads the same logical document as loadConfig (round 4 F2)', async () => {
@@ -508,6 +516,280 @@ test('pin 7: the runtime snapshot reads the same logical document as loadConfig 
   fs.writeFileSync(PREV(bad), '{not json');
   const c = await getRuntimeSnapshot({ refresh: false, dataDir: bad });
   assert.ok(c.diagnostics.some((d) => d.code === 'config-corrupt'), 'a corrupt .prev was not reported as corrupt');
+});
+
+// ---- PR #82 round 5: absence is proven under the lock -----------------------------
+//
+// N back-to-back publishes by other processes can exhaust any N lock-free
+// rounds. The schedule below is the reviewer's: in every round writer k moves
+// config.json aside (at the reader's .prev miss of the round before), then
+// completes — link, unlink .prev — at the reader's config.json miss, so both
+// reads of every round miss while a valid document exists at the end.
+function nWriterSchedule(dir, docs) {
+  const steps = [];
+  docs.forEach((doc, i) => {
+    steps.push(() => underLock(dir, () => saveConfig(doc)));
+    if (i < docs.length - 1) steps.push(() => fs.renameSync(path.join(dir, 'config.json'), PREV(dir)));
+  });
+  return steps;
+}
+const SIX_MISSES = ['config.json', 'config.json.prev', 'config.json', 'config.json.prev', 'config.json', 'config.json.prev'];
+
+// Counts every lock acquire made through lib/lock.js's module object, which is
+// how lib/config.js takes it.
+async function countingAcquires(fn) {
+  const real = lockModule.acquireMutationLock;
+  let count = 0;
+  lockModule.acquireMutationLock = function countedAcquire(...a) { count += 1; return real.apply(this, a); };
+  try {
+    const value = await fn(() => count);
+    return { value, count };
+  } finally {
+    lockModule.acquireMutationLock = real;
+  }
+}
+
+test('pin 8: N writers exhaust every lock-free round — the strict read proves the document under the lock', async () => {
+  const dir = scratch();
+  fs.writeFileSync(PREV(dir), JSON.stringify(customDoc('custom-0')));
+  const forced = DEFAULTS.vault.backend;
+  DEFAULTS.vault.backend = 'keychain';
+  try {
+    const { value, count } = await countingAcquires(async () => {
+      const r = await onReaderMiss(nWriterSchedule(dir, ['custom-1', 'custom-2', 'custom-3'].map(customDoc)),
+        () => inDataDir(dir, () => config.loadConfigStrict()));
+      assert.deepStrictEqual(r.misses, SIX_MISSES, 'premise: all six lock-free reads missed');
+      return r.value;
+    });
+    assert.strictEqual(count, 1, 'the exhausted strict read must take the lock exactly once');
+    assert.strictEqual(value.vault.backend, 'file', 'an exhausted strict read answered with DEFAULTS');
+    assert.deepStrictEqual(value.routes.map((r) => r.id), ['custom-3']);
+  } finally {
+    DEFAULTS.vault.backend = forced;
+  }
+});
+
+test('pin 8: the same schedule through the lax reader is DEFAULTS marked inconclusive, and reaches the display', async () => {
+  const dir = scratch();
+  fs.writeFileSync(PREV(dir), JSON.stringify(customDoc('custom-0')));
+  const { value, count } = await countingAcquires(() => onReaderMiss(
+    nWriterSchedule(dir, ['custom-1', 'custom-2', 'custom-3'].map(customDoc)), () => inDataDir(dir, () => loadConfig())));
+  assert.deepStrictEqual(value.misses, SIX_MISSES, 'premise');
+  assert.strictEqual(count, 0, 'the lax reader took the lock');
+  assert.strictEqual(config.configInconclusive(value.value), true, 'DEFAULTS from an unconfirmed read were not marked');
+  assert.deepStrictEqual(value.value.routes, []);
+  // A read that confirms the document is not marked.
+  assert.strictEqual(config.configInconclusive(inDataDir(dir, () => loadConfig())), false);
+  // The snapshot (report / recommend render it) carries the reason code.
+  fs.renameSync(path.join(dir, 'config.json'), PREV(dir));
+  const snap = await onReaderMiss(nWriterSchedule(dir, ['custom-4', 'custom-5', 'custom-6'].map(customDoc)),
+    () => getRuntimeSnapshot({ refresh: false, dataDir: dir }));
+  assert.deepStrictEqual(snap.value.diagnostics.filter((d) => d.scope === 'routes').map((d) => d.code), ['config-inconclusive']);
+  assert.match(snap.value.diagnostics.find((d) => d.code === 'config-inconclusive').summary, /being replaced while it was read/);
+  // The CLI display: `report` says the configuration could not be confirmed,
+  // never "no credentials configured". An unreadable vault keeps config.json
+  // absent (the migration cannot run), which a lax read cannot tell apart
+  // from a publish in flight.
+  const pending = upgradeWith('kimi-code-plan');
+  if (!IS_ROOT) {
+    fs.chmodSync(path.join(pending, 'secrets'), 0o000);
+    try {
+      const r = run(pending, ['report']);
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.match(r.stdout, /config\.json could not be confirmed/, `report output: ${r.stdout}`);
+      assert.doesNotMatch(r.stdout, /no credentials configured/i);
+    } finally {
+      fs.chmodSync(path.join(pending, 'secrets'), 0o700);
+    }
+  }
+});
+
+test('pin 8: the uncontended read path never takes the lock — before and after the exhaustion branch', async () => {
+  const present = seeded([]);
+  const lone = scratch();
+  fs.writeFileSync(PREV(lone), JSON.stringify(customDoc('custom-lone')));
+  inDataDir(present, () => vault.set('kimi-code-plan', KEY_A));
+  const workload = async () => {
+    for (const dir of [present, lone]) {
+      inDataDir(dir, () => {
+        loadConfig();
+        config.loadConfigStrict();
+        config.readConfigTextIn(dir);
+        config.readConfigTextIn(dir, { strict: true });
+        vault.probe('kimi-code-plan');
+        vault.get('kimi-code-plan');
+      });
+      await getRuntimeSnapshot({ refresh: false, dataDir: dir });
+    }
+  };
+  const { count } = await countingAcquires(async (acquires) => {
+    await workload();
+    assert.strictEqual(acquires(), 0, 'a read of a present or lone-.prev document took the lock');
+    // The exhaustion branch takes it exactly once ...
+    const churn = scratch();
+    fs.writeFileSync(PREV(churn), JSON.stringify(customDoc('custom-0')));
+    await onReaderMiss(nWriterSchedule(churn, ['custom-1', 'custom-2', 'custom-3'].map(customDoc)),
+      () => inDataDir(churn, () => config.loadConfigStrict()));
+    assert.strictEqual(acquires(), 1);
+    // ... and leaves nothing behind that puts the lock on the hot path.
+    await workload();
+    assert.strictEqual(acquires(), 1, 'the hot path took the lock after an exhaustion');
+  });
+  assert.strictEqual(count, 1);
+});
+
+test('pin 8: a strict read while THIS process holds the lock proves absence without re-acquiring it', async () => {
+  // The migration and every in-protocol writer read config while holding the
+  // lock: no other publish can be in flight, so a miss is already proof.
+  const dir = scratch();
+  const { value, count } = await countingAcquires(() => underLock(dir, () => {
+    try { config.readConfigTextIn(dir, { strict: true }); return null; } catch (e) { return e.code; }
+  }));
+  assert.strictEqual(value, 'ENOENT');
+  assert.strictEqual(count, 0, 'the strict read re-acquired a lock this process already holds');
+});
+
+// A ticket planted for another process, numbered ahead of any newcomer.
+function plantTicket(dir, pid) {
+  const root = path.join(dir, lockModule.LOCK_DIR);
+  fs.mkdirSync(root, { recursive: true });
+  const name = `${pid}-${crypto.randomBytes(16).toString('hex')}.json`;
+  fs.writeFileSync(path.join(root, name), JSON.stringify({ pid, owner: 'planted', number: 1 }));
+  return path.join(root, name);
+}
+
+test('pin 8: the lock held by a live process — every vault operation hard-fails INCONCLUSIVE, none falls back', async () => {
+  const dir = scratch();
+  // process.ppid is alive and is not this process: a live foreign holder.
+  plantTicket(dir, process.ppid);
+  const started = Date.now();
+  const read = (() => {
+    try { config.readConfigTextIn(dir, { strict: true }); return null; } catch (e) { return e.code; }
+  })();
+  const waited = Date.now() - started;
+  assert.strictEqual(read, 'CONFIG_INCONCLUSIVE', 'absence was claimed without the lock');
+  assert.ok(waited >= 900 && waited < 5000, `the bounded wait was ${waited}ms`);
+  inDataDir(dir, () => {
+    assert.strictEqual(vault.probe('kimi-code-plan'), 'inconclusive', 'probe must not report absent');
+    for (const op of [() => vault.set('kimi-code-plan', KEY_A), () => vault.get('kimi-code-plan'), () => vault.remove('kimi-code-plan')]) {
+      assert.throws(op, (e) => e.code === 'CONFIG_INCONCLUSIVE', 'a vault operation chose a backend from DEFAULTS');
+    }
+  });
+  assert.strictEqual(fs.existsSync(path.join(dir, 'secrets')), false, 'a credential was written to the default backend');
+  assert.deepStrictEqual(fs.readdirSync(dir).filter((n) => n.startsWith('config.json')), []);
+});
+
+test('pin 8: a lock left by a dead process is reclaimed by the existing liveness check, and the strict read converges', async () => {
+  const dir = scratch();
+  const child = spawnSync(process.execPath, ['-e', '0']);
+  assert.strictEqual(child.status, 0);
+  const stale = plantTicket(dir, child.pid);
+  const started = Date.now();
+  const { value, count } = await countingAcquires(() => {
+    try { config.readConfigTextIn(dir, { strict: true }); return null; } catch (e) { return e.code; }
+  });
+  assert.strictEqual(value, 'ENOENT', 'a dead holder left the strict read inconclusive');
+  assert.strictEqual(count, 1, 'reclaimed on the first attempt, not by waiting out the timeout');
+  assert.ok(Date.now() - started < 900, 'the reclaim waited out the timeout');
+  assert.strictEqual(fs.existsSync(stale), false, 'the dead ticket was not reaped');
+});
+
+test('pin 8: every vault operation chooses its backend through the strict reader', () => {
+  // The grep is the audit; this pins it. Each backend decision is vaultCfg(),
+  // and vaultCfg is the strict read — no operation reads the lax config.
+  const src = fs.readFileSync(path.join(__dirname, '../lib/vault.js'), 'utf8');
+  assert.match(src, /function vaultCfg\(\) \{\n {2}return loadConfigStrict\(\)\.vault;\n\}/);
+  assert.doesNotMatch(src, /\bloadConfig\(/, 'the vault reads the lax config somewhere');
+  for (const op of ['set', 'get', 'probe', 'remove']) {
+    const body = src.slice(src.indexOf(`function ${op}(`)).split('\n}\n')[0];
+    assert.match(body, /vaultCfg\(\)/, `vault.${op} does not choose its backend through vaultCfg`);
+  }
+});
+
+test('pin 8: the PreToolUse gate path never reads strictly, never takes The lock and never touches the vault', () => {
+  const journal = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-strict-')), 'journal');
+  const status = (dir) => fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({
+    updatedAt: new Date().toISOString(),
+    routes: { 'kimi-code-plan': {
+      routeId: 'kimi-code-plan', observedAt: new Date(Date.now() - 60000).toISOString(),
+      freshUntil: new Date(Date.now() + 300000).toISOString(), source: 'kimi',
+      status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+    } },
+  }));
+  const doc = JSON.stringify({ gate: { mode: 'deny', injectContext: true }, routes: [builtInRoute('kimi-code-plan')], vault: { backend: 'file' } });
+  const present = scratch();
+  fs.writeFileSync(path.join(present, 'config.json'), doc);
+  status(present);
+  const lone = scratch();
+  fs.writeFileSync(PREV(lone), doc);
+  status(lone);
+  const absent = scratch();
+  for (const [dir, expectDeny] of [[present, true], [lone, true], [absent, false]]) {
+    const r = spawnSync(process.execPath, [cli, 'gate'], {
+      input: JSON.stringify({ tool_name: 'Agent', tool_input: { model: 'kimi-k2' } }),
+      env: { PATH: process.env.PATH, HOME: dir, CLAUDE_PLUGIN_DATA: dir, VL_STRICT_JOURNAL: journal,
+        NODE_OPTIONS: `--require=${path.join(__dirname, 'fixtures/strict-journal.cjs')}` },
+      encoding: 'utf8', timeout: 20000,
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(/"permissionDecision":"deny"/.test(r.stdout), expectDeny, `premise: the gate ran its path: ${r.stdout}`);
+  }
+  const calls = fs.existsSync(journal) ? fs.readFileSync(journal, 'utf8').split('\n').filter(Boolean) : [];
+  assert.deepStrictEqual(calls, [], 'the gate path reached the strict reader, the lock or the vault');
+  assert.strictEqual(fs.existsSync(path.join(absent, lockModule.LOCK_DIR)), false, 'the gate wrote a lock ticket');
+});
+
+test('pin 8: the real CLI read commands never take the lock on a present or lone-.prev config', () => {
+  // report (/view-limits), snapshot, check and session-start — run for real,
+  // with the real file vault (they do read credentials) and outbound network
+  // refused. Every lock acquire in the process is journaled; there must be none.
+  const doc = { routes: [builtInRoute('kimi-code-plan')], vault: { backend: 'file' }, gate: { mode: 'deny' } };
+  // The document first: a strict credential write with NO document proves
+  // absence under the lock, which would leave the lock directory behind.
+  const present = scratch();
+  fs.writeFileSync(path.join(present, 'config.json'), JSON.stringify(doc));
+  inDataDir(present, () => vault.set('kimi-code-plan', KEY_A));
+  const lone = scratch();
+  fs.writeFileSync(PREV(lone), JSON.stringify(doc));
+  inDataDir(lone, () => vault.set('kimi-code-plan', KEY_A));
+  const strictJournal = path.join(__dirname, 'fixtures/strict-journal.cjs');
+  for (const dir of [present, lone]) {
+    for (const args of [['report'], ['snapshot', '--json'], ['check', 'kimi-code-plan'], ['session-start']]) {
+      const journal = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-strict-')), 'journal');
+      const r = run(dir, args, journals(), {
+        NODE_OPTIONS: `--require=${preload} --require=${strictJournal}`,
+        VL_STRICT_JOURNAL: journal, VL_STRICT_JOURNAL_VAULT: 'pass',
+      });
+      assert.ok(r.status !== null, `${args.join(' ')} did not finish`);
+      const calls = fs.existsSync(journal) ? fs.readFileSync(journal, 'utf8').split('\n').filter(Boolean) : [];
+      assert.deepStrictEqual(calls.filter((c) => c.startsWith('acquireMutationLock')), [],
+        `${args.join(' ')} on ${dir === lone ? 'a lone .prev' : 'a present config'} took the lock: ${calls}`);
+      assert.ok(args[0] !== 'session-start' || calls.includes('vault.has'), `premise: session-start read the credential: ${calls}`);
+    }
+    assert.strictEqual(fs.existsSync(path.join(dir, lockModule.LOCK_DIR)), false, 'a read command wrote a lock ticket');
+  }
+});
+
+test('pin 8: lib/lock.js requires nothing in lib/, and only lib/config.js and lib/provider-lifecycle.js require it', () => {
+  const root = path.join(__dirname, '..');
+  const src = fs.readFileSync(path.join(root, 'lib/lock.js'), 'utf8');
+  const deps = [...src.matchAll(/require\((['"])([^'"]+)\1\)/g)].map((m) => m[2]);
+  assert.deepStrictEqual(deps.sort(), ['crypto', 'fs', 'path'], `lib/lock.js requires: ${deps}`);
+  const importers = [];
+  for (const sub of ['lib', 'bin', 'harness']) {
+    const walk = (d) => {
+      if (!fs.existsSync(d)) return;
+      for (const name of fs.readdirSync(d)) {
+        const p = path.join(d, name);
+        if (fs.statSync(p).isDirectory()) walk(p);
+        else if (p.endsWith('.js') && /require\((['"])[./]*(lib\/)?lock(\.js)?\1\)/.test(fs.readFileSync(p, 'utf8'))) {
+          importers.push(path.relative(root, p));
+        }
+      }
+    };
+    walk(path.join(root, sub));
+  }
+  assert.deepStrictEqual(importers.sort(), ['lib/config.js', 'lib/provider-lifecycle.js']);
 });
 
 test('the lifecycle publish path, called directly with the migration pending, is refused', async () => {

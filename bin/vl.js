@@ -31,7 +31,7 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 
 const { loadConfig, dataDir, expandHome, deepMerge, configPath, saveConfig,
-  BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence } = require('../lib/config');
+  BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive } = require('../lib/config');
 const {
   readCache, writeCache, isFresh, recoveryBoundedFreshUntil,
   tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
@@ -451,7 +451,9 @@ async function reportCmd(args) {
   // because routeNeedsVaultCredential is false for them (capability flag).
   const anyConfigured = cfg.routes.some((r) => (isXiaomi(r) ? true : isConfiguredRoute(r)));
   if (!anyConfigured) {
-    process.stdout.write(noCredentialMessage());
+    // DEFAULTS from a read that could not confirm config.json are not "no
+    // credentials": say what actually happened.
+    process.stdout.write(configInconclusive(cfg) ? `view-limits: ${CONFIG_INCONCLUSIVE_NOTICE}\n` : noCredentialMessage());
     if (receiptMsg) process.stdout.write('  ' + receiptMsg + '\n');
     return;
   }
@@ -1061,9 +1063,12 @@ function setupOne(cfg, options, allowImport) {
 
 function readUserConfig() {
   try {
-    const doc = JSON.parse(readConfigText());
+    const doc = JSON.parse(readConfigText({ strict: true }));
     return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : {};
-  } catch {
+  } catch (e) {
+    // A writer's base document: starting from {} because a publish was in
+    // flight would publish a document with everything else dropped.
+    if (e && e.code === 'CONFIG_INCONCLUSIVE') err(CONFIG_INCONCLUSIVE_NOTICE);
     return {};
   }
 }
@@ -1078,13 +1083,14 @@ function readUserConfig() {
 // lib/provider-lifecycle.js.
 //
 //   { ok: true, doc }            absent (first run, doc = {}) or well-formed
-//   { ok: false, reason }        'malformed' | 'not-an-object' | 'unreadable'
+//   { ok: false, reason }        'malformed' | 'not-an-object' | 'unreadable' | 'inconclusive'
 function readUserConfigStrict() {
   let raw;
   try {
-    raw = readConfigText();
+    raw = readConfigText({ strict: true });
   } catch (e) {
     if (e && e.code === 'ENOENT') return { ok: true, doc: {} };
+    if (e && e.code === 'CONFIG_INCONCLUSIVE') return { ok: false, reason: 'inconclusive' };
     return { ok: false, reason: 'unreadable' };
   }
   let doc;
@@ -1913,6 +1919,10 @@ function sessionStart() {
   // lock and may be migrating right now: the state is in flux, so say nothing
   // rather than a nudge that could be wrong. It is re-evaluated next session.
   if (migration && migration.reason === 'lock-busy') process.exit(0);
+  if (configInconclusive(cfg)) {
+    process.stdout.write(JSON.stringify({ systemMessage: `view-limits: ${CONFIG_INCONCLUSIVE_NOTICE}` }));
+    process.exit(0);
+  }
   process.stdout.write(JSON.stringify({
     systemMessage: 'view-limits: no credentials configured yet. Run /view-limits:setup to add your provider keys.',
   }));
@@ -1952,6 +1962,10 @@ const MIGRATING_COMMANDS = new Set(['setup', 'update', 'provider', 'remove', 're
 // Fixed text, pinned verbatim by the tests: no path, no vault error text and
 // no credential material, because it reaches the user on the SessionStart path.
 const MIGRATION_VAULT_UNREADABLE = 'the credential vault could not be read, so stored credentials were not migrated into routes and no configuration was written — this retries on the next command.';
+// A config read that could not confirm config.json (lib/config.js
+// readConfigTextIn): it was being replaced by another process while it was
+// read, or it does not exist. Fixed text — no path or error detail.
+const CONFIG_INCONCLUSIVE_NOTICE = 'config.json could not be confirmed (it was being replaced while it was read, or does not exist), so the configured providers are not shown — rerun the command.';
 
 // Commands that can write config.json. While the migration is unresolved they
 // are refused: any document they published would disarm the migration for

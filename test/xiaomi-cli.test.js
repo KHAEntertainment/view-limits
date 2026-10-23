@@ -302,6 +302,33 @@ async function until(predicate, deadlineMs = 5000) {
     cleanup(ctx);
   }
 
+  // ---- report: honors gate.constrainedThreshold (Issue #80 fix batch) -------
+  ctx = scratch('report-threshold', { status: seededCache() });
+  try {
+    // Non-default threshold 0.8: 75% remaining is above the default 0.2 but
+    // below 0.8, so report must derive constrained — the same dataset must
+    // yield the same state on both surfaces (regression: report skipped the
+    // effective threshold while check/refresh threaded it).
+    const cfg = readConfig(ctx);
+    cfg.gate.constrainedThreshold = 0.8;
+    fs.writeFileSync(path.join(ctx.dir, 'config.json'), JSON.stringify(cfg, null, 2));
+    clearFetches(ctx);
+    const json = run(ctx, ['report', '--json']);
+    assert.strictEqual(json.status, 0, json.stderr);
+    const doc = JSON.parse(json.stdout);
+    assert.strictEqual(doc.routes[XIOMI_ID].status.state, 'constrained',
+      'report --json derives state with the effective gate.constrainedThreshold');
+    const text = run(ctx, ['report']);
+    assert.strictEqual(text.status, 0, text.stderr);
+    assert.match(text.stdout, /xiaomi-token-plan: constrained · tokens 75% \(token count\)/,
+      'report text derives state with the effective gate.constrainedThreshold');
+    assert.strictEqual(fetches(ctx).length, 4, 'one usage + one detail per report format');
+    noVaultForXiaomi(ctx, true);
+    console.log('  ✓ report (text + json) honors gate.constrainedThreshold');
+  } finally {
+    cleanup(ctx);
+  }
+
   // ---- report: live auth failure must not surface old counts ------------------
   ctx = scratch('report-auth', { status: seededCache() });
   try {

@@ -99,6 +99,15 @@ const json = (body) => ({ outcome: 'json', httpStatus: 200, body });
     assert.strictEqual(st2.state, 'healthy', '40% remaining is above the 0.2 default');
   });
 
+  await test('a finite threshold of 0 is honored verbatim — never clamped to 0.2', async () => {
+    const item = { name: 'plan_total_token', used: 950, limit: 1000 };
+    const s = scripted({ usage: json(usageBody(item)), detail: json(detailBody()) });
+    const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get, threshold: 0 });
+    assert.strictEqual(st.state, 'healthy',
+      '5% remaining stays healthy under a 0 threshold (isConstrained(windows, 0) is a defined call; only exhaustion constrains)');
+    assert.strictEqual(st.basis, 'token-count');
+  });
+
   await test('compensation and monthUsage never become windows or route state', async () => {
     const s = scripted({ usage: json(usageBody()), detail: json(detailBody()) });
     const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get });

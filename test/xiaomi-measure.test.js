@@ -71,8 +71,17 @@ const route = { id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-pla
   await test('basisOf: explicit basis wins; otherwise derived from evidence', () => {
     assert.strictEqual(basisOf({ basis: 'token-count', windows: [{ type: 'weekly' }] }), 'token-count');
     assert.strictEqual(basisOf({ balance: { available: 12 }, windows: [] }), 'balance');
-    assert.strictEqual(basisOf({ windows: [{ type: 'tokens' }] }), 'token-count');
-    assert.strictEqual(basisOf({ windows: [{ type: 'weekly' }] }), 'quota-window');
+    // [#80 fix] Stale pins moved forward: a window without usable numeric
+    // remaining/limit evidence is NOT a measurement — both derive `none`
+    // (previously the presence of any window object claimed a basis).
+    assert.strictEqual(basisOf({ windows: [{ type: 'tokens' }] }), 'none');
+    assert.strictEqual(basisOf({ windows: [{ type: 'weekly' }] }), 'none');
+    assert.strictEqual(basisOf({ windows: [{ type: 'tokens', remaining: 5, limit: 100 }] }), 'token-count');
+    assert.strictEqual(basisOf({ windows: [{ type: 'weekly', remaining: 5, limit: 100 }] }), 'quota-window');
+    // Malformed objects never yield a measurement basis.
+    assert.strictEqual(basisOf({ state: 'unknown', windows: [{}] }), 'none');
+    assert.strictEqual(basisOf({ state: 'unknown', windows: [{ type: 'tokens', remaining: null, limit: null }] }), 'none');
+    assert.strictEqual(basisOf({ state: 'unknown', windows: [], balance: { available: 'not-a-number' } }), 'none');
     assert.strictEqual(basisOf({ windows: [] }), 'none');
     assert.strictEqual(basisOf(null), 'none');
     assert.strictEqual(basisOf({ basis: 'not-a-basis' }), 'none');

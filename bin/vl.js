@@ -474,7 +474,7 @@ async function reportCmd(args) {
   // usage/detail pair for the whole operation (F4), projected to every
   // Xiaomi alias. Every recognizable cached Xiaomi row — configured,
   // canonical, orphaned — is stripped from this render (F1).
-  const statusById = await xiaomiLiveStatuses(cfg);
+  const statusById = await xiaomiLiveStatuses(cfg, { threshold: cfg.gate.constrainedThreshold });
   const liveEntries = xiaomiLiveEntries(cfg, statusById);
   if (args.includes('--json')) {
     const isXiaomiEntry = xiaomiCacheFilter(cfg);

@@ -499,8 +499,14 @@ test('vl report --json keeps the raw cache document (v1 JSON compatibility)', ()
   // document with no new envelope — equal to status.json after JSON
   // serialization with only the additive derived `basis` key per route,
   // NOT byte-identical to the on-disk bytes.
-  const rawStatus = require('fs').readFileSync(require('path').join(dir, 'status.json'), 'utf8').trim();
-  const rawNoBasis = JSON.parse(JSON.stringify(JSON.parse(rawStatus)));
+  const rawStatusText = require('fs').readFileSync(require('path').join(dir, 'status.json'), 'utf8').trim();
+  const rawParsed = JSON.parse(rawStatusText);
+  // [#80][A2] Assert basis absence BEFORE deleting/normalizing: an unintended
+  // cache write of the additive field must fail this check, not be scrubbed
+  // by it.
+  assert.ok(!('basis' in rawParsed.routes['kimi-code-plan'].status),
+    'the on-disk raw status.json must be asserted basis-free before normalization');
+  const rawNoBasis = JSON.parse(JSON.stringify(rawParsed));
   delete rawNoBasis.routes['kimi-code-plan'].status.basis;
   assert.deepStrictEqual(JSON.parse(JSON.stringify(parsed)), expectedDoc,
     'report --json must be semantically equal to status.json + additive #80 basis');

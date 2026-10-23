@@ -58,7 +58,7 @@ is an allow: it fails open). See
 | `glm-coding-plan` | Z.ai (GLM) | % used + `nextResetTime` |
 | `deepseek-direct` | DeepSeek | balance + `is_available` |
 | `openrouter-main` | OpenRouter | balance + spent today/week |
-| `xiaomi-token-plan` | Xiaomi (experimental, opt-in) | token-plan counts; route state stays `unknown` (see below) |
+| `xiaomi-token-plan` | Xiaomi (experimental, opt-in) | token-plan counts; state derived from the tokens window (see below) |
 
 Anthropic is omitted — Claude Code surfaces its own native rate-limit state.
 
@@ -438,15 +438,26 @@ vl.js report | report --json | check xiaomi-token-plan | refresh | snapshot --js
 - `snapshot --json` is the explicitly **diagnostic** view: it never fetches and
   keeps timestamped historical Xiaomi observations with explicit freshness
   labels (always stale once written, because the route uses `ttlSeconds: 0`).
-- The dispatch gate stays fail-open: an `unknown` Xiaomi route never denies.
+- The dispatch gate follows the shared rules: an `unknown` or stale Xiaomi
+  route stays fail-open (never denies), while a fresh `exhausted` Xiaomi route
+  denies in `deny` mode exactly like every other exhausted provider.
 
 ### What the numbers mean
 
-Valid `plan_total_token` counts display as one `tokens` window while the route
-**state stays `unknown`**, because compensation-pool consumption, reset-date
-parsing, and plan tier/status semantics are unresolved by evidence — no
-exhaustion/constraint verdict, reset time, compensation window, or tier label
-is ever inferred. An explicitly expired plan shows `unknown` with no windows.
+Valid `plan_total_token` counts display as one `tokens` window and the route
+state is derived **only** from the tokens window itself: `exhausted` at 0
+remaining, `constrained` below the configured `gate.constrainedThreshold`
+(default 0.2 — 20%), `healthy` at or above it — the status carries the
+measurement basis `token-count`, so
+`check`/`report` JSON and report text always say which evidence the verdict
+came from (`healthy · tokens 75% (token count)`). Compensation-pool
+consumption, reset-date parsing, and plan tier/status semantics remain
+unresolved by evidence: no reset time, compensation window, or tier label is
+ever inferred, and an explicitly expired plan (or unrecognized payload) shows
+`unknown` with `basis: none` and no windows — never a healthy-looking
+measurement. The console's `currentPeriodEnd` is disclosed as observed
+evidence (`plan period ends <date> (reported)` in text, `detail.currentPeriodEnd`
+in JSON) and is never promoted into `resetAt`.
 There is no SSO or automatic-renewal code: an invalid session renders
 `session unavailable — open https://platform.xiaomimimo.com/ in Chrome
 (profile Profile 1)…` for a **manual login in the selected profile**; the next

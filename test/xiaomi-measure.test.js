@@ -82,6 +82,14 @@ const route = { id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-pla
     assert.strictEqual(basisOf({ state: 'unknown', windows: [{}] }), 'none');
     assert.strictEqual(basisOf({ state: 'unknown', windows: [{ type: 'tokens', remaining: null, limit: null }] }), 'none');
     assert.strictEqual(basisOf({ state: 'unknown', windows: [], balance: { available: 'not-a-number' } }), 'none');
+    // `limit: 0` cannot produce a meaningful percentage (0/0) — not a
+    // measurement, so it must never yield a non-`none` basis.
+    assert.strictEqual(basisOf({ windows: [{ type: 'tokens', remaining: 0, limit: 0 }] }), 'none');
+    assert.strictEqual(basisOf({ windows: [{ type: 'weekly', remaining: 0, limit: 0 }] }), 'none');
+    // Negative direction pinned: finite remaining + finite limit > 0 still
+    // derives the window basis.
+    assert.strictEqual(basisOf({ windows: [{ type: 'tokens', remaining: 0, limit: 100 }] }), 'token-count');
+    assert.strictEqual(basisOf({ windows: [{ type: 'weekly', remaining: 0, limit: 100 }] }), 'quota-window');
     assert.strictEqual(basisOf({ windows: [] }), 'none');
     assert.strictEqual(basisOf(null), 'none');
     assert.strictEqual(basisOf({ basis: 'not-a-basis' }), 'none');

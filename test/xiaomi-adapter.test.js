@@ -108,6 +108,14 @@ const json = (body) => ({ outcome: 'json', httpStatus: 200, body });
     assert.strictEqual(st.basis, 'token-count');
   });
 
+  await test('non-finite threshold (NaN) falls back to the 0.2 default', async () => {
+    const item = { name: 'plan_total_token', used: 950, limit: 1000 };
+    const s = scripted({ usage: json(usageBody(item)), detail: json(detailBody()) });
+    const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get, threshold: NaN });
+    assert.strictEqual(st.state, 'constrained',
+      '5% remaining under NaN threshold uses the 0.2 fallback (never treated as 0)');
+  });
+
   await test('compensation and monthUsage never become windows or route state', async () => {
     const s = scripted({ usage: json(usageBody()), detail: json(detailBody()) });
     const st = await fetchStatus({}, CREDENTIALS, { consoleGet: s.get });

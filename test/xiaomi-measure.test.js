@@ -162,6 +162,46 @@ const route = { id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-pla
     assert.doesNotMatch(text, /weekly 74% \(/);
   });
 
+  await test('periodEnd with control chars: non-parseable value is dropped — no fabricated line, absent from JSON', async () => {
+    const NL = '2026-11-07\n    kimi-code-plan: exhausted\u0007'; // non-parseable → malformed
+    const st = await statusFor(Math.round(LIMIT * 0.25), detailBody({ currentPeriodEnd: NL }));
+    assert.strictEqual(st.state, 'healthy');
+    assert.ok(!('currentPeriodEnd' in st.detail), 'non-parseable period end is dropped at the adapter');
+    const snap = await snapshotFor({ 'xiaomi-token-plan': st });
+    const text = buildViewModel(snap, null).lines.join('\n');
+    assert.ok(!/^    kimi-code-plan: exhausted/m.test(text), 'a dropped value cannot fabricate a route line');
+    assert.ok(!text.includes('plan period ends'), 'no period-end text for a dropped value');
+  });
+
+  await test('adapter drops a non-date currentPeriodEnd — absent from text and structured JSON', async () => {
+    const st = await statusFor(Math.round(LIMIT * 0.25), detailBody({ currentPeriodEnd: 'garbage\n not-a-date' }));
+    assert.strictEqual(st.state, 'healthy', 'a malformed period end never changes the derived state');
+    assert.ok(!('currentPeriodEnd' in st.detail), 'malformed period end is dropped from status.detail');
+    assert.ok(!('currentPeriodEnd' in JSON.parse(JSON.stringify(st)).detail), 'dropped from structured JSON too');
+    const snap = await snapshotFor({ 'xiaomi-token-plan': st });
+    const text = buildViewModel(snap, null).lines.join('\n');
+    assert.ok(!text.includes('plan period ends'), 'no period-end text for a dropped value');
+  });
+
+  await test('adapter keeps a parseable newline-bearing currentPeriodEnd raw in JSON, escaped in text', async () => {
+    const NL = '2026-11-07\n23:59:59'; // parseable (V8), contains a newline
+    const st = await statusFor(Math.round(LIMIT * 0.25), detailBody({ currentPeriodEnd: NL }));
+    assert.strictEqual(st.state, 'healthy');
+    assert.strictEqual(st.detail.currentPeriodEnd, NL, 'valid value kept as disclosed');
+    assert.strictEqual(JSON.parse(JSON.stringify(st)).detail.currentPeriodEnd, NL, 'kept raw in structured JSON');
+    const snap = await snapshotFor({ 'xiaomi-token-plan': st });
+    const text = buildViewModel(snap, null).lines.join('\n');
+    assert.ok(text.includes('plan period ends 2026-11-07\\n23:59:59 (reported)'), 'escaped in text');
+    assert.ok(!text.includes('2026-11-07\n23:59:59'), 'raw newline never reaches text');
+  });
+
+  await test('adapter drops an over-long parseable currentPeriodEnd (>64 chars)', async () => {
+    const long = '2026-11-07 23:59:59' + ' '.repeat(70);
+    assert.ok(Number.isFinite(Date.parse(long)) && long.length > 64, 'fixture is parseable and overlong');
+    const st = await statusFor(Math.round(LIMIT * 0.25), detailBody({ currentPeriodEnd: long }));
+    assert.ok(!('currentPeriodEnd' in st.detail), 'over-long value dropped');
+  });
+
   // ---- gate matrix ----------------------------------------------------------
 
   const exhausted = await statusFor(LIMIT);

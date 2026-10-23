@@ -439,8 +439,9 @@ vl.js report | report --json | check xiaomi-token-plan | refresh | snapshot --js
 
 Valid `plan_total_token` counts display as one `tokens` window and the route
 state is derived **only** from the tokens window itself: `exhausted` at 0
-remaining, `constrained` below 20% (`gate.constrainedThreshold`), `healthy`
-at 20% or more — the status carries the measurement basis `token-count`, so
+remaining, `constrained` below the configured `gate.constrainedThreshold`
+(default 0.2 — 20%), `healthy` at or above it — the status carries the
+measurement basis `token-count`, so
 `check`/`report` JSON and report text always say which evidence the verdict
 came from (`healthy · tokens 75% (token count)`). Compensation-pool
 consumption, reset-date parsing, and plan tier/status semantics remain

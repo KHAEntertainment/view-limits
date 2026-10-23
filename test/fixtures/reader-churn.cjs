@@ -5,7 +5,9 @@
 // VL_TEST_CHURN_DOCS  JSON array of documents, one per writer.
 // VL_TEST_CHURN_AT    1-based index of the read attempt of config.json (or
 //                     .prev) before which writer 1 begins. Default 1.
-// VL_TEST_HOOK_JOURNAL  every step is journaled there as one JSON line.
+// VL_TEST_HOOK_JOURNAL  every step is journaled there as one JSON line. Each
+//                     read names its `site`: the innermost bin/vl.js function
+//                     on the stack, so a test can aim the churn at one read.
 //
 // Each writer behaves as a real publisher in another process would: it takes
 // the REAL provider mutation lock for its whole publish, moves config.json
@@ -62,12 +64,21 @@ function complete() {
   if (writer >= docs.length) stopped = true;
 }
 
+function site() {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 50;
+  const stack = new Error().stack;
+  Error.stackTraceLimit = limit;
+  const m = String(stack).match(/at (?:async )?(\S+) \([^)]*bin\/vl\.js:/);
+  return m ? m[1] : null;
+}
+
 fs.readFileSync = function readWithChurn(file, ...rest) {
   const name = path.basename(String(file));
   const isConfig = name === 'config.json' || name === 'config.json.prev';
   if (isConfig) {
     attempts += 1;
-    journal({ step: 'read', attempt: attempts, name });
+    journal({ step: 'read', attempt: attempts, name, site: site() });
     if (!stopped && attempts === at && writer === 0) begin();
   }
   try {

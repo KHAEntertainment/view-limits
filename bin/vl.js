@@ -312,7 +312,11 @@ function unknownStatus(detail) {
 
 async function refresh(quiet, fromSessionStart = false) {
   const cfg = loadConfig();
-  if (fromSessionStart && !cfg.refreshOnSessionStart) return;
+  // The SessionStart warm-up is async and silent: on an unconfirmed read it
+  // does nothing, and the `session-start` hook reports the notice instead.
+  if (fromSessionStart && (configInconclusive(cfg) || !cfg.refreshOnSessionStart)) return;
+  // An unconfirmed read is not "no credentials configured yet" (PR #82 R6 C1).
+  refuseInconclusive(cfg);
   // Xiaomi eligibility is config-only (route presence) — no vault read.
   // Custom routes (Issue #55) carry their source on a valid route.monitor
   // rather than in cfg.providers; they still need a vault credential keyed
@@ -697,6 +701,8 @@ function pickFreePort() {
 // 5-minute abandon timeout, then exits).
 function serve(port, nonce, ids) {
   const cfg = loadConfig();
+  // An unconfirmed read would make an existing route look unknown.
+  refuseInconclusive(cfg);
   // The known set is the SETUP CANDIDATES, not only cfg.routes. config.json is
   // assembled by setup, so on a fresh install a built-in has no row until its
   // credential is stored — by this very form. Validating against cfg.routes
@@ -1027,7 +1033,11 @@ function parseCredentialArgs(cfg, args, opts = {}) {
 // and exit 1 when it is missing, exactly as bare setup does in that state.
 function requireRowAfterStore(id) {
   if (!builtInRoute(id)) return;
-  const routes = loadConfig().routes;
+  const cfg = loadConfig();
+  // The store succeeded; an unconfirmed reread proves neither that the row is
+  // missing nor that it exists, so it reports neither (exit 9, retry).
+  refuseInconclusive(cfg);
+  const routes = cfg.routes;
   if (Array.isArray(routes) && routes.some((r) => r && r.id === id)) return;
   log(`the credential for "${id}" is stored, but its route is not configured yet — run: vl.js setup (with no route id) to add it.`);
   process.exitCode = 1;
@@ -1401,6 +1411,8 @@ function setup(args) {
   // Report from the POST-state, re-read from disk: "present" is only true if
   // every stored credential also has its row.
   const after = loadConfig();
+  // An unconfirmed reread would report every stored credential as row-less.
+  refuseInconclusive(after);
   const rowlessAfter = rowlessCredentials(after);
   // "Added" is read off the rows that now exist, not inferred from leaving the
   // row-less set: a credential removed meanwhile leaves that set too, with no row.

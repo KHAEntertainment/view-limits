@@ -766,7 +766,7 @@ test('pin 8: UNCONTENDED READ WORKLOAD — gate, report, snapshot, check and ses
   }
   const strictJournal = path.join(__dirname, 'fixtures/strict-journal.cjs');
   for (const dir of [present, lone]) {
-    for (const args of [['gate'], ['report'], ['snapshot', '--json'], ['check', 'kimi-code-plan'], ['session-start']]) {
+    for (const args of [['gate'], ['report'], ['snapshot', '--json'], ['check', 'kimi-code-plan'], ['session-start'], ['config'], ['provider', 'list', '--json']]) {
       const journal = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-strict-')), 'journal');
       const j = journals();
       const r = spawnSync(process.execPath, [cli, ...args], {
@@ -808,6 +808,91 @@ test('pin 8: lib/lock.js requires nothing in lib/, and only lib/config.js and li
     walk(path.join(root, sub));
   }
   assert.deepStrictEqual(importers.sort(), ['lib/config.js', 'lib/provider-lifecycle.js']);
+});
+
+// ---- PR #82 round 6 (owner ruling "fix the commands"): consumer wiring --------------
+//
+// A command whose lock-free config read could not confirm config.json must not
+// act on, or present, built-in DEFAULTS. These run the REAL CLI with
+// test/fixtures/reader-churn.cjs: other processes' publishes — each holding the
+// real lock for its whole publish — land between the command's reads.
+const churnPreload = path.join(__dirname, 'fixtures/reader-churn.cjs');
+const strictJournalPreload = path.join(__dirname, 'fixtures/strict-journal.cjs');
+const xiaomiPreload = path.join(__dirname, 'fixtures/xiaomi-cli-preload.cjs');
+const kimiDoc = (extra) => ({ routes: [builtInRoute('kimi-code-plan'), ...extra], vault: { backend: 'file' }, gate: { mode: 'off' } });
+const CHURN_DOCS = [1, 2, 3].map((n) => kimiDoc([customDoc(`custom-w${n}`).routes[0]]));
+
+function churnRun(dir, args, { at = 1, preloads = [], extra = {} } = {}) {
+  const side = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-churn-'));
+  const hook = path.join(side, 'hook');
+  const locks = path.join(side, 'locks');
+  const r = run(dir, args, journals(), {
+    NODE_OPTIONS: [preload, ...preloads, churnPreload, strictJournalPreload].map((p) => `--require=${p}`).join(' '),
+    VL_TEST_CHURN_DOCS: JSON.stringify(CHURN_DOCS), VL_TEST_CHURN_AT: String(at), VL_TEST_HOOK_JOURNAL: hook,
+    VL_STRICT_JOURNAL: locks, VL_STRICT_JOURNAL_VAULT: 'pass', ...extra,
+  });
+  const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean) : []);
+  const steps = read(hook).map((l) => JSON.parse(l)).filter((s) => s.step !== 'read');
+  return { r, steps, acquires: read(locks).filter((c) => c.startsWith('acquireMutationLock')) };
+}
+// Which config read the churn starts at. A command in MIGRATING_COMMANDS makes
+// one read first in the dispatcher (bin/vl.js, lifecycleIo for the migration,
+// which decides presence by lstat under its own lock), so its own read is the
+// 2nd; `config` does not migrate, so its own read is the 1st.
+const OWN_READ = (args) => (args[0] === 'config' ? 1 : 2);
+const EXHAUSTED = (steps) => steps.filter((s) => s.step === 'miss').length === 6 && steps.filter((s) => s.step === 'complete').length === 3;
+
+test('pin 9: config and provider list on an unconfirmed read — the notice, exit 9, never DEFAULTS or an empty list', () => {
+  for (const args of [['config'], ['provider', 'list', '--json'], ['provider', 'list']]) {
+    const dir = seeded([builtInRoute('kimi-code-plan')]);
+    const { r, steps, acquires } = churnRun(dir, args, { at: OWN_READ(args) });
+    assert.ok(EXHAUSTED(steps), `premise: three publishes exhausted every lock-free round: ${JSON.stringify(steps)}`);
+    assert.strictEqual(r.status, 9, `${args.join(' ')}: ${r.stdout}${r.stderr}`);
+    assert.strictEqual(r.stdout, '', `${args.join(' ')} presented an unconfirmed configuration: ${r.stdout}`);
+    assert.match(r.stderr, /config unreadable mid-write; retry/);
+    assert.deepStrictEqual(acquires, [], `${args.join(' ')} took the lock to display`);
+    assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan', 'custom-w3'], 'premise: the third writer\'s document is committed');
+  }
+});
+
+test('pin 9: check/remove/setup/update <id> on an unconfirmed read — exit 9 and nothing touched, never "unknown route"', () => {
+  for (const args of [['check', 'kimi-code-plan'], ['remove', 'kimi-code-plan'], ['setup', 'kimi-code-plan', '--key', KEY_B],
+    ['update', 'kimi-code-plan', '--key', KEY_B], ['provider', 'remove', 'custom-w1']]) {
+    const dir = seeded([builtInRoute('kimi-code-plan')]);
+    inDataDir(dir, () => vault.set('kimi-code-plan', KEY_A));
+    const { r, steps, acquires } = churnRun(dir, args, { at: OWN_READ(args) });
+    assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
+    assert.strictEqual(r.status, 9, `${args.join(' ')}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /config unreadable mid-write; retry/);
+    assert.doesNotMatch(r.stderr, /unknown route|not configured/i);
+    assert.deepStrictEqual(acquires, [], `${args.join(' ')} took the lock on its refusal path`);
+    assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan', 'custom-w3'], `${args.join(' ')} changed config.json`);
+    assert.strictEqual(inDataDir(dir, () => vault.get('kimi-code-plan')), KEY_A, `${args.join(' ')} changed the stored credential`);
+  }
+});
+
+test('pin 9: Xiaomi setup reads, modifies and publishes under ONE lock hold — a concurrent publisher cannot interleave', () => {
+  // Read 4 is the route-list read inside planXiaomiConfig (1: the dispatcher's
+  // migration read; 2: setup's own; 3: the plan's base document). A writer that tries to begin there
+  // cannot take the lock, so the plan is built from — and written back over —
+  // exactly the document it read.
+  const dir = seeded([builtInRoute('kimi-code-plan'), customDoc('custom-keep').routes[0]]);
+  fs.mkdirSync(path.join(dir, 'home'), { recursive: true });
+  const chrome = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-chrome-'));
+  const { r, steps } = churnRun(dir, ['setup', 'xiaomi-token-plan', '--chrome-source', chrome, '--profile', 'Profile 46'],
+    { at: 4, preloads: [xiaomiPreload], extra: { HOME: path.join(dir, 'home') } });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(steps, [{ step: 'blocked', writer: 1 }], `a publisher interleaved with the Xiaomi read-modify-write: ${JSON.stringify(steps)}`);
+  assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan', 'custom-keep', 'xiaomi-token-plan'], 'a non-Xiaomi route was dropped');
+  // And an unconfirmed read before the plan: refused, nothing written.
+  const early = seeded([builtInRoute('kimi-code-plan'), customDoc('custom-keep').routes[0]]);
+  fs.mkdirSync(path.join(early, 'home'), { recursive: true });
+  const e = churnRun(early, ['setup', 'xiaomi-token-plan', '--chrome-source', chrome, '--profile', 'Profile 46'],
+    { at: 2, preloads: [xiaomiPreload], extra: { HOME: path.join(early, 'home') } });
+  assert.ok(EXHAUSTED(e.steps), `premise: ${JSON.stringify(e.steps)}`);
+  assert.strictEqual(e.r.status, 9, e.r.stderr);
+  assert.deepStrictEqual(routeIds(early), ['kimi-code-plan', 'custom-w3'], 'an unconfirmed read wrote a Xiaomi document');
+  assert.strictEqual(fs.existsSync(path.join(early, 'bin')), false, 'the helper was built on an unconfirmed read');
 });
 
 test('the lifecycle publish path, called directly with the migration pending, is refused', async () => {

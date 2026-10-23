@@ -216,12 +216,20 @@ function settings(mode, injectContext) {
       assert.strictEqual(cfg.gate.injectContext, true);
       assert.strictEqual(cfg.refreshOnSessionStart, true);
     }
-    for (const raw of [null, '{}', 'null', '[]', '{broken',
+    // No config.json at all: a lock-free read cannot tell that from a publish
+    // in flight, so `config` refuses (exit 9) rather than present DEFAULTS as
+    // the configuration (PR #82 round 6 ruling).
+    fs.rmSync(configPath, { force: true });
+    const absent = spawnSync(process.execPath, [cli, 'config'], { env: refreshEnv, encoding: 'utf8', timeout: 5000 });
+    assert.strictEqual(absent.status, 9, absent.stderr);
+    assert.strictEqual(absent.stdout, '');
+    assert.match(absent.stderr, /config unreadable mid-write; retry/);
+    // Present but malformed or partial: the documented defaults apply.
+    for (const raw of ['{}', 'null', '[]', '{broken',
       JSON.stringify({ gate: { mode: 'bad', injectContext: 'true' }, refreshOnSessionStart: 'true' }),
       JSON.stringify({ gate: null }),
     ]) {
-      if (raw === null) fs.rmSync(configPath, { force: true });
-      else fs.writeFileSync(configPath, raw);
+      fs.writeFileSync(configPath, raw);
       const cfg = JSON.parse(run(['config'], { env: refreshEnv }).stdout);
       assert.strictEqual(cfg.gate.mode, 'off');
       assert.strictEqual(cfg.gate.injectContext, false);

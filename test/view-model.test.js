@@ -553,4 +553,91 @@ assert.strictEqual(vm.reauthNote({ url: 'https://other.example/' }), 'session un
   assert.strictEqual(round.lines.length, v.lines.length);
 }
 
+// ---- #80 fix batch: periodEnd control characters never fabricate a line ----
+
+{
+  const evil = '2026-11-07\n    kimi-code-plan: exhausted\u0007';
+  const v = vm.buildViewModel({
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    completeness: 'partial',
+    caller: {}, harnesses: [], sessions: [], profiles: [],
+    routes: [{
+      id: 'xiaomi-token-plan', configured: true,
+      provider: configured('xiaomi'), account: configured('token-plan'),
+      modelBinding: configured('mimo'), harnessBinding: configured('mimo'),
+      models: unknown('model-evidence-absent'),
+      boundBy: [],
+      resource: {
+        state: observed('healthy'),
+        windows: [], balance: null, usage: null, error: null, reauth: null,
+        resetAt: unknown('cached-field-absent'),
+        observedAt: observed('2026-09-21T00:00:00.000Z'),
+        freshUntil: observed('2026-09-21T00:02:00.000Z'),
+        freshness: 'fresh',
+        source: observed('xiaomi'),
+        periodEnd: observed(evil),
+      },
+    }],
+    diagnostics: [],
+  }, null);
+  const text = v.lines.join('\n');
+  // The newline inside periodEnd must not create a fabricated route line.
+  assert.ok(!/^    kimi-code-plan: exhausted/m.test(text),
+    'control characters in periodEnd must not fabricate a route line');
+  // It renders escaped, on the single real route line.
+  assert.ok(text.includes('plan period ends 2026-11-07\\n    kimi-code-plan: exhausted\\u0007 (reported)'),
+    'periodEnd control characters are escaped in text rendering');
+}
+
+// ---- #80 fix batch: explicit `none` basis renders its suffix windowless ----
+
+{
+  const v = vm.buildViewModel({
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    completeness: 'partial',
+    caller: {}, harnesses: [], sessions: [], profiles: [],
+    routes: [
+      {
+        id: 'explicit-none', configured: true,
+        provider: configured('kimi'), account: configured('code-plan'),
+        modelBinding: configured('kimi'), harnessBinding: configured('kimi'),
+        models: unknown('model-evidence-absent'),
+        boundBy: [],
+        resource: {
+          state: observed('unknown'),
+          windows: [], balance: null, usage: null, error: null, reauth: null,
+          resetAt: unknown('cached-field-absent'),
+          observedAt: observed('2026-09-21T00:00:00.000Z'),
+          freshUntil: observed('2026-09-21T00:02:00.000Z'),
+          freshness: 'fresh',
+          source: observed('kimi'),
+          basis: observed('none'),
+        },
+      },
+      {
+        id: 'no-basis', configured: true,
+        provider: configured('kimi'), account: configured('code-plan'),
+        modelBinding: configured('kimi'), harnessBinding: configured('kimi'),
+        models: unknown('model-evidence-absent'),
+        boundBy: [],
+        resource: {
+          state: observed('unknown'),
+          windows: [], balance: null, usage: null, error: null, reauth: null,
+          resetAt: unknown('cached-field-absent'),
+          observedAt: observed('2026-09-21T00:00:00.000Z'),
+          freshUntil: observed('2026-09-21T00:02:00.000Z'),
+          freshness: 'fresh',
+          source: observed('kimi'),
+        },
+      },
+    ],
+    diagnostics: [],
+  }, null);
+  const lines = v.lines;
+  assert.ok(lines.some((l) => l.includes('explicit-none: unknown (none)')),
+    'explicit `none` basis renders its suffix even without quota text');
+  assert.ok(lines.some((l) => l.includes('no-basis: unknown') && !l.includes(' (none)')),
+    'a status without an explicit basis still renders no suffix (byte-identical guarantee)');
+}
+
 console.log('view-model: PASS');

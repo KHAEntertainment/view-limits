@@ -895,6 +895,59 @@ test('pin 9: Xiaomi setup reads, modifies and publishes under ONE lock hold — 
   assert.strictEqual(fs.existsSync(path.join(early, 'bin')), false, 'the helper was built on an unconfirmed read');
 });
 
+// The two other Xiaomi config writers had the same read-outside-the-lock shape.
+function xiaomiConfigured() {
+  const chrome = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-chrome-'));
+  const dir = scratch();
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    routes: [builtInRoute('kimi-code-plan'), customDoc('custom-keep').routes[0], {
+      id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan', match: { model: 'mimo' },
+      ttlSeconds: 0, credentialSource: 'chrome-cookies',
+    }],
+    providers: { xiaomi: { baseUrl: 'https://platform.xiaomimimo.com' } },
+    xiaomi: { chromeSource: chrome, chromeProfile: 'Profile 46' },
+    vault: { backend: 'file' }, gate: { mode: 'off' },
+  }));
+  fs.mkdirSync(path.join(dir, 'home'), { recursive: true });
+  return { dir, chrome };
+}
+
+test('pin 9: the Xiaomi revalidation and removal writers also read-modify-write under ONE lock hold', () => {
+  // Read 3 is each writer's base-document read, inside its hold (1: the
+  // dispatcher's migration read; 2: the command's own).
+  const upd = xiaomiConfigured();
+  const u = churnRun(upd.dir, ['update', 'xiaomi-token-plan', '--profile', 'Profile 47'],
+    { at: 3, preloads: [xiaomiPreload], extra: { HOME: path.join(upd.dir, 'home') } });
+  assert.strictEqual(u.r.status, 0, u.r.stderr);
+  assert.deepStrictEqual(u.steps, [{ step: 'blocked', writer: 1 }], `a publisher interleaved with the revalidation write: ${JSON.stringify(u.steps)}`);
+  assert.deepStrictEqual(routeIds(upd.dir), ['kimi-code-plan', 'custom-keep', 'xiaomi-token-plan'], 'revalidation dropped a route');
+  assert.strictEqual(docAt(path.join(upd.dir, 'config.json')).xiaomi.chromeProfile, 'Profile 47');
+  const rem = xiaomiConfigured();
+  const m = churnRun(rem.dir, ['remove', 'xiaomi-token-plan'],
+    { at: 3, preloads: [xiaomiPreload], extra: { HOME: path.join(rem.dir, 'home') } });
+  assert.strictEqual(m.r.status, 0, m.r.stderr);
+  assert.deepStrictEqual(m.steps, [{ step: 'blocked', writer: 1 }], `a publisher interleaved with the removal write: ${JSON.stringify(m.steps)}`);
+  assert.deepStrictEqual(routeIds(rem.dir), ['kimi-code-plan', 'custom-keep'], 'removal dropped a non-Xiaomi route');
+});
+
+test('pin 9: err() inside a Xiaomi lock hold RELEASES the lock on exit — no ticket left for a later reclaim', () => {
+  // A denied Keychain grant exits through err() while setup holds the lock.
+  const { dir, chrome } = xiaomiConfigured();
+  const before = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+  const r = run(dir, ['setup', 'xiaomi-token-plan', '--chrome-source', chrome, '--profile', 'Profile 46'], journals(), {
+    NODE_OPTIONS: `--require=${preload} --require=${xiaomiPreload}`, HOME: path.join(dir, 'home'), VL_XIAOMI_GRANT_MODE: 'denied',
+  });
+  assert.strictEqual(r.status, 1, `premise: the grant denial exits through err(): ${r.stderr}`);
+  assert.match(r.stderr, /Chrome key access was not granted/);
+  // Released, not merely reclaimable: the lock directory is empty BEFORE any
+  // other contender looks at it, so nothing depended on the dead-pid reaping.
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, lockModule.LOCK_DIR)), [], 'err() left its lock ticket behind');
+  const next = lockModule.acquireMutationLock(dir);
+  assert.ok(next.ok, 'a later writer could not take the lock');
+  next.release();
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before, 'a denied setup changed config.json');
+});
+
 test('the lifecycle publish path, called directly with the migration pending, is refused', async () => {
   // No dispatcher in front: persistRoute -> io.saveConfig must not create
   // config.json, and reports the same migration-pending status.

@@ -1095,11 +1095,14 @@ test('a TRANSIENTLY UNREADABLE real vault migrates nothing, and migrates once it
     assert.strictEqual(inDataDir(dir, () => vault.probe('kimi-code-plan')), 'unreadable',
       'premise: the real file vault reports unreadable, not absent');
     const r = run(dir, ['provider', 'list', '--json']);
-    assert.strictEqual(r.status, 0, r.stderr);
-    assert.deepStrictEqual(r.json.routes, []);
+    // config.json stays absent, which a lock-free read cannot tell apart from
+    // a publish in flight: the list refuses (exit 9) rather than present an
+    // empty list as the configuration (PR #82 round 6 ruling).
+    assert.strictEqual(r.status, 9, r.stderr);
+    assert.strictEqual(r.stdout, '', 'an unconfirmed configuration was listed');
     assert.strictEqual(fs.existsSync(path.join(dir, 'config.json')), false,
       'an unreadable vault published a config, which disarms the migration forever');
-    assert.strictEqual(r.stderr, `${UNREADABLE_NOTICE}\n`, 'the notice changed shape or gained text');
+    assert.strictEqual(r.stderr, `${UNREADABLE_NOTICE}\n${INCONCLUSIVE_NOTICE}\n`, 'the notices changed shape or gained text');
   } finally {
     fs.chmodSync(secrets, 0o700);
   }
@@ -1131,6 +1134,7 @@ section('real CLI — the unreadable-vault notice: where it lands, what it says,
 // Verbatim on purpose: a notice that silently changes shape is a user-facing
 // regression, so any rewording has to change this line too.
 const UNREADABLE_NOTICE = 'view-limits: the credential vault could not be read, so stored credentials were not migrated into routes and no configuration was written — this retries on the next command.';
+const INCONCLUSIVE_NOTICE = 'view-limits: config unreadable mid-write; retry. (config.json could not be confirmed — it was being replaced while it was read, or does not exist — so the configured providers are not shown.)';
 const NO_CREDS_NUDGE = JSON.stringify({ systemMessage: 'view-limits: no credentials configured yet. Run /view-limits:setup to add your provider keys.' });
 
 function withLockedSecrets(dir, fn) {

@@ -30,7 +30,7 @@ const os = require('os');
 const readline = require('readline');
 const { spawn } = require('child_process');
 
-const { loadConfig, dataDir, expandHome, deepMerge, configPath, saveConfig,
+const { loadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive } = require('../lib/config');
 const {
   readCache, writeCache, isFresh, recoveryBoundedFreshUntil,
@@ -492,6 +492,7 @@ async function reportCmd(args) {
 
 async function check(routeId) {
   const cfg = loadConfig();
+  refuseInconclusive(cfg);
   const route = cfg.routes.find((r) => r.id === routeId);
   if (!route) err(`unknown route "${routeId}" (known: ${cfg.routes.map((r) => r.id).join(', ')})`);
   if (isXiaomi(route)) {
@@ -1068,7 +1069,7 @@ function readUserConfig() {
   } catch (e) {
     // A writer's base document: starting from {} because a publish was in
     // flight would publish a document with everything else dropped.
-    if (e && e.code === 'CONFIG_INCONCLUSIVE') err(CONFIG_INCONCLUSIVE_NOTICE);
+    if (e && e.code === 'CONFIG_INCONCLUSIVE') exitInconclusive();
     return {};
   }
 }
@@ -1107,11 +1108,12 @@ function readUserConfigStrict() {
 
 // Append/refresh the opt-in route + pinned provider settings + explicit
 // chrome source/profile. `routes` merge is by replacement, so the effective
-// route list is written back in full. STAGES the document; committing is
-// explicit so setup can order it after a successful helper build (F3).
+// route list is written back in full. Called ONLY inside withConfigLock, so
+// both reads are strict and exact: no other publish can be in flight, and the
+// document it returns is written back in the same lock hold.
 function planXiaomiConfig(patch) {
   const user = readUserConfig();
-  const effective = loadConfig();
+  const effective = loadConfigStrict();
   const routes = effective.routes.slice();
   const existing = routes.find((route) => route.id === XIAOMI_ROUTE_ID);
   if (existing) {
@@ -1143,19 +1145,38 @@ function planXiaomiConfig(patch) {
 // selection. It must never resurrect a removed canonical route or touch
 // providers — route append + provider pinning remain setup's job.
 function writeXiaomiSourceProfile(patch) {
-  const user = readUserConfig();
-  user.xiaomi = user.xiaomi && typeof user.xiaomi === 'object' && !Array.isArray(user.xiaomi)
-    ? { ...user.xiaomi } : {};
-  Object.assign(user.xiaomi, patch);
-  saveConfigLocked(user);
+  withConfigLock(() => {
+    const user = readUserConfig();
+    user.xiaomi = user.xiaomi && typeof user.xiaomi === 'object' && !Array.isArray(user.xiaomi)
+      ? { ...user.xiaomi } : {};
+    Object.assign(user.xiaomi, patch);
+    saveConfig(user);
+  });
 }
 
 // config.json is published only under the provider mutation lock (lib/config.js
-// saveConfig). For a writer that does not already hold it.
-function saveConfigLocked(doc) {
+// saveConfig). A Xiaomi writer reads its base document, modifies it and
+// publishes it inside ONE hold of the lock, so the document it writes back is
+// never built from a read made before another process's publish — not a
+// partial one (an unconfirmed read) and not a stale one (a lost update).
+// err() exits mid-hold; the exit hook releases the lock so no ticket outlives
+// the command. Returns fn's result (a promise when fn is async).
+function withConfigLock(fn) {
   const lock = lifecycle.acquireMutationLock(dataDir());
   if (!lock.ok) err('another provider change is in progress, so config.json was not changed — rerun shortly.');
-  try { saveConfig(doc); } finally { lock.release(); }
+  const release = () => lock.release();
+  process.once('exit', release);
+  const done = () => { process.removeListener('exit', release); release(); };
+  let out;
+  try {
+    out = fn();
+  } catch (e) {
+    done();
+    throw e;
+  }
+  if (out && typeof out.then === 'function') return out.finally(done);
+  done();
+  return out;
 }
 
 // Private state reset with the F2 refusal surfaced as one fixed actionable
@@ -1228,33 +1249,38 @@ async function setupXiaomi(cfg, options) {
   // identity — and the user's "Always Allow" grant — survives), and the
   // interactive grant runs before reset+save so the first background read
   // is not denied on a fresh machine.
-  const planned = planXiaomiConfig({ chromeSource: source, chromeProfile: profile });
-  let built;
-  try {
-    built = await buildHelper({ pluginRoot: PLUGIN_ROOT, dataDir: dataDir() });
-  } catch (e) {
-    const code = e && typeof e.code === 'string' ? e.code : 'helper-build-failed';
-    if (code === 'unsupported-platform') {
-      err('helper build requires macOS — the Chrome cookie fallback is macOS-only.');
+  // PR #82 round 6: the whole plan → build → grant → reset → commit runs in
+  // ONE hold of the provider mutation lock, so the staged document is written
+  // back exactly as planned from the document it was planned against.
+  await withConfigLock(async () => {
+    const planned = planXiaomiConfig({ chromeSource: source, chromeProfile: profile });
+    let built;
+    try {
+      built = await buildHelper({ pluginRoot: PLUGIN_ROOT, dataDir: dataDir() });
+    } catch (e) {
+      const code = e && typeof e.code === 'string' ? e.code : 'helper-build-failed';
+      if (code === 'unsupported-platform') {
+        err('helper build requires macOS — the Chrome cookie fallback is macOS-only.');
+      }
+      if (code === 'helper-build-failed') {
+        err('helper build failed — install the Xcode command line tools (xcode-select --install), then rerun /view-limits:setup xiaomi-token-plan.');
+      }
+      err('helper build failed — rerun /view-limits:setup xiaomi-token-plan.');
     }
-    if (code === 'helper-build-failed') {
-      err('helper build failed — install the Xcode command line tools (xcode-select --install), then rerun /view-limits:setup xiaomi-token-plan.');
-    }
-    err('helper build failed — rerun /view-limits:setup xiaomi-token-plan.');
-  }
-  log(built && built.skippedRebuild
-    ? 'helper unchanged — identity preserved'
-    : 'background key helper built (non-interactive reads only)');
-  // Round 5: refuse unsafe state BEFORE prompting; user-driven Keychain grant
-  // next; a denial exits here (no config change). The mutating reset runs
-  // only AFTER the grant succeeds.
-  prevalidateXiaomiStateOrFail();
-  await grantInteractiveKeyOrFail();
-  // A successful explicit setup makes the source eligible again: drop any
-  // stale rejected-bundle digest or key-failure suppression. Runs BEFORE the
-  // config commit so a refusal cannot leave a switched selection behind (N2).
-  resetXiaomiStateOrFail();
-  saveConfigLocked(planned);
+    log(built && built.skippedRebuild
+      ? 'helper unchanged — identity preserved'
+      : 'background key helper built (non-interactive reads only)');
+    // Round 5: refuse unsafe state BEFORE prompting; user-driven Keychain grant
+    // next; a denial exits here (no config change). The mutating reset runs
+    // only AFTER the grant succeeds.
+    prevalidateXiaomiStateOrFail();
+    await grantInteractiveKeyOrFail();
+    // A successful explicit setup makes the source eligible again: drop any
+    // stale rejected-bundle digest or key-failure suppression. Runs BEFORE the
+    // config commit so a refusal cannot leave a switched selection behind (N2).
+    resetXiaomiStateOrFail();
+    saveConfig(planned);
+  });
   log(`configured Chrome cookie source for ${XIAOMI_ROUTE_ID} (profile ${profile})`);
   log('run /view-limits to fetch current usage.');
 }
@@ -1293,24 +1319,27 @@ async function updateXiaomi(cfg, options) {
 }
 
 function removeXiaomi(cfg, routeId) {
-  const user = readUserConfig();
-  const routes = Array.isArray(user.routes) ? user.routes : [];
-  const remaining = routes.filter((route) => !(route && route.id === routeId));
-  const aliasStillConfigured = remaining.some((route) => route && route.provider === 'xiaomi');
-  if (!aliasStillConfigured) {
-    // F7: the FINAL Xiaomi route goes — drop its private state first so an
-    // unsafe-metadata refusal leaves the config untouched, then remove the
-    // saved source/profile and provider metadata with it.
-    resetXiaomiStateOrFail();
-    delete user.xiaomi;
-    if (user.providers && typeof user.providers === 'object' && !Array.isArray(user.providers)) {
-      delete user.providers.xiaomi;
+  const aliasStillConfigured = withConfigLock(() => {
+    const user = readUserConfig();
+    const routes = Array.isArray(user.routes) ? user.routes : [];
+    const remaining = routes.filter((route) => !(route && route.id === routeId));
+    const aliasStillConfigured = remaining.some((route) => route && route.provider === 'xiaomi');
+    if (!aliasStillConfigured) {
+      // F7: the FINAL Xiaomi route goes — drop its private state first so an
+      // unsafe-metadata refusal leaves the config untouched, then remove the
+      // saved source/profile and provider metadata with it.
+      resetXiaomiStateOrFail();
+      delete user.xiaomi;
+      if (user.providers && typeof user.providers === 'object' && !Array.isArray(user.providers)) {
+        delete user.providers.xiaomi;
+      }
     }
-  }
-  // When another Xiaomi alias still needs the shared source/profile/provider
-  // metadata, it is intentionally retained.
-  user.routes = remaining;
-  saveConfigLocked(user);
+    // When another Xiaomi alias still needs the shared source/profile/provider
+    // metadata, it is intentionally retained.
+    user.routes = remaining;
+    saveConfig(user);
+    return aliasStillConfigured;
+  });
   // Drop any cached counts so no orphan row can render old Xiaomi numbers.
   try {
     const cache = readCache();
@@ -1327,6 +1356,7 @@ function removeXiaomi(cfg, routeId) {
 
 function setup(args) {
   const cfg = loadConfig();
+  refuseInconclusive(cfg);
   const options = parseCredentialArgs(cfg, args, { offerBuiltIns: true });
 
   // Xiaomi: config + helper build, never the vault or a paste form.
@@ -1392,6 +1422,7 @@ function setup(args) {
 
 async function update(args) {
   const cfg = loadConfig();
+  refuseInconclusive(cfg);
   const options = parseCredentialArgs(cfg, args);
 
   // Xiaomi: revalidate source/profile — no vault preflight, no form.
@@ -1428,6 +1459,7 @@ async function update(args) {
 
 function remove(routeId) {
   const cfg = loadConfig();
+  refuseInconclusive(cfg);
   const route = cfg.routes.find((r) => r.id === routeId);
   if (routeId === XIAOMI_ROUTE_ID || (route && isXiaomi(route))) {
     if (!route) {
@@ -1694,12 +1726,14 @@ async function providerCmd(args) {
   const sub = args[0];
   if (!['add', 'update', 'remove', 'list'].includes(sub)) err(providerUsage());
   const cfg = loadConfig();
+  refuseInconclusive(cfg);
   const opts = parseProviderArgs(args.slice(1));
   const io = lifecycleIo(cfg);
 
   if (sub === 'list') {
     if (opts.routeId) err(providerUsage());
-    return emitLifecycleResult(lifecycle.listProviders(io), opts.json);
+    // List exactly the document just confirmed, not a second read of it.
+    return emitLifecycleResult(lifecycle.listProviders({ ...io, effectiveRoutes: () => cfg.routes }), opts.json);
   }
   if (sub === 'remove') {
     if (!opts.routeId) err('vl.js provider remove requires a route id.');
@@ -1857,6 +1891,7 @@ async function recommendCmd(args) {
 
 function config() {
   const cfg = loadConfig();
+  refuseInconclusive(cfg);
   const out = {
     dataDir: dataDir(),
     vaultBackend: cfg.vault.backend,
@@ -1965,7 +2000,19 @@ const MIGRATION_VAULT_UNREADABLE = 'the credential vault could not be read, so s
 // A config read that could not confirm config.json (lib/config.js
 // readConfigTextIn): it was being replaced by another process while it was
 // read, or it does not exist. Fixed text — no path or error detail.
-const CONFIG_INCONCLUSIVE_NOTICE = 'config.json could not be confirmed (it was being replaced while it was read, or does not exist), so the configured providers are not shown — rerun the command.';
+const CONFIG_INCONCLUSIVE_NOTICE = 'config unreadable mid-write; retry. (config.json could not be confirmed — it was being replaced while it was read, or does not exist — so the configured providers are not shown.)';
+
+// A command that would act on — or display — built-in DEFAULTS from a config
+// read that could not confirm config.json refuses instead: never "unknown
+// route", an empty list or DEFAULTS presented as the real configuration. The
+// exit code is distinct (9). Read-only: it never takes the lock.
+function refuseInconclusive(cfg) {
+  if (configInconclusive(cfg)) exitInconclusive();
+}
+function exitInconclusive() {
+  log(CONFIG_INCONCLUSIVE_NOTICE);
+  process.exit(lifecycle.exitCodeFor(lifecycle.STATUS.CONFIG_INCONCLUSIVE));
+}
 
 // Commands that can write config.json. While the migration is unresolved they
 // are refused: any document they published would disarm the migration for

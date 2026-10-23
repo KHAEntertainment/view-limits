@@ -34,6 +34,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
+const { cliEnv: cliEnvBase, withEnv } = require('./helpers/gated-env.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const PLUGIN_PATH = path.join(ROOT, 'harness', 'opencode', 'plugin', 'view-limits.js');
@@ -121,34 +122,21 @@ const readLog = () =>
 // ~/.view-limits fallback is used — no Claude env anywhere), deterministic
 // clock, and the guard preload that blocks every network/credential channel.
 // VIEW_LIMITS_ROOT / STUB_* are removed unless a test sets them explicitly.
-function cliEnv(options = {}) {
-  const env = {
+// [#78] Env construction moved to test/helpers/gated-env.cjs so the
+// ambient-key scrubbing (CLAUDE_PLUGIN_DATA / CLAUDE_PLUGIN_ROOT /
+// VIEW_LIMITS_ROOT always emitted, undefined ⇒ deleted) is shared with, and
+// pinned by, test/env-isolation.test.js. This wrapper binds this file's
+// per-run constants; every call site keeps its original shape.
+const cliEnv = (options = {}) => cliEnvBase(
+  {
     PATH: process.env.PATH,
     HOME: home,
     NODE_OPTIONS: `--require=${GUARD}`,
     REVIEW_NOW: String(now),
     REVIEW_LOG: tracePath,
-  };
-  for (const key of ['CLAUDE_PLUGIN_ROOT', 'CLAUDE_PLUGIN_DATA', 'VIEW_LIMITS_ROOT', 'STUB_STDOUT', 'STUB_CAPTURE']) {
-    if (options[key] !== undefined) env[key] = options[key];
-  }
-  return env;
-}
-
-function withEnv(env, fn) {
-  const saved = {};
-  for (const key of Object.keys(env)) {
-    saved[key] = process.env[key];
-    if (env[key] === undefined) delete process.env[key];
-    else process.env[key] = env[key];
-  }
-  try { return fn(); } finally {
-    for (const key of Object.keys(saved)) {
-      if (saved[key] === undefined) delete process.env[key];
-      else process.env[key] = saved[key];
-    }
-  }
-}
+  },
+  options,
+);
 
 function assertNoNetworkOrCredentials(log, label) {
   const bad = log.filter((e) => /fetch|http|net|tls|provider|vault/.test(e.kind));

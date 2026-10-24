@@ -540,16 +540,16 @@ await testAsync('B1: a skipped route (corrupt credential) keeps its prior entry;
 });
 
 // B3 — the bounded native observation is part of the shared operation.
-await testAsync('B3: native success — the collection carries the refreshed snapshot', async () => {
+await testAsync('B3: native success — the full view collection carries the refreshed snapshot', async () => {
   scratch();
   const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
   const nativeSnap = { generatedAt: '2026-10-24T12:00:00Z', profiles: [{ key: { host: 'h', provider: 'p', profileId: 'a' } }], sessions: [], harnesses: [], routes: [], diagnostics: [] };
   const { io, calls } = world({ native: nativeSnap });
-  const result = await collector.collect({ cfg, io });
+  const result = await collector.collectView({ cfg, io });
   assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED);
   assert.strictEqual(calls.native, 1, 'the bounded native observation ran');
   assert.strictEqual(result.snapshot, nativeSnap, 'the snapshot is carried');
-  assert.deepStrictEqual(result.native, { outcome: 'completed', error: null });
+  assert.deepStrictEqual(result.native, { outcome: 'completed', codes: [], error: null });
 });
 
 await testAsync('B3: native-only — profiles observed, so it is NOT no-credentials', async () => {
@@ -559,7 +559,7 @@ await testAsync('B3: native-only — profiles observed, so it is NOT no-credenti
     vault: { has: () => false, get: () => null },
     native: { generatedAt: '2026-10-24T12:00:00Z', profiles: [{ key: { host: 'h', provider: 'p', profileId: 'a' } }], sessions: [], harnesses: [], routes: [], diagnostics: [] },
   });
-  const result = await collector.collect({ cfg, io });
+  const result = await collector.collectView({ cfg, io });
   assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED, 'native-only is a completed collection');
   assert.strictEqual(calls.native, 1);
   assert.strictEqual(result.published, false, 'nothing external was published');
@@ -570,18 +570,20 @@ await testAsync('B3: native-only with nothing observed is still no-credentials',
   scratch();
   const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
   const { io } = world({ vault: { has: () => false, get: () => null }, native: {} });
-  const result = await collector.collect({ cfg, io });
+  const result = await collector.collectView({ cfg, io });
   assert.strictEqual(result.outcome, collector.OUTCOME.NO_CREDENTIALS);
+  assert.strictEqual(result.native.outcome, 'unknown', 'nothing observed and nothing failed is unknown');
 });
 
 await testAsync('B3: a native failure is classified and isolated from external siblings', async () => {
   scratch();
   const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
   const { io, calls } = world({ native: new Error('traycer cli missing') });
-  const result = await collector.collect({ cfg, io });
-  assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED, 'external success is unaffected');
+  const result = await collector.collectView({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.PARTIAL, 'an external success with a failed native read is partial');
   assert.strictEqual(calls.native, 1);
-  assert.deepStrictEqual(result.native, { outcome: 'failed', error: 'traycer cli missing' });
+  assert.strictEqual(result.native.outcome, 'failed');
+  assert.ok((result.native.codes || []).length > 0, 'the diagnostic codes are disclosed');
   assert.strictEqual(result.snapshot, null);
 });
 
@@ -589,9 +591,92 @@ await testAsync('B3: a native-only setup whose native source fails is a classifi
   scratch();
   const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
   const { io } = world({ vault: { has: () => false, get: () => null }, native: new Error('boom') });
-  const result = await collector.collect({ cfg, io });
+  const result = await collector.collectView({ cfg, io });
   assert.strictEqual(result.outcome, collector.OUTCOME.FAILED);
   assert.strictEqual(result.reason, collector.REASON.NATIVE_UNAVAILABLE);
+});
+
+// R2-1 — the REAL runtime snapshot service and the REAL Traycer adapter, with
+// a fake RUNNER: the service degrades source failures into diagnostics, and
+// the classification must read those diagnostics, not a throw.
+const NATIVE_IDENTITY = {
+  agentId: { value: 'agent-r2', provenance: 'observed', source: 'callerContext', observedAt: null, freshUntil: null, reason: null },
+  epicId: { value: 'epic-r2', provenance: 'observed', source: 'callerContext', observedAt: null, freshUntil: null, reason: null },
+};
+
+function realViewIo(extra = {}) {
+  return Object.assign({
+    callerContext: NATIVE_IDENTITY,
+  }, extra);
+}
+
+await testAsync('R2-1: a missing CLI is unavailable, NOT a failure; native-only stays no-credentials', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const io = realViewIo({
+    getAdapter: () => ({ fetchStatus: async () => HEALTHY }),
+    vault: { has: () => false, get: () => null }, // no external credentials
+    traycerRun: async () => ({ error: { code: 'ENOENT' } }), // CLI missing
+  });
+  const result = await collector.collectView({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.NO_CREDENTIALS, 'native-only with no CLI stays no-credentials');
+  assert.strictEqual(result.native.outcome, 'unavailable');
+  assert.deepStrictEqual(result.native.codes, ['traycer-cli-missing']);
+});
+
+await testAsync('R2-1: a completed external collection with a failed native read is partial, with codes', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const io = realViewIo({
+    getAdapter: () => ({ fetchStatus: async () => HEALTHY }),
+    vault: { has: () => true, get: () => 'fake-test-key' },
+    traycerRun: async () => ({ error: new Error('runner exploded') }), // read failed
+  });
+  const result = await collector.collectView({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.PARTIAL);
+  assert.strictEqual(result.native.outcome, 'failed');
+  assert.ok(result.native.codes.includes('traycer-read-failed'), `codes: ${result.native.codes}`);
+  assert.strictEqual(result.routes[0].outcome, 'completed', 'the external success survived');
+});
+
+await testAsync('R2-1: a native-only setup whose native read fails is a classified failure', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const io = realViewIo({
+    vault: { has: () => false, get: () => null },
+    traycerRun: async () => ({ timedOut: true }),
+  });
+  const result = await collector.collectView({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.FAILED);
+  assert.strictEqual(result.reason, collector.REASON.NATIVE_UNAVAILABLE);
+  assert.ok(result.native.codes.includes('traycer-read-timeout'), `codes: ${result.native.codes}`);
+});
+
+await testAsync('R2-1: missing launch identity is unknown, and the runner is never invoked', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  let runnerCalls = 0;
+  const io = realViewIo({
+    callerContext: null, // no launch identity
+    env: {}, // and no Traycer launch env
+    vault: { has: () => false, get: () => null },
+    traycerRun: async () => { runnerCalls += 1; return { error: { code: 'ENOENT' } }; },
+  });
+  const result = await collector.collectView({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.NO_CREDENTIALS);
+  assert.strictEqual(result.native.outcome, 'unknown');
+  assert.strictEqual(runnerCalls, 0, 'the native runner is not invoked without a launch identity');
+});
+
+await testAsync('R2-3: collect() itself never runs the native observation (refresh stays external-only)', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io, calls } = world({ vault: { has: () => false, get: () => null } });
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.NO_CREDENTIALS);
+  assert.strictEqual(calls.native, 0, 'refresh/collect never invokes the native runner');
+  assert.strictEqual(result.snapshot, null);
+  assert.strictEqual(result.native, null);
 });
 
 // A1 — the worker lock is released after every outcome, and a publish throw

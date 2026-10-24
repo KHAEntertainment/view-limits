@@ -9,8 +9,9 @@ orchestrator fans work out across models on different provider accounts.
 
 ## What it does
 
-- **`/view-limits`** — renders a live report of each configured route's balance /
-  quota / reset time, with spent-today/this-week where available.
+- **`/view-limits`** — renders a live view of each configured route's balance /
+  quota / reset time, with spent-today/this-week where available. The Claude,
+  Codex and OpenCode surfaces all resolve the same `vl.js view` command.
 - **`/view-limits:setup`** — initial setup: opens a local browser form for routes
   that have no key yet (auto-imports MiniMax from `~/.mmx/config.json`).
 - **`/view-limits:update [route-id]`** — rotate existing keys: opens the form for
@@ -31,8 +32,14 @@ The separate first-run credential notice stays enabled.
 
 Refreshes publish `status.json` by replacing it with a complete file; a failed
 write leaves the previous cache intact. Manual, SessionStart and gate-triggered
-refreshes share worker ownership. A competing manual refresh displays the last
-cache and reports that a refresh is already in progress.
+refreshes share worker ownership, and so does the view. A competing manual
+refresh displays the last cache and reports that a refresh is already in
+progress.
+
+A route whose fetch **fails** keeps its **prior** cached observation, with its
+**unchanged age**: a failed fetch never writes a fresh timestamp over old
+facts, so the route keeps ageing out on its own clock instead of looking
+current. A successful sibling is published independently in the same write.
 
 `gate.refreshLockSeconds` remains the gate's spawn throttle (default 60 seconds),
 not a timeout on a running worker. The gate never waits for a worker. Ownership
@@ -398,6 +405,7 @@ vl.js setup xiaomi-token-plan [--chrome-source PATH] [--profile "Profile 1"]
 vl.js update xiaomi-token-plan [--chrome-source PATH] [--profile "Profile 1"]
 vl.js remove xiaomi-token-plan
 vl.js report | report --json | check xiaomi-token-plan | refresh | snapshot --json
+vl.js view | view --condensed | view --json
 ```
 
 - **`setup`** appends the opt-in route, saves the selected Chrome source and
@@ -426,6 +434,40 @@ vl.js report | report --json | check xiaomi-token-plan | refresh | snapshot --js
   deletes the saved source/profile, the pinned provider entry, and the private
   state, while preserving unrelated configuration. Shared metadata is kept as
   long as another Xiaomi route still needs it.
+
+### The view (`vl.js view`)
+
+`vl.js view` is the explicit, human-facing status surface. It runs the
+**shared collector** — the same one `refresh` uses — with a bounded wait, then
+renders what the collection published (or what it kept).
+
+```sh
+vl.js view              # the expanded text layout
+vl.js view --condensed  # the one-line-per-measurement table
+vl.js view --json       # exactly one versioned envelope
+```
+
+- **`view --json` prints exactly one envelope**, always: success, no
+  credentials, a busy collector and a partial failure each get their own
+  envelope, never two documents and never a diagnostic mixed into stdout.
+  The envelope carries `schemaVersion` (the shared view schema), the routes
+  and profiles, and an additive `collection` block that says what the
+  collection did (`completed`, `partial`, `in-progress`, `failed`,
+  `no-credentials`, `not-run`) and what happened to each route.
+- **Unknown or stale is never healthy or eligible.** A route whose freshness
+  cannot be proven reads `unknown`, and the quota eligibility is the gate's
+  own decision on the same cached entries the gate reads.
+- **Diagnostics go to stderr.** The text layout and the JSON envelope stay
+  clean; a partial collection, a busy collector or a failed collection is
+  reported on stderr as well as in the envelope.
+- **Exit codes**: `0` for a completed, partial, in-progress or
+  no-credentials collection; `1` when the collection failed (the lock
+  errored, the publish failed, or every attempted route failed); `8`/`9`/`10`
+  for the refusing configuration states, which happen *before* any collection
+  — a refused configuration never reaches a provider and never writes the
+  cache.
+- The **gate** and `snapshot` stay cache-only and fail-open: they never
+  perform provider I/O.
 
 ### Fresh reports vs. diagnostic snapshots
 

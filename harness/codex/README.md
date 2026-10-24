@@ -7,7 +7,7 @@ There is no second renderer, no second gate, and no Codex-specific adapter.
 | File | What it is | CLI call |
 | --- | --- | --- |
 | `hooks.json` | Codex hook config (Codex format, not Claude's) | `gate`, `refresh --quiet --session-start` |
-| `skills/view-limits/SKILL.md` | Codex skill for the status surface | `status` |
+| `skills/view-limits/SKILL.md` | Codex skill for the status surface | `view` |
 
 ## Install
 
@@ -44,7 +44,7 @@ Codex merges every `hooks.json` it finds, so pick one mode.
 
 3. Credentials live in the same vault and cache the Claude surface uses.
    Nothing here needs `CLAUDE_PLUGIN_ROOT` or `CLAUDE_PLUGIN_DATA`: with those
-   unset the CLI falls back to `~/.view-limits`, so status, the gate, and
+   unset the CLI falls back to `~/.view-limits`, so the view, the gate, and
    refresh all read the same files Claude does.
 
 Nothing here is required — the surface is entirely opt-in, and no hook in it can
@@ -79,7 +79,8 @@ block a session. See "Known limits" below.
   `additionalContext`) from a `SessionStart` hook, and that command emits a
   `systemMessage` JSON field, so the notice would be invisible. The hook is
   omitted rather than shipped as a no-op; credential receipts are still shown by
-  `status` and `refresh`.
-- **`status` reads the cache.** It renders the cache and does no provider I/O.
-  Run `refresh` first when you need live numbers.
+  `view` and `refresh`.
+- **`view` is live.** The skill runs `vl.js view`, which collects through the
+  shared collector and then renders — the same command the Claude and OpenCode
+  surfaces use. `vl.js status` remains the cache-only read if you want it.
 - **Codex hooks are unavailable on Windows.**

@@ -7,7 +7,7 @@ no second renderer, no second gate, and no OpenCode-specific adapter.
 | File | What it is | CLI call |
 | --- | --- | --- |
 | `plugin/view-limits.js` | OpenCode plugin (plugin-format hooks) | `gate` |
-| `command/view-limits.md` | OpenCode custom command | `refresh` |
+| `command/view-limits.md` | OpenCode custom command | `view` |
 
 ## Install
 
@@ -38,8 +38,8 @@ by default; `$XDG_CONFIG_HOME/opencode` when set). Pick one mode.
 
 3. Credentials live in the same vault and cache the Claude surface uses.
    Nothing here needs `CLAUDE_PLUGIN_ROOT` or `CLAUDE_PLUGIN_DATA`: with those
-   unset the CLI falls back to `~/.view-limits`, so the gate and refresh read
-   the same files Claude does.
+   unset the CLI falls back to `~/.view-limits`, so the gate, the view and
+   refresh read the same files Claude does.
 
 Nothing here is required — the surface is entirely opt-in. See "Known limits"
 before treating the gate as a safety control.
@@ -51,10 +51,11 @@ before treating the gate as a safety control.
   unambiguously exhausted* route in `deny` mode. The plugin translates the call
   into the same PreToolUse envelope the Claude surface sends and throws when the
   CLI answers with `permissionDecision: "deny"`, which blocks the `task` call.
-- **`/view-limits` command → `refresh`** — refreshes the cache and relays the
-  CLI's rendered output verbatim, exactly like the Claude `/view-limits`
-  command. `status` reads the cache only; run the command (or `vl.js refresh`)
-  first when you need live numbers.
+- **`/view-limits` command → `view`** — collects the live status through the
+  shared collector and relays the CLI's rendered output verbatim, exactly like
+  the Claude `/view-limits` command and the Codex skill. `vl.js status` reads
+  the cache only; run the command (or `vl.js refresh`) when you want the
+  cached state without a collection.
 
 ## Fail-open contract
 
@@ -79,3 +80,4 @@ CLI.
   so the Claude/Codex cache warm-up has no wiring point here; run the
   `/view-limits` command (which refreshes) or `vl.js refresh` yourself.
 - **`status` reads the cache.** It renders the cache and does no provider I/O.
+  The command itself collects live.

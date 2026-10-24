@@ -45,7 +45,7 @@ const GUARD = path.join(__dirname, 'guard.cjs');
 // template: resolve the checkout from VIEW_LIMITS_ROOT, else from the session
 // git root (the pattern the Codex surface documents).
 const ROOT_EXPR = '${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}';
-const COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" refresh 2>&1$/;
+const COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" view 2>&1$/;
 
 // argv the plugin is allowed to pass to the CLI. Anything else is new logic
 // creeping into the surface.

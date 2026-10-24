@@ -9,7 +9,7 @@ const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process');
 
-const { getRuntimeSnapshot, SNAPSHOT_SCHEMA_VERSION } = require('../lib/runtime-snapshot');
+const { getRuntimeSnapshot, SNAPSHOT_SCHEMA_VERSION, DECLARED_BASIS_PROVIDERS, PLAN_PERIOD_END_PROVIDERS, inapplicableDiagnostics } = require('../lib/runtime-snapshot');
 const { parseStrictIsoTimestamp } = require('../lib/gate');
 const { BUILT_IN_ROUTES } = require('../lib/config');
 
@@ -63,6 +63,16 @@ const ENVELOPE_KEYS = [
   'diagnostics', 'caller', 'sessions', 'harnesses', 'profiles', 'routes',
 ];
 
+// A complete caller context: every caller field is supplied, so the
+// completeness ladder measures the ROUTES under test and not the caller's
+// own missing identity fields.
+const FULL_CTX = {
+  ade: 'traycer', host: 'h', surface: 'tui', harness: 'claude',
+  epicId: 'e', sessionId: 's', agentId: 'a',
+  configuredModel: 'm', defaultModel: 'm', effectiveModel: 'm',
+  selectedProfile: 'p', selectedAccount: 'acc',
+};
+
 // Collect every fact-shaped object in the snapshot for invariant sweeps.
 function collectFacts(root, out = []) {
   if (!root || typeof root !== 'object') return out;
@@ -75,6 +85,24 @@ function collectFacts(root, out = []) {
     if (v && typeof v === 'object') collectFacts(v, out);
   }
   return out;
+}
+
+// The adapters that produce a given #80 diagnostic field, derived from the
+// adapter sources themselves — so a NEW producer fails a guard instead of
+// being silently treated as an inapplicable diagnostic.
+function adapterProducers(pattern) {
+  const dir = path.join(__dirname, '..', 'lib', 'adapters');
+  const producers = new Set();
+  for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+    const src = fs.readFileSync(path.join(dir, file), 'utf8');
+    // A comment-only mention does not produce the field.
+    const code = src.split('\n').filter((l) => {
+      const t = l.trim();
+      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
+    }).join('\n');
+    if (pattern.test(code)) producers.add(file.replace(/\.js$/, ''));
+  }
+  return producers;
 }
 
 console.log('runtime snapshot — envelope and schema');
@@ -668,7 +696,7 @@ test('sentinel in corrupt runtime.json and malformed status never reaches output
 
 console.log('\nruntime snapshot — completeness ladder');
 
-test('complete requires zero unknown facts and zero diagnostics', async () => {
+test('complete requires zero missing-evidence facts and zero diagnostics', async () => {
   const dir = scratch();
   writeJson(dir, 'runtime.json', {
     version: 1,
@@ -684,25 +712,29 @@ test('complete requires zero unknown facts and zero diagnostics', async () => {
         routeId: 'only-route', observedAt: iso(-100), freshUntil: iso(60_000), source: 'kimi',
         status: {
           state: 'healthy', windows: [], balance: null, resetAt: iso(3_600_000),
-          // #80 — additive basis + disclosed plan period end: a "complete"
-          // record now carries the measurement basis and the reported period
-          // end as observed facts (unknown facts would break completeness).
+          // #87 — the #80 lane's fixture gave this Kimi status a
+          // Xiaomi-style period end to restore completeness. That was a
+          // workaround for the very distinction this issue fixes: Kimi
+          // discloses no plan period end, so the diagnostic is INAPPLICABLE
+          // for it and its absence is not missing evidence. The declared
+          // basis stays — Kimi really is a quota-window provider.
           basis: 'quota-window',
-          detail: { model: 'kimi-k2', currentPeriodEnd: '2026-11-07 23:59:59' },
+          detail: { model: 'kimi-k2' },
         },
       },
     },
   });
-  const fullCtx = {
-    ade: 'traycer', host: 'h', surface: 'tui', harness: 'claude',
-    epicId: 'e', sessionId: 's', agentId: 'a',
-    configuredModel: 'm', defaultModel: 'm', effectiveModel: 'm',
-    selectedProfile: 'p', selectedAccount: 'acc',
-  };
-  const s = await snap(dir, { callerContext: fullCtx });
+  const s = await snap(dir, { callerContext: FULL_CTX });
   assert.strictEqual(s.diagnostics.length, 0, JSON.stringify(s.diagnostics));
+  // #87 — the pin moves FORWARD: zero facts that are missing evidence, and
+  // the only unknown left is the inapplicable plan-period-end diagnostic.
   const unknowns = collectFacts(s).filter((f) => f.provenance === 'unknown');
-  assert.strictEqual(unknowns.length, 0, `unknown facts remain: ${JSON.stringify(unknowns[0])}`);
+  const gaps = unknowns.filter((f) => f.reason !== 'not-applicable');
+  assert.strictEqual(gaps.length, 0, `missing-evidence facts remain: ${JSON.stringify(gaps[0])}`);
+  assert.strictEqual(unknowns.length, 1, `expected only the inapplicable period end: ${JSON.stringify(unknowns)}`);
+  assert.strictEqual(unknowns[0].reason, 'not-applicable');
+  assert.strictEqual(s.routes[0].resource.periodEnd.reason, 'not-applicable');
+  assert.strictEqual(s.routes[0].resource.basis.value, 'quota-window');
   assert.strictEqual(s.completeness, 'complete');
 });
 
@@ -710,6 +742,182 @@ test('partial when some facts observed and some unknown', async () => {
   const dir = scratch();
   const s = await snap(dir, { callerContext: { agentId: 'a' } });
   assert.strictEqual(s.completeness, 'partial');
+});
+
+console.log('\nruntime snapshot — #87 inapplicable vs missing optional diagnostics');
+
+test('#87 — a provider with no plan-period-end concept does not make the inventory partial', async () => {
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1,
+    harnesses: [{ key: { host: 'h', harness: 'claude', surface: 'tui' } }],
+  });
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'kimi-route', provider: 'kimi', account: 'main', match: { model: 'kimi', harness: 'cli' } }],
+  });
+  writeJson(dir, 'status.json', {
+    updatedAt: iso(0),
+    routes: {
+      'kimi-route': {
+        routeId: 'kimi-route', observedAt: iso(-100), freshUntil: iso(60_000), source: 'kimi',
+        status: {
+          state: 'healthy', windows: [{ type: 'weekly', remaining: 400, limit: 500 }],
+          balance: null, resetAt: iso(3_600_000), detail: { model: 'kimi-k2' },
+        },
+      },
+    },
+  });
+  const s = await snap(dir, { callerContext: FULL_CTX });
+  assert.strictEqual(s.diagnostics.length, 0, JSON.stringify(s.diagnostics));
+  // Kimi discloses no plan period end and its adapter declares no basis:
+  // both diagnostics are INAPPLICABLE, so neither absence is missing
+  // evidence.
+  assert.strictEqual(s.routes[0].resource.periodEnd.provenance, 'unknown');
+  assert.strictEqual(s.routes[0].resource.periodEnd.reason, 'not-applicable');
+  assert.strictEqual(s.routes[0].resource.basis.provenance, 'unknown');
+  assert.strictEqual(s.routes[0].resource.basis.reason, 'not-applicable');
+  assert.strictEqual(s.completeness, 'complete');
+});
+
+test('#87 — a provider that CAN disclose a plan period end but did not stays partial', async () => {
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1,
+    harnesses: [{ key: { host: 'h', harness: 'claude', surface: 'tui' } }],
+  });
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'xiaomi-route', provider: 'xiaomi', account: 'token-plan', match: { model: 'xiaomi', harness: 'cli' } }],
+  });
+  writeJson(dir, 'status.json', {
+    updatedAt: iso(0),
+    routes: {
+      'xiaomi-route': {
+        routeId: 'xiaomi-route', observedAt: iso(-100), freshUntil: iso(60_000), source: 'xiaomi',
+        status: {
+          state: 'healthy', windows: [{ type: 'tokens', remaining: 120000, limit: 200000 }],
+          balance: null, resetAt: iso(3_600_000),
+          basis: 'token-count',
+          // Xiaomi discloses a plan period end; this status does not carry
+          // one, so the diagnostic is MISSING evidence, not inapplicable.
+          detail: { model: 'xiaomi-m2', expired: false },
+        },
+      },
+    },
+  });
+  const s = await snap(dir, { callerContext: FULL_CTX });
+  assert.strictEqual(s.diagnostics.length, 0, JSON.stringify(s.diagnostics));
+  assert.strictEqual(s.routes[0].resource.periodEnd.provenance, 'unknown');
+  assert.strictEqual(s.routes[0].resource.periodEnd.reason, 'cached-field-absent');
+  assert.strictEqual(s.routes[0].resource.basis.value, 'token-count');
+  assert.strictEqual(s.completeness, 'partial');
+});
+
+test('#87 — a provider that CAN declare a basis but did not stays partial', async () => {
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1,
+    harnesses: [{ key: { host: 'h', harness: 'claude', surface: 'tui' } }],
+  });
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'xiaomi-route', provider: 'xiaomi', account: 'token-plan', match: { model: 'xiaomi', harness: 'cli' } }],
+  });
+  writeJson(dir, 'status.json', {
+    updatedAt: iso(0),
+    routes: {
+      'xiaomi-route': {
+        routeId: 'xiaomi-route', observedAt: iso(-100), freshUntil: iso(60_000), source: 'xiaomi',
+        status: {
+          state: 'healthy', windows: [{ type: 'tokens', remaining: 120000, limit: 200000 }],
+          balance: null, resetAt: iso(3_600_000),
+          // No declared basis, even though this provider's adapter always
+          // declares one: that is missing evidence, not an inapplicable
+          // diagnostic.
+          detail: { model: 'xiaomi-m2', expired: false, currentPeriodEnd: '2026-11-07 23:59:59' },
+        },
+      },
+    },
+  });
+  const s = await snap(dir, { callerContext: FULL_CTX });
+  assert.strictEqual(s.diagnostics.length, 0, JSON.stringify(s.diagnostics));
+  assert.strictEqual(s.routes[0].resource.basis.provenance, 'unknown');
+  assert.strictEqual(s.routes[0].resource.basis.reason, 'cached-field-absent');
+  assert.strictEqual(s.routes[0].resource.periodEnd.value, '2026-11-07 23:59:59');
+  assert.strictEqual(s.completeness, 'partial');
+});
+
+test('#87 — drift guard: the adapters that emit currentPeriodEnd match the capability table', () => {
+  assert.deepStrictEqual(
+    new Set(PLAN_PERIOD_END_PROVIDERS),
+    adapterProducers(/currentPeriodEnd/),
+    'an adapter now produces currentPeriodEnd — add it to PLAN_PERIOD_END_PROVIDERS in lib/runtime-snapshot.js (or drop the capability)',
+  );
+});
+
+test('#87 — drift guard: the adapters that declare a basis match the capability table', () => {
+  assert.deepStrictEqual(
+    new Set(DECLARED_BASIS_PROVIDERS),
+    adapterProducers(/\bbasis\s*:/),
+    'an adapter now declares a basis — add it to DECLARED_BASIS_PROVIDERS in lib/runtime-snapshot.js (or drop the capability)',
+  );
+});
+
+test('#87 — a caller-supplied not-applicable reason is NOT an exemption — the inventory stays partial', async () => {
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1,
+    harnesses: [{ key: { host: 'h', harness: 'claude', surface: 'tui' } }],
+  });
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'kimi-route', provider: 'kimi', account: 'main', match: { model: 'kimi', harness: 'cli' } }],
+  });
+  writeJson(dir, 'status.json', {
+    updatedAt: iso(0),
+    routes: {
+      'kimi-route': {
+        routeId: 'kimi-route', observedAt: iso(-100), freshUntil: iso(60_000), source: 'kimi',
+        status: {
+          state: 'healthy', windows: [{ type: 'weekly', remaining: 400, limit: 500 }],
+          balance: null, resetAt: iso(3_600_000), detail: { model: 'kimi-k2' },
+        },
+      },
+    },
+  });
+  // The caller's own unknown fact carries the SAME reason string the module
+  // uses for its inapplicable diagnostics. It must still count as missing
+  // evidence: the exemption is keyed on the two positions this module emits,
+  // never on the reason string.
+  const s = await snap(dir, {
+    callerContext: { ...FULL_CTX, selectedAccount: { value: null, provenance: 'unknown', reason: 'not-applicable' } },
+  });
+  assert.strictEqual(s.caller.selectedAccount.provenance, 'unknown');
+  assert.strictEqual(s.caller.selectedAccount.reason, 'not-applicable');
+  // The routes' own inapplicable diagnostics stay exempt.
+  assert.strictEqual(s.routes[0].resource.basis.reason, 'not-applicable');
+  assert.strictEqual(s.routes[0].resource.periodEnd.reason, 'not-applicable');
+  assert.strictEqual(s.completeness, 'partial', 'a caller fact with not-applicable is still missing evidence');
+});
+
+test('#87 — the exemption covers only the two inapplicable diagnostics at their own positions', () => {
+  const unknownFact = (reason) => ({ value: null, provenance: 'unknown', source: null, observedAt: null, freshUntil: null, reason });
+  const basis = unknownFact('not-applicable');
+  const periodEnd = unknownFact('not-applicable');
+  const resetAt = unknownFact('not-applicable');
+  const state = unknownFact('not-applicable');
+  const provider = unknownFact('not-applicable');
+  const exempt = inapplicableDiagnostics([
+    { id: 'r', provider, resource: { state, resetAt, basis, periodEnd } },
+  ]);
+  assert.ok(exempt.has(basis), 'the inapplicable basis is exempt');
+  assert.ok(exempt.has(periodEnd), 'the inapplicable period end is exempt');
+  assert.ok(!exempt.has(resetAt), 'another resource fact must never be exempt');
+  assert.ok(!exempt.has(state), 'another resource fact must never be exempt');
+  assert.ok(!exempt.has(provider), 'a route-level fact must never be exempt');
+
+  // A fact at an exempt POSITION that carries a different reason is a gap.
+  const absent = inapplicableDiagnostics([
+    { resource: { basis: unknownFact('cached-field-absent'), periodEnd: unknownFact('cached-field-absent') } },
+  ]);
+  assert.strictEqual(absent.size, 0, 'only the module-emitted inapplicable facts are exempt');
 });
 
 console.log('\nruntime snapshot — purity');

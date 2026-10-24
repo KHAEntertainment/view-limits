@@ -57,16 +57,30 @@ const SCANNED = [
 // allowed only when the expression IS one of these forms. A bare local is
 // NOT allowed - a provider string bound to a local first would slip through
 // - and neither is a `+` composite (`textCell('') + route.stateReason`).
-const ALLOWED = [
-  [/^textCell\([\s\S]*\)(?:\.(?:padEnd|padStart|toUpperCase|repeat)\([\s\S]*\))?$/, 'the one sanitizer'],
-  [/^balanceText\([\s\S]*\)(?:\.(?:padEnd|padStart|toUpperCase)\([\s\S]*\))?$/, 'the money cell, which sanitizes the currency'],
-  [/^barFor\([\s\S]*\)(?:\.(?:padEnd|padStart)\([\s\S]*\))?$/, 'the numeric bar formatter'],
-  [/^formatCount\([\s\S]*\)(?:\.(?:padEnd|padStart)\([\s\S]*\))?$/, 'the numeric count formatter'],
-  [/^Math\.(?:round|max)\([\s\S]*\)(?:\.(?:padEnd|padStart|toFixed)\([\s\S]*\))?$/, 'a numeric formatter'],
-  [/^ownLookup\([\s\S]*\)(?:\.(?:padEnd|padStart)\([\s\S]*\))?$/, 'a fixed-vocabulary lookup'],
-  [/^'[^']*'\.(?:repeat|padEnd|padStart)\([\s\S]*\)$/, 'a fixed literal'],
-  [/^\([\s\S]*\)\.toFixed\(\d\)$/, 'a numeric formatter'],
-];
+const ALLOWED_CALLEES = new Set([
+  'textCell',      // the one sanitizer
+  'balanceText',   // the money cell, which sanitizes the currency
+  'barFor',        // the numeric bar formatter
+  'formatCount',   // the numeric count formatter
+  'ownLookup',     // a fixed-vocabulary lookup
+  'Math.round',    // a numeric formatter
+  'Math.max',      // a numeric formatter
+]);
+
+// The expression must be EXACTLY one call: the argument list is matched with
+// BALANCED parentheses and the rest must be empty (or one method chain). A
+// greedy pattern would accept `textCell('') + String(x)`, whose right
+// operand escapes the sanitizer.
+const ONE_CALL = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?\((?:[^()]|\([^()]*\))*\)(?:\.[A-Za-z_$][\w$]*\((?:[^()]|\([^()]*\))*\))*$/;
+const LITERAL_CALL = /^'[^']*'\.[A-Za-z_$][\w$]*\((?:[^()]|\([^()]*\))*\)$/;
+const NUMERIC_CALL = /^\([^()]*\)\.toFixed\(\d\)$/;
+
+function isAllowedExpression(expression) {
+  if (LITERAL_CALL.test(expression) || NUMERIC_CALL.test(expression)) return true;
+  if (!ONE_CALL.test(expression)) return false;
+  const callee = expression.match(/^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\(/);
+  return !!callee && ALLOWED_CALLEES.has(callee[1]);
+}
 
 // Skip a line or block comment starting at `i` (which is the first `/`).
 // Returns the index just past it.
@@ -228,7 +242,7 @@ for (const name of SCANNED) {
   const source = functionSource(name);
   for (const expression of collectInterpolations(source)) {
     if (!expression) continue;
-    if (!ALLOWED.some(([re]) => re.test(expression))) {
+    if (!isAllowedExpression(expression)) {
       findings.push(`${name}: \${${expression}} is not an allowed form`);
     }
   }
@@ -239,7 +253,7 @@ for (const name of SCANNED) {
     // a `+` composite, whose right operand would escape the sanitizer.
     const operand = rest.startsWith('`') ? '`a template`' : rest;
     const ok = append
-      && (rest.startsWith('`') || ALLOWED.some(([re]) => re.test(operand)))
+      && (rest.startsWith('`') || isAllowedExpression(operand))
       && !/\+/.test(operand);
     if (!ok) {
       findings.push(`${name}: a string concatenation (${append ? '+=' : '+'}) is not an allowed form`);

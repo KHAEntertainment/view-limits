@@ -307,7 +307,7 @@ const APPROVED_CONDENSED = [
   assert.strictEqual(r.freshness, 'fresh');
   assert.strictEqual(r.balance, null);
   assert.strictEqual(r.quotaEligibility, 'unresolved');
-  assert.ok(r.reasonCodes.includes('state-unknown'));
+  assert.ok(r.reasonCodes.includes('no-fresh-observation'));
 
   // A window with no usable counts keeps them null; the ratio is never
   // invented.
@@ -426,10 +426,12 @@ const APPROVED_CONDENSED = [
   assert.strictEqual(ineligible.quotaEligibility, 'ineligible');
   assert.ok(ineligible.reasonCodes.includes('fresh-exhausted'));
 
-  const unresolved = vm.buildViewSchema({ routes: [unknownState] }, {
+  // The gate ALLOWS an unknown but current, non-exhausted entry, so the
+  // eligibility follows it: the view does not copy the rule, it reads it.
+  const allowed = vm.buildViewSchema({ routes: [unknownState] }, {
     gate: gateContext({ r: entry('unknown', fresh) }, { r: cfgRoute }, NOW),
   }, { now: NOW }).routes[0];
-  assert.strictEqual(unresolved.quotaEligibility, 'unresolved');
+  assert.strictEqual(allowed.quotaEligibility, 'eligible');
 
   // A route whose observation is not current is never eligible - the gate
   // would not act on it either.
@@ -442,6 +444,47 @@ const APPROVED_CONDENSED = [
   }, { now: NOW }).routes[0];
   assert.strictEqual(notFresh.quotaEligibility, 'unresolved');
   assert.strictEqual(notFresh.state, 'unknown');
+}
+
+// ---- the route eligibility IS the gate's decision ------------------------
+
+{
+  const { decide } = require('../lib/gate');
+  const { configRevision } = require('../lib/monitor-schema');
+  const cfgRoute = { id: 'r', provider: 'minimax', account: 'token-plan' };
+  const current = configRevision(cfgRoute);
+  const CASES = [
+    { name: 'a current entry', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:48:00Z', state: 'healthy' },
+    { name: 'an expired entry', observedAt: '2026-10-13T09:40:00Z', freshUntil: '2026-10-13T09:45:00Z', state: 'healthy' },
+    { name: 'a null expiry', observedAt: '2026-10-13T09:45:00Z', freshUntil: null, state: 'healthy' },
+    { name: 'a malformed expiry', observedAt: '2026-10-13T09:45:00Z', freshUntil: 'bad-date', state: 'healthy' },
+    { name: 'the deadline equal to now', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:46:00Z', state: 'exhausted' },
+    { name: 'a 2020 observation without an expiry', observedAt: '2020-01-01T00:00:00Z', freshUntil: null, state: 'healthy' },
+    { name: 'a null observation time', observedAt: null, freshUntil: '2026-10-13T09:48:00Z', state: 'healthy' },
+    { name: 'a malformed observation time', observedAt: 'bad-date', freshUntil: '2026-10-13T09:48:00Z', state: 'healthy' },
+    { name: 'an obsolete revision', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:48:00Z', state: 'healthy', configRevision: 'an-older-revision' },
+    { name: 'a matching revision', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:48:00Z', state: 'healthy', configRevision: current },
+  ];
+  for (const c of CASES) {
+    const entry = { routeId: 'r', observedAt: c.observedAt, freshUntil: c.freshUntil, status: { state: c.state } };
+    if (c.configRevision) entry.configRevision = c.configRevision;
+    // The gate is CALLED, never copied: the expectation is what the gate
+    // decides, and the view must match it.
+    const decision = decide({ route: cfgRoute, entry, now: NOW, config: { gate: { mode: 'deny' } } });
+    const expected = decision.action === 'deny'
+      ? 'ineligible'
+      : (decision.refresh === true ? 'unresolved' : 'eligible');
+    assert.strictEqual(typeof decision.action, 'string', `the gate decided: ${c.name}`);
+    const view = vm.buildViewSchema({
+      routes: [route('r', 'minimax', 'token-plan', {
+        state: observed(c.state),
+        observedAt: c.observedAt === null ? unknown('no-cached-observation') : observed(c.observedAt),
+        freshUntil: c.freshUntil === null ? unknown('no-cached-observation') : observed(c.freshUntil),
+      })],
+    }, { gate: gateContext({ r: entry }, { r: cfgRoute }, NOW), now: NOW }).routes[0];
+    assert.strictEqual(view.quotaEligibility, expected,
+      `the eligibility follows the gate's decision: ${c.name} (gate: ${decision.action}${decision.refresh ? '+refresh' : ''})`);
+  }
 }
 
 // ---- ONE freshness predicate, ONE state rule: routes and profiles alike ---

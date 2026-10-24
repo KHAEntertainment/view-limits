@@ -268,6 +268,55 @@ test('report still renders its own surface, unchanged by view', () => {
 
 // ---- bad arguments ----------------------------------------------------------
 
+test('a native profile is carried in the JSON envelope', () => {
+  const dir = scratch();
+  writeConfig(dir, []);
+  // The native profile lives in the runtime sidecar, the same place the
+  // runtime snapshot reads it from.
+  fs.writeFileSync(path.join(dir, 'runtime.json'), JSON.stringify({
+    version: 1,
+    sessions: [],
+    harnesses: [],
+    profiles: [{
+      key: { host: 'mac', provider: 'claude-code', profileId: 'ambient' },
+      harness: { value: 'claude', provenance: 'observed' },
+      authStatus: { value: 'ok', provenance: 'observed' },
+      rateLimitStatus: { value: 'healthy', provenance: 'observed' },
+      usageUpdatedAt: { value: '2026-10-13T09:45:00Z', provenance: 'observed' },
+      nativeRateLimits: {
+        value: {
+          provider: 'claude-code',
+          available: true,
+          fiveHour: { usedPercent: 36, resetsAt: 1790067599749, durationMinutes: 300 },
+        },
+        provenance: 'observed',
+        observedAt: '2026-10-13T09:45:00Z',
+      },
+    }],
+  }, null, 2));
+  const r = vl(dir, ['view', '--json']);
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.profiles.length, 1, 'the native profile is carried');
+  assert.deepStrictEqual(doc.profiles[0].identity, {
+    host: 'mac', provider: 'claude-code', profileId: 'ambient',
+  });
+  assert.strictEqual(doc.profiles[0].harness, 'claude');
+  assert.strictEqual(doc.profiles[0].state, 'healthy');
+  assert.strictEqual(doc.profiles[0].freshness, 'fresh');
+  assert.strictEqual(doc.profiles[0].windows.length, 1);
+  assert.strictEqual(doc.profiles[0].windows[0].remainingRatio, 0.64);
+  // The profile identity stays separate from the route identity.
+  assert.deepStrictEqual(doc.routes, []);
+
+  // The text layouts show providers only: the owner-approved examples have
+  // no profile rows, and a profile row is #62's design review.
+  const text = vl(dir, ['view']);
+  assert.strictEqual(text.status, 0);
+  assert.ok(!text.stdout.includes('claude-code'), 'the text layouts carry no profile rows');
+  assert.ok(!text.stdout.includes('ambient'), 'the text layouts carry no profile rows');
+});
+
 test('an unknown flag is a usage error', () => {
   const dir = scratch();
   writeConfig(dir, []);

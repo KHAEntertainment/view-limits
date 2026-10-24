@@ -542,4 +542,221 @@ const APPROVED_CONDENSED = [
   assert.ok(text.includes('provider said no'));
 }
 
+// ---- R1: no raw template interpolation of model fields ---------------------
+//
+// The field list is DERIVED from the fixture, so a string field added to the
+// fixture later is covered here without touching this test. Every provider-
+// or config-derived string that reaches a rendered line must go through the
+// one sanitizer: a control character in any of them may not add a line nor
+// appear raw in the output.
+
+function stringLeaves(node, path = [], out = []) {
+  if (typeof node === 'string') { out.push({ path, value: node }); return out; }
+  if (Array.isArray(node)) { node.forEach((v, i) => stringLeaves(v, path.concat(i), out)); return out; }
+  if (node && typeof node === 'object') {
+    for (const [k, v] of Object.entries(node)) stringLeaves(v, path.concat(k), out);
+  }
+  return out;
+}
+
+function cloneNode(node) { return JSON.parse(JSON.stringify(node)); }
+
+function setAt(node, path, value) {
+  let cur = node;
+  for (let i = 0; i < path.length - 1; i += 1) cur = cur[path[i]];
+  cur[path[path.length - 1]] = value;
+}
+
+{
+  // A route with EVERY string field populated: the provider, the account,
+  // the window type, the currency, the reset, the error, the reauth URL and
+  // profile, the period end, the state reason, the bindings.
+  const fixture = {
+    generatedAt: '2026-10-13T09:46:00Z',
+    routes: [{
+      id: 'minimax-token-plan',
+      configured: true,
+      provider: configured('minimax'),
+      account: configured('token-plan'),
+      pool: configured({ provider: 'minimax', account: 'token-plan' }),
+      boundBy: [{ harness: 'claude', host: 'mac', surface: 'cli' }],
+      resource: {
+        state: observed('healthy'),
+        windows: [{ type: 'rolling-5h', remaining: 72, limit: 100, resetAt: '2026-10-13T12:00:00Z' }],
+        balance: { available: 8.42, currency: 'USD', spent: { daily: 1.32, weekly: 6.84 } },
+        error: 'provider error',
+        reauth: { reason: 'auth-expired', url: 'https://platform.xiaomimimo.com/', profile: 'Default' },
+        basis: observed('quota-window'),
+        periodEnd: observed('2026-11-07 23:59:59'),
+        resetAt: observed('2026-10-13T12:00:00Z'),
+        observedAt: observed('2026-10-13T09:45:00Z'),
+        freshUntil: observed('2026-10-13T09:48:00Z'),
+        freshness: 'fresh',
+        source: observed('adapter'),
+      },
+    }],
+  };
+  const cleanSchema = vm.buildViewSchema(fixture);
+  const cleanExpanded = vm.renderViewText(cleanSchema, { now: NOW, timeZone: TZ });
+  const cleanCondensed = vm.renderViewText(cleanSchema, { now: NOW, timeZone: TZ, condensed: true });
+  const fields = stringLeaves(fixture);
+  assert.ok(fields.length >= 20, `the fixture carries string fields (${fields.length})`);
+  const controls = ['\n', '\r', '\x1b', '\u0085', '\u009b'];
+  for (const { path } of fields) {
+    for (const ch of controls) {
+      const dirty = cloneNode(fixture);
+      setAt(dirty, path, `FORGED${ch}FORGED`);
+      const schema = vm.buildViewSchema(dirty);
+      const expanded = vm.renderViewText(schema, { now: NOW, timeZone: TZ });
+      const condensed = vm.renderViewText(schema, { now: NOW, timeZone: TZ, condensed: true });
+      const where = path.join('.');
+      assert.strictEqual(expanded.length, cleanExpanded.length,
+        `the expanded text gained or lost a line for ${where}`);
+      assert.strictEqual(condensed.length, cleanCondensed.length,
+        `the condensed text gained or lost a line for ${where}`);
+      assert.ok(expanded.every((l) => !l.includes(ch)), `the raw control character reached the expanded text at ${where}`);
+      assert.ok(condensed.every((l) => !l.includes(ch)), `the raw control character reached the condensed text at ${where}`);
+    }
+  }
+}
+
+// ---- R2: a provider key never resolves to an inherited object member -------
+
+{
+  for (const key of ['constructor', '__proto__', 'toString', 'valueOf']) {
+    const snapshot = { routes: [route('r', 'minimax', 'token-plan', { windows: [{ type: key, remaining: 5, limit: 10 }] })] };
+    const schema = vm.buildViewSchema(snapshot);
+    const expanded = vm.renderViewText(schema, { now: NOW, timeZone: TZ }).join('\n');
+    const condensed = vm.renderViewText(schema, { now: NOW, timeZone: TZ, condensed: true }).join('\n');
+    assert.ok(expanded.includes(key), `the unknown window type keeps its own name (${key})`);
+    assert.ok(condensed.includes(key), `the unknown window type keeps its own name (${key})`);
+    assert.ok(!expanded.includes('function Object'), 'no inherited member leaked into the text');
+    assert.ok(!expanded.includes('[object'), 'no inherited member leaked into the text');
+
+    // The same key as a provider id and as a recipe id.
+    const asProvider = vm.buildViewSchema({ routes: [route('p', key, 'token-plan', {})] });
+    assert.strictEqual(asProvider.routes[0].label, 'p', 'an unknown provider falls back to the route id');
+    const asRecipe = vm.buildViewSchema({ routes: [route('q', 'minimax', 'token-plan', {})] }, { recipeOf: { q: key } });
+    assert.strictEqual(asRecipe.routes[0].label, 'MiniMax', 'an unknown recipe falls back to the provider name');
+  }
+}
+
+// ---- R4: a percent-only window is rendered in both layouts ------------------
+
+{
+  const snapshot = {
+    routes: [
+      route('a', 'minimax', 'token-plan', {
+        state: observed('healthy'),
+        windows: [{ type: 'rolling-5h', remaining: 72, limit: 100 }],
+      }),
+      route('b', 'kimi', 'code-plan', {
+        state: observed('unknown'),
+        windows: [{ type: 'weekly', percent: 50 }],
+      }),
+      route('c', 'xiaomi', 'token-plan', {
+        state: observed('unknown'),
+        basis: observed('token-count'),
+        windows: [{ type: 'tokens', remaining: 120, limit: 200 }],
+      }),
+    ],
+  };
+  const schema = vm.buildViewSchema(snapshot);
+  const expanded = vm.renderViewText(schema, { now: NOW, timeZone: TZ });
+  const condensed = vm.renderViewText(schema, { now: NOW, timeZone: TZ, condensed: true });
+
+  // The percentage-only window keeps its ratio and its null counts.
+  const percentWindow = schema.routes.find((r) => r.id === 'b').windows[0];
+  assert.strictEqual(percentWindow.remaining, null);
+  assert.strictEqual(percentWindow.limit, null);
+  assert.strictEqual(percentWindow.remainingRatio, 0.5);
+
+  // It is rendered as the plain percentage, with no bar, in BOTH layouts.
+  assert.ok(expanded.some((l) => l.includes('50% left')), 'the percentage is rendered in the expanded view');
+  assert.ok(!expanded.some((l) => l.includes('50% left') && l.includes('[')), 'without a bar');
+  assert.ok(condensed.some((l) => l.includes('Weekly') && l.includes('50%')), 'the percentage is rendered in the condensed view');
+
+  // Window-level parity: every window the schema carries appears in both
+  // text layouts.
+  for (const route of schema.routes) {
+    const known = route.state === 'healthy' || route.state === 'constrained' || route.state === 'exhausted';
+    for (const w of route.windows) {
+      // What the text shows for this window: the percentage for a barred
+      // window, the counts when they are known, the percentage otherwise.
+      let marker;
+      if (known && w.remainingRatio !== null) marker = `${Math.round(w.remainingRatio * 100)}%`;
+      else if (w.remaining !== null) marker = `${w.remaining} / ${w.limit}`;
+      else marker = `${Math.round(w.remainingRatio * 100)}%`;
+      assert.ok(expanded.some((l) => l.includes(marker)), `the expanded view shows ${marker}`);
+      assert.ok(condensed.some((l) => l.includes(marker)), `the condensed view shows ${marker}`);
+    }
+  }
+}
+
+// ---- R5: a cached state or basis outside its enum is not a fact ------------
+
+{
+  const badState = vm.buildViewSchema({ routes: [route('s', 'minimax', 'token-plan', { state: observed('banana') })] });
+  assert.strictEqual(badState.routes[0].state, 'unknown', 'an invalid state becomes unknown');
+  assert.ok(badState.routes[0].reasonCodes.includes('invalid-state'));
+
+  const badBasis = vm.buildViewSchema({ routes: [route('b', 'minimax', 'token-plan', { basis: observed('banana') })] });
+  assert.ok(['quota-window', 'token-count', 'balance', 'none'].includes(badBasis.routes[0].basis),
+    'an invalid basis is re-derived, never carried through');
+  assert.notStrictEqual(badBasis.routes[0].basis, 'banana');
+  assert.ok(badBasis.routes[0].reasonCodes.includes('invalid-basis'));
+}
+
+// ---- R3: the native profile projection --------------------------------------
+
+{
+  const snapshot = {
+    generatedAt: '2026-10-13T09:46:00Z',
+    routes: [],
+    profiles: [{
+      key: { host: 'mac', provider: 'claude-code', profileId: 'ambient' },
+      harness: observed('claude'),
+      authStatus: observed('ok'),
+      rateLimitStatus: observed('healthy'),
+      usageUpdatedAt: observed('2026-10-13T09:45:00Z'),
+      nativeRateLimits: observed({
+        provider: 'claude-code',
+        available: true,
+        fiveHour: { usedPercent: 36, resetsAt: 1790067599749, durationMinutes: 300 },
+      }),
+    }],
+  };
+  const schema = vm.buildViewSchema(snapshot);
+  assert.strictEqual(schema.profiles.length, 1, 'the native profile is carried');
+  const profile = schema.profiles[0];
+  assert.deepStrictEqual(profile.identity, { host: 'mac', provider: 'claude-code', profileId: 'ambient' });
+  assert.strictEqual(profile.harness, 'claude');
+  assert.strictEqual(profile.state, 'healthy');
+  assert.strictEqual(profile.freshness, 'fresh');
+  assert.strictEqual(profile.observedAt, '2026-10-13T09:45:00Z');
+  assert.strictEqual(profile.windows.length, 1);
+  assert.strictEqual(profile.windows[0].type, 'rolling-5h');
+  assert.strictEqual(profile.windows[0].remainingRatio, 0.64);
+  assert.strictEqual(profile.windows[0].remaining, 64);
+  assert.strictEqual(profile.windows[0].limit, 100);
+  assert.deepStrictEqual(profile.reasonCodes, []);
+
+  // No native facts: the profile is kept, its state unknown, never promoted.
+  const unknownNative = vm.buildViewSchema({
+    routes: [],
+    profiles: [{
+      key: { host: 'mac', provider: 'codex', profileId: 'ambient' },
+      nativeRateLimits: unknown('traycer-field-absent'),
+    }],
+  });
+  assert.strictEqual(unknownNative.profiles.length, 1);
+  assert.strictEqual(unknownNative.profiles[0].state, 'unknown');
+  assert.strictEqual(unknownNative.profiles[0].freshness, 'unknown');
+  assert.deepStrictEqual(unknownNative.profiles[0].windows, []);
+  assert.ok(unknownNative.profiles[0].reasonCodes.includes('no-native-facts'));
+
+  // No profiles at all: an empty array, still a valid document.
+  assert.deepStrictEqual(vm.buildViewSchema({ routes: [] }).profiles, []);
+}
+
 console.log('view-schema: PASS');

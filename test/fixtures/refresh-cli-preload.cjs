@@ -31,9 +31,12 @@ Module._load = function (id, ...args) {
       log('provider');
       // VL_REFRESH_FAIL=1 makes the provider throw, so a test can drive the
       // failed-fetch path (the route keeps its prior observation and the
-      // refresh says so).
+      // refresh says so). VL_REFRESH_FAIL_MULTILINE=1 makes the error
+      // multi-line, so the one-line sanitization is testable.
       if (process.env.VL_REFRESH_FAIL === '1') {
-        throw new Error('HTTP 502: upstream unavailable');
+        throw new Error(process.env.VL_REFRESH_FAIL_MULTILINE === '1'
+          ? 'HTTP 502: upstream\nunavailable\r\n  retry later'
+          : 'HTTP 502: upstream unavailable');
       }
       const end = Date.now() + 8000;
       while (!fs.existsSync(path.join(dir, 'release'))) {

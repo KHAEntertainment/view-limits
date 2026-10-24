@@ -53,9 +53,9 @@ before treating the gate as a safety control.
   CLI answers with `permissionDecision: "deny"`, which blocks the `task` call.
 - **`/view-limits` command → `view`** — collects the live status through the
   shared collector and relays the CLI's rendered output verbatim, exactly like
-  the Claude `/view-limits` command and the Codex skill. `vl.js status` reads
-  the cache only; run the command (or `vl.js refresh`) when you want the
-  cached state without a collection.
+  the Claude `/view-limits` command and the Codex skill. `vl.js status` is the
+  cache-only read; both the command and `vl.js refresh` collect live, so
+  neither gives you a cache-only render.
 
 ## Fail-open contract
 

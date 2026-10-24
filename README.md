@@ -694,9 +694,12 @@ relays its output verbatim — all rendering lives in `lib/view-model.js`.
 ## The view schema (`vl.js view`)
 
 `vl.js view` renders the shared, versioned view schema — the structured quota,
-balance and reauth facts every surface (text, JSON, the dashboard) reads. It
-is **cache-only**: it reads the cached snapshot and the configuration, and
-never performs a provider request, a refresh, a subprocess or a write.
+balance and reauth facts every surface (text, JSON, the dashboard) reads. The
+schema and its renderers are pure: they perform no I/O. The `view` COMMAND,
+however, is live: it runs the shared collector first — which reads the
+credential store, calls providers and writes the cache — and only after the
+configuration is confirmed. Only the `gate`, `snapshot` and `status`
+commands are cache-only.
 
 ```sh
 vl.js view                 # the expanded text layout
@@ -735,10 +738,11 @@ The condensed layout lists **the same routes** as the expanded one: a route
 with no measurement at all (an unknown state, no windows, no balance) still
 appears, with its state and no bar.
 
-`view` never touches the credential store, and it never writes. When
+The refusing configuration states are all handled BEFORE the collector: when
 config.json has never been published — the one-time vault→routes migration
-has not resolved — it refuses with exit `8` and the hint that names the
-action, because a rerun cannot fix an absent document.
+has not resolved — `view` refuses with exit `8` and the hint that names the
+action, because a rerun cannot fix an absent document. A refused
+configuration never reaches a provider and never writes the cache.
 
 ## CLI reference
 

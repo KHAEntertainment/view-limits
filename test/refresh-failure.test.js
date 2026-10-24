@@ -64,13 +64,14 @@ function scratch() {
   return dir;
 }
 
-function refresh(dir, args = []) {
+function refresh(dir, args = [], extraEnv = {}) {
   const env = {
     PATH: process.env.PATH,
     HOME: dir,
     CLAUDE_PLUGIN_DATA: dir,
     NODE_OPTIONS: `--require=${PRELOAD}`,
     VL_REFRESH_FAIL: '1',
+    ...extraEnv,
   };
   const r = spawnSync(process.execPath, [VL, 'refresh', ...args], { env, encoding: 'utf8', timeout: 15000 });
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
@@ -100,12 +101,24 @@ test('--quiet prints nothing at all', () => {
   assert.strictEqual(r.stdout, '', 'a quiet refresh is silent, even about a failure');
 });
 
-test('the failure line is one line, whatever the provider error carries', () => {
+test('a multi-line provider error folds into exactly one line, and no fragment leaks onto its own line', () => {
   const dir = scratch();
-  const r = refresh(dir);
-  const lines = r.stdout.split('\n').filter((l) => l.includes('refresh failed'));
-  assert.strictEqual(lines.length, 1, 'exactly one failure line');
-  assert.ok(!lines[0].includes('\n'), 'the failure line is one line');
+  const r = refresh(dir, [], { VL_REFRESH_FAIL_MULTILINE: '1' });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  // The EXACT failure line, with the error folded by oneLine into one line.
+  const expected =
+    'view-limits: kimi-code-plan refresh failed (HTTP 502: upstream unavailable retry later); ' +
+    'showing the last observation from 2026-10-13T09:45:00.000Z ' +
+    '(rotate via /view-limits:update kimi-code-plan)';
+  assert.ok(r.stdout.includes(expected), `the exact folded failure line is missing:\n${r.stdout}`);
+  // No fragment of the raw multi-line error reaches a line of its own.
+  const lines = r.stdout.split('\n');
+  const errorLines = lines.filter((l) => l.includes('upstream') || l.includes('retry later'));
+  assert.strictEqual(errorLines.length, 1, 'the error appears on exactly one line');
+  assert.strictEqual(errorLines[0], expected, 'that line IS the failure line');
+  for (const line of lines) {
+    assert.ok(!line.includes('\r'), 'no carriage return leaks into a line');
+  }
 });
 
 if (failures) {

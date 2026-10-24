@@ -67,7 +67,7 @@ const { validProfile } = require('../lib/cookies/chrome');
 const { buildHelper } = require('../lib/helper-install');
 // Phase 0 (Issue #35): transport-neutral view model — owns the presentation
 // layer's rendering; vl.js only joins its pre-formatted text lines.
-const { buildViewModel, reauthNote } = require('../lib/view-model');
+const { buildViewModel, reauthNote, buildViewSchema, renderViewText, VIEW_SCHEMA_VERSION } = require('../lib/view-model');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 const XIAOMI_ROUTE_ID = xiaomiSession.XIAOMI_ROUTE_ID;
@@ -1850,6 +1850,144 @@ async function snapshot(args) {
   process.stdout.write(JSON.stringify(snap, null, 2) + '\n');
 }
 
+// ---- view (Phase 3, Issue #59) ----------------------------------------------
+//
+// `vl.js view [--condensed] [--json]` renders the versioned view schema
+// (lib/view-model.js) as the approved text format or as exactly one
+// always-valid JSON envelope.
+//
+// It is cache-only: no provider network, no refresh, no subprocess and no
+// write — the same guarantee the report/status/snapshot reads carry. The
+// configuration is read through the CONFIRMED reader (the #81 fix-by-default
+// path), and the states it can be in map onto the dispatch's own exit codes:
+//
+//   a confirmed document                      -> the view (exit 0)
+//   a confirmed document with no routes        -> the empty envelope (exit 0)
+//   a stored credential for a route the configuration does not define
+//                                             -> MIGRATION_PENDING (exit 8)
+//   a document that could not be confirmed (absent, or being replaced)
+//                                             -> CONFIG_INCONCLUSIVE (exit 9)
+//   a document that exists but cannot be parsed-> CONFIG_CORRUPT (exit 10)
+//
+// The dispatch-time migration is NOT run for `view`: `view` is a read, and
+// the migration publishes config.json. The migration-pending state is
+// detected from the evidence the plugin already left on disk instead.
+
+// The notice for each refusing state. It is a function, not a constant: the
+// fixed config notices are declared further down the file, and reading them
+// at call time keeps the module free of a declaration-order trap.
+function viewFailureNotice(kind) {
+  if (kind === 'migration-pending') {
+    return 'stored credentials have not been migrated into routes yet, so no routes could be shown. Your stored credentials are untouched; run /view-limits:setup (or /view-limits:update) to publish the route list.';
+  }
+  if (kind === 'config-corrupt') return CONFIG_CORRUPT_NOTICE;
+  return CONFIG_INCONCLUSIVE_NOTICE;
+}
+
+const VIEW_FAILURE_STATUS = {
+  'migration-pending': lifecycle.STATUS.MIGRATION_PENDING,
+  'config-inconclusive': lifecycle.STATUS.CONFIG_INCONCLUSIVE,
+  'config-corrupt': lifecycle.STATUS.CONFIG_CORRUPT,
+};
+
+function viewFailureEnvelope(reasonCodes) {
+  return {
+    schemaVersion: VIEW_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    status: 'failed',
+    reasonCodes,
+    routes: [],
+  };
+}
+
+// The routes the configuration does not define but the plugin has observed,
+// and for which a credential is still stored: the credential vault→routes
+// migration has not resolved, so the configuration does not describe every
+// stored credential.
+//
+// The credential store is consulted for PRESENCE only — the vault probe
+// never reads a secret — and only for the routes the cache already shows, so
+// a normal `view` never touches the credential store at all.
+function unmigratedCredentialIds(cfg, cacheRoutes) {
+  const configured = new Set((Array.isArray(cfg.routes) ? cfg.routes : [])
+    .filter((r) => r && typeof r.id === 'string')
+    .map((r) => r.id));
+  const candidates = Object.keys(cacheRoutes).filter((id) => !configured.has(id));
+  const present = [];
+  for (const id of candidates) {
+    let state;
+    try { state = vault.probe(id); } catch { state = 'unreadable'; }
+    if (state === 'present') present.push(id);
+  }
+  return present;
+}
+
+function viewFailure(kind, asJson) {
+  const reasonCodes = kind === 'config-corrupt' ? ['config-corrupt']
+    : kind === 'migration-pending' ? ['migration-pending']
+    : ['config-inconclusive'];
+  if (asJson) process.stdout.write(JSON.stringify(viewFailureEnvelope(reasonCodes), null, 2) + '\n');
+  process.stderr.write(`view-limits: ${viewFailureNotice(kind)}\n`);
+  // The exit code is set, not forced: the JSON envelope on stdout must be
+  // flushed before the process ends.
+  process.exitCode = lifecycle.exitCodeFor(VIEW_FAILURE_STATUS[kind]);
+}
+
+async function viewCmd(args) {
+  const allowed = new Set(['--condensed', '--json']);
+  if (args.some((a) => !allowed.has(a))) err('usage: vl.js view [--condensed] [--json]');
+  const asJson = args.includes('--json');
+  const condensed = args.includes('--condensed');
+
+  // The confirmed reader: a document it could not confirm REFUSES instead of
+  // falling back to the built-in defaults (#81).
+  let cfg;
+  try {
+    cfg = libLoadConfig();
+  } catch (e) {
+    if (e && e.code === 'CONFIG_CORRUPT') { viewFailure('config-corrupt', asJson); return; }
+    if (!e || e.code !== 'CONFIG_INCONCLUSIVE') throw e;
+    viewFailure('config-inconclusive', asJson);
+    return;
+  }
+
+  // The cache is read once and used for BOTH the snapshot and the
+  // migration-pending check, so the two can never describe different data.
+  const statusDoc = defaultReadStatus(dataDir());
+  const doc = statusDoc && statusDoc.doc && typeof statusDoc.doc === 'object' ? statusDoc.doc : null;
+  const cacheRoutes = doc && doc.routes && typeof doc.routes === 'object' && !Array.isArray(doc.routes)
+    ? doc.routes
+    : {};
+
+  if (unmigratedCredentialIds(cfg, cacheRoutes).length) {
+    viewFailure('migration-pending', asJson);
+    return;
+  }
+
+  const routesById = {};
+  for (const r of (Array.isArray(cfg.routes) ? cfg.routes : [])) {
+    if (r && typeof r.id === 'string') routesById[r.id] = r;
+  }
+
+  const snap = await getRuntimeSnapshot({
+    callerContext: cliCallerContext(),
+    io: {
+      readConfig: () => ({ cfg, corrupt: false, inconclusive: false }),
+      readStatus: () => statusDoc,
+    },
+  });
+  const schema = buildViewSchema(snap, {
+    generatedAt: snap.generatedAt,
+    gate: { entries: cacheRoutes, routes: routesById, now: Date.now() },
+  });
+
+  if (asJson) {
+    process.stdout.write(JSON.stringify(schema, null, 2) + '\n');
+    return;
+  }
+  process.stdout.write(renderViewText(schema, { condensed }).join('\n') + '\n');
+}
+
 // ---- recommend ---------------------------------------------------------------
 //
 // Advisory recommendation over the cache-only snapshot. One configured route
@@ -2160,8 +2298,9 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     case 'remove': return remove(args[0]);
     case 'config': return config();
     case 'snapshot': return snapshot(args);
+    case 'view': return viewCmd(args);
     case 'recommend': return recommendCmd(args);
     default:
-      return err('usage: vl.js status|report [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
   }
 })();

@@ -1861,72 +1861,61 @@ async function snapshot(args) {
 // configuration is read through the CONFIRMED reader (the #81 fix-by-default
 // path), and the states it can be in map onto the dispatch's own exit codes:
 //
-//   a confirmed document                      -> the view (exit 0)
-//   a confirmed document with no routes        -> the empty envelope (exit 0)
-//   a stored credential for a route the configuration does not define
-//                                             -> MIGRATION_PENDING (exit 8)
-//   a document that could not be confirmed (absent, or being replaced)
-//                                             -> CONFIG_INCONCLUSIVE (exit 9)
-//   a document that exists but cannot be parsed-> CONFIG_CORRUPT (exit 10)
+//   a confirmed document            -> the view (exit 0)
+//   the document is ABSENT          -> the one-time vault->routes migration
+//                                       has not resolved: nothing was ever
+//                                       published, so a rerun cannot help
+//                                       (exit 8)
+//   the document is UNCONFIRMABLE   -> it is there but could not be read: a
+//                                       publish is in flight, so a rerun may
+//                                       (exit 9)
+//   a document that cannot be parsed-> CONFIG_CORRUPT (exit 10)
+//
+// The absence is RE-CONFIRMED after the refused read: lib/config.js's
+// presence check (an lstat, never a document read) tells a document that was
+// never published (neither config.json nor the .prev a swap leaves behind)
+// from one that exists but could not be read. The credential store is NOT
+// consulted: an absent configuration is the migration-pending class on its
+// own, and a read command must not touch the credential store.
 //
 // The dispatch-time migration is NOT run for `view`: `view` is a read, and
-// the migration publishes config.json. The migration-pending state is
-// detected from the evidence the plugin already left on disk instead.
+// the migration publishes config.json. report/status/snapshot do not take it
+// either.
 
 // The notice for each refusing state. It is a function, not a constant: the
 // fixed config notices are declared further down the file, and reading them
 // at call time keeps the module free of a declaration-order trap.
 function viewFailureNotice(kind) {
-  if (kind === 'migration-pending') {
-    return 'stored credentials have not been migrated into routes yet, so no routes could be shown. Your stored credentials are untouched; run /view-limits:setup (or /view-limits:update) to publish the route list.';
+  if (kind === 'config-absent') {
+    return 'No configuration yet: run /view-limits:setup to add a provider, or start a new session to finish first-run setup.';
   }
   if (kind === 'config-corrupt') return CONFIG_CORRUPT_NOTICE;
   return CONFIG_INCONCLUSIVE_NOTICE;
 }
 
 const VIEW_FAILURE_STATUS = {
-  'migration-pending': lifecycle.STATUS.MIGRATION_PENDING,
+  'config-absent': lifecycle.STATUS.MIGRATION_PENDING,
   'config-inconclusive': lifecycle.STATUS.CONFIG_INCONCLUSIVE,
   'config-corrupt': lifecycle.STATUS.CONFIG_CORRUPT,
 };
 
-function viewFailureEnvelope(reasonCodes) {
+// The always-valid envelope for a refusing state: `not-configured` names the
+// absent document, `failed` the two unreadable ones.
+function viewFailureEnvelope(kind) {
+  const reasonCodes = kind === 'config-corrupt' ? ['config-corrupt']
+    : kind === 'config-absent' ? ['config-absent']
+    : ['config-inconclusive'];
   return {
     schemaVersion: VIEW_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
-    status: 'failed',
+    status: kind === 'config-absent' ? 'not-configured' : 'failed',
     reasonCodes,
     routes: [],
   };
 }
 
-// The routes the configuration does not define but the plugin has observed,
-// and for which a credential is still stored: the credential vault→routes
-// migration has not resolved, so the configuration does not describe every
-// stored credential.
-//
-// The credential store is consulted for PRESENCE only — the vault probe
-// never reads a secret — and only for the routes the cache already shows, so
-// a normal `view` never touches the credential store at all.
-function unmigratedCredentialIds(cfg, cacheRoutes) {
-  const configured = new Set((Array.isArray(cfg.routes) ? cfg.routes : [])
-    .filter((r) => r && typeof r.id === 'string')
-    .map((r) => r.id));
-  const candidates = Object.keys(cacheRoutes).filter((id) => !configured.has(id));
-  const present = [];
-  for (const id of candidates) {
-    let state;
-    try { state = vault.probe(id); } catch { state = 'unreadable'; }
-    if (state === 'present') present.push(id);
-  }
-  return present;
-}
-
 function viewFailure(kind, asJson) {
-  const reasonCodes = kind === 'config-corrupt' ? ['config-corrupt']
-    : kind === 'migration-pending' ? ['migration-pending']
-    : ['config-inconclusive'];
-  if (asJson) process.stdout.write(JSON.stringify(viewFailureEnvelope(reasonCodes), null, 2) + '\n');
+  if (asJson) process.stdout.write(JSON.stringify(viewFailureEnvelope(kind), null, 2) + '\n');
   process.stderr.write(`view-limits: ${viewFailureNotice(kind)}\n`);
   // The exit code is set, not forced: the JSON envelope on stdout must be
   // flushed before the process ends.
@@ -1947,26 +1936,32 @@ async function viewCmd(args) {
   } catch (e) {
     if (e && e.code === 'CONFIG_CORRUPT') { viewFailure('config-corrupt', asJson); return; }
     if (!e || e.code !== 'CONFIG_INCONCLUSIVE') throw e;
-    viewFailure('config-inconclusive', asJson);
+    // The read was refused. Re-confirm the document's presence: a document
+    // that was never published means the one-time vault->routes migration has
+    // not resolved (a rerun cannot fix that); a document that IS there but
+    // could not be read is unconfirmable (a publish is in flight, so a rerun
+    // may).
+    const presence = configPresence();
+    viewFailure(presence === 'absent' ? 'config-absent' : 'config-inconclusive', asJson);
     return;
   }
 
-  // The cache is read once and used for BOTH the snapshot and the
-  // migration-pending check, so the two can never describe different data.
+  // The cache is read once and used for BOTH the snapshot and the gate's own
+  // freshness decision, so the two can never describe different data.
   const statusDoc = defaultReadStatus(dataDir());
   const doc = statusDoc && statusDoc.doc && typeof statusDoc.doc === 'object' ? statusDoc.doc : null;
   const cacheRoutes = doc && doc.routes && typeof doc.routes === 'object' && !Array.isArray(doc.routes)
     ? doc.routes
     : {};
 
-  if (unmigratedCredentialIds(cfg, cacheRoutes).length) {
-    viewFailure('migration-pending', asJson);
-    return;
-  }
-
   const routesById = {};
+  const recipeOf = {};
   for (const r of (Array.isArray(cfg.routes) ? cfg.routes : [])) {
-    if (r && typeof r.id === 'string') routesById[r.id] = r;
+    if (!r || typeof r.id !== 'string') continue;
+    routesById[r.id] = r;
+    // A recipe route's provider id is free-form; the recipe is its stable
+    // identity, and the product name keys on it.
+    if (r.monitor && typeof r.monitor.recipe === 'string') recipeOf[r.id] = r.monitor.recipe;
   }
 
   const snap = await getRuntimeSnapshot({
@@ -1979,6 +1974,7 @@ async function viewCmd(args) {
   const schema = buildViewSchema(snap, {
     generatedAt: snap.generatedAt,
     gate: { entries: cacheRoutes, routes: routesById, now: Date.now() },
+    recipeOf,
   });
 
   if (asJson) {

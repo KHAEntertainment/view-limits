@@ -58,7 +58,12 @@ function gate(tool = 'Agent') {
   return run(gateArgs, { input: JSON.stringify({ tool_name: tool, tool_input: { model: 'kimi-k2' } }) });
 }
 function settings(mode, injectContext) {
-  return { gate: { mode, injectContext } };
+  // The route is CONFIGURED here: shipped routes are no longer present by
+  // default (config.json is assembled by setup), and a gate test about denying
+  // on `kimi-code-plan` needs that route to exist. The hook contract under
+  // test is unchanged — only the fixture now states its premise instead of
+  // inheriting it from a default.
+  return { gate: { mode, injectContext }, routes: [route] };
 }
 
 (async () => {
@@ -173,8 +178,19 @@ function settings(mode, injectContext) {
       assert.ok(!fs.existsSync(path.join(dir, 'refresh-workers')));
     }
     for (const raw of [null, 'null', '[]', 'false', '42', '{broken']) {
-      if (raw === null) fs.rmSync(configPath, { force: true });
-      else fs.writeFileSync(configPath, raw);
+      if (raw === null) {
+        // No config.json at all is a first use, so SessionStart runs the
+        // one-time migration (Issue #81). The guard blocks every vault read,
+        // so the vault is unreadable: it must write nothing, say so, and
+        // leave the migration to retry — never publish an empty route list.
+        fs.rmSync(configPath, { force: true });
+        const result = run(refreshArgs);
+        assert.strictEqual(result.stdout, '');
+        assert.strictEqual(result.stderr, 'view-limits: the credential vault could not be read, so stored credentials were not migrated into routes and no configuration was written — this retries on the next command.\n');
+        assert.ok(!fs.existsSync(configPath), 'an unreadable vault must not publish a config');
+        continue;
+      }
+      fs.writeFileSync(configPath, raw);
       silent(run(refreshArgs));
     }
 
@@ -200,16 +216,36 @@ function settings(mode, injectContext) {
       assert.strictEqual(cfg.gate.injectContext, true);
       assert.strictEqual(cfg.refreshOnSessionStart, true);
     }
-    for (const raw of [null, '{}', 'null', '[]', '{broken',
+    // No config.json at all: a lock-free read cannot tell that from a publish
+    // in flight, so `config` refuses (exit 9) rather than present DEFAULTS as
+    // the configuration (PR #82 round 6 ruling).
+    fs.rmSync(configPath, { force: true });
+    const absent = spawnSync(process.execPath, [cli, 'config'], { env: refreshEnv, encoding: 'utf8', timeout: 5000 });
+    assert.strictEqual(absent.status, 9, absent.stderr);
+    assert.strictEqual(absent.stdout, '');
+    assert.match(absent.stderr, /config unreadable mid-write; retry/);
+    // Present and an object, with invalid or missing fields: each field is
+    // normalized to its documented default.
+    for (const raw of ['{}',
       JSON.stringify({ gate: { mode: 'bad', injectContext: 'true' }, refreshOnSessionStart: 'true' }),
       JSON.stringify({ gate: null }),
     ]) {
-      if (raw === null) fs.rmSync(configPath, { force: true });
-      else fs.writeFileSync(configPath, raw);
+      fs.writeFileSync(configPath, raw);
       const cfg = JSON.parse(run(['config'], { env: refreshEnv }).stdout);
       assert.strictEqual(cfg.gate.mode, 'off');
       assert.strictEqual(cfg.gate.injectContext, false);
       assert.strictEqual(cfg.refreshOnSessionStart, false);
+    }
+    // Present but not a JSON object (malformed, or JSON of another type): the
+    // document is corrupt, so `config` refuses (exit 10) instead of presenting
+    // the built-in defaults as the configuration (PR #82, CodeRabbit finding A).
+    for (const raw of ['null', '[]', '42', '{broken']) {
+      fs.writeFileSync(configPath, raw);
+      const corrupt = spawnSync(process.execPath, [cli, 'config'], { env: refreshEnv, encoding: 'utf8', timeout: 5000 });
+      assert.strictEqual(corrupt.status, 10, `${raw}: ${corrupt.stderr}`);
+      assert.strictEqual(corrupt.stdout, '');
+      assert.match(corrupt.stderr, /config\.json could not be read or parsed — fix it or move it aside, then rerun/);
+      assert.doesNotMatch(corrupt.stderr, /retry\./, 'a corrupt file was reported as a publish in flight');
     }
     assert.deepStrictEqual(hooks.hooks.SessionStart[1].hooks[0], {
       type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/bin/vl.js', 'session-start'], timeout: 5,

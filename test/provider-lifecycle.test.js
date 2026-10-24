@@ -779,6 +779,9 @@ test('every status maps to a stable code, and 1 stays reserved for bad args', ()
       'persist-failed': 5,
       'lock-busy': 6,
       'not-found': 7,
+      'migration-pending': 8,
+      'config-inconclusive': 9,
+      'config-corrupt': 10,
     },
   );
   assert.strictEqual(lifecycle.exitCodeFor('something-unknown'), 1);
@@ -910,6 +913,11 @@ test('a write that fails mid-publication leaves the previous document intact', (
   const target = path.join(dir, 'config.json');
   const original = JSON.stringify({ routes: [{ id: 'my-route', provider: 'kimi' }], vault: { backend: 'file' } }, null, 1);
   fs.writeFileSync(target, original);
+  // Every publish runs under the provider mutation lock (Issue #81), so the
+  // fixture holds the real one — taken before the fault is injected, since the
+  // lock writes its own ticket. The property under test is unchanged.
+  const lock = lifecycle.acquireMutationLock(dir);
+  assert.ok(lock.ok, 'premise: the test holds the mutation lock');
   const realWrite = fs.writeFileSync;
   try {
     fs.writeFileSync = (file, ...rest) => {
@@ -925,6 +933,7 @@ test('a write that fails mid-publication leaves the previous document intact', (
     assert.throws(() => saveConfig({ routes: [], vault: {} }), /ENOSPC/);
   } finally {
     fs.writeFileSync = realWrite;
+    lock.release();
     if (prevDataDir === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
     else process.env.CLAUDE_PLUGIN_DATA = prevDataDir;
   }
@@ -1006,12 +1015,11 @@ test('a provably dead holder is reclaimed', () => {
   assert.strictEqual(taken.release(), true);
 });
 
-test('two contenders racing to reclaim the same dead holder cannot both acquire', () => {
-  // The bug this protocol removes: with one shared lock file, each contender
-  // confirmed the dead holder and then unlinked "the lock" — so the slower one
-  // deleted the WINNER'S LIVE LOCK and acquired too, and both went on to write
-  // config.json. Here the dead ticket belongs to one contender and is reaped
-  // by name, nobody unlinks a peer's file, and the election picks exactly one.
+test('after a dead-holder reclaim, a later contender is refused and never unlinks the winner', () => {
+  // Sequential, so this is NOT the race itself (that is the multi-process test
+  // below). It pins the two properties the old single-file lock lacked: the
+  // dead ticket is reaped by name, and a refused contender removes only its
+  // own claim — never the winner's live ticket.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-reclaim-'));
   const pid = absentPid();
   assert.ok(pid, 'could not find an absent pid to test with');
@@ -1025,6 +1033,60 @@ test('two contenders racing to reclaim the same dead holder cannot both acquire'
     "the losing contender deleted the winner's ticket");
   assert.strictEqual(winners[0].release(), true);
   assert.deepStrictEqual(ticketsIn(dir), []);
+});
+
+test('real processes racing for the lock, over a dead holder, never hold it together', async () => {
+  // The interleaving the sequential test cannot reach: several OS processes
+  // released at once by a barrier, each repeatedly trying to acquire, holding
+  // briefly, and releasing. Every holder journals `start`/`end`; two `start`s
+  // without an `end` between them is two concurrent writers of config.json.
+  const { spawn } = require('child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-lifecycle-race-'));
+  const pid = absentPid();
+  assert.ok(pid, 'could not find an absent pid to test with');
+  plantTicket(dir, { pid, number: 1, hex: 'e'.repeat(32) });
+  const barrier = path.join(dir, 'barrier');
+  const journal = path.join(dir, 'journal');
+  const script = `
+    const fs = require('fs');
+    const lifecycle = require(${JSON.stringify(path.resolve(__dirname, '../lib/provider-lifecycle'))});
+    const [dir, barrier, journal] = process.argv.slice(1);
+    const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    while (!fs.existsSync(barrier)) nap(1);
+    const until = Date.now() + 400;
+    while (Date.now() < until) {
+      const lock = lifecycle.acquireMutationLock(dir);
+      if (!lock.ok) { nap(1); continue; }
+      fs.appendFileSync(journal, 'start ' + process.pid + '\\n');
+      nap(30);
+      fs.appendFileSync(journal, 'end ' + process.pid + '\\n');
+      if (!lock.release()) { fs.appendFileSync(journal, 'release-failed ' + process.pid + '\\n'); }
+    }
+  `;
+  const children = Array.from({ length: 6 }, () =>
+    spawn(process.execPath, ['-e', script, dir, barrier, journal], { stdio: ['ignore', 'ignore', 'pipe'] }));
+  const stderr = children.map(() => '');
+  children.forEach((c, i) => c.stderr.on('data', (d) => { stderr[i] += d; }));
+  await new Promise((res) => setTimeout(res, 200));
+  fs.writeFileSync(barrier, 'go');
+  const codes = await Promise.all(children.map((c) => new Promise((res) => c.on('exit', res))));
+  assert.deepStrictEqual(codes, codes.map(() => 0), `a contender crashed: ${stderr.join('\n')}`);
+  const lines = fs.existsSync(journal) ? fs.readFileSync(journal, 'utf8').split('\n').filter(Boolean) : [];
+  let holder = null;
+  for (const line of lines) {
+    const [event, who] = line.split(' ');
+    assert.notStrictEqual(event, 'release-failed', `a holder could not release its own ticket: ${line}`);
+    if (event === 'start') {
+      assert.strictEqual(holder, null, `${who} acquired while ${holder} still held the lock`);
+      holder = who;
+    } else {
+      assert.strictEqual(holder, who, `unbalanced journal at "${line}"`);
+      holder = null;
+    }
+  }
+  assert.ok(lines.some((l) => l.startsWith('start ')), 'premise: nobody ever acquired, so nothing was raced');
+  assert.strictEqual(holder, null, 'a holder never finished');
+  assert.deepStrictEqual(ticketsIn(dir), [], 'tickets were left behind, including the dead holder');
 });
 
 test("reclaiming a dead holder never removes a LIVE contender's ticket", () => {

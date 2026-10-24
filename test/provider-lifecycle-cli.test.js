@@ -300,6 +300,36 @@ test('rerunning after the failure completes the add', () => {
   assert.ok(routeById(dir, 'custom-acme-plan'));
 });
 
+// The lifecycle's vault.set must be the REAL write, so a write that throws
+// reaches it. Routed through bin/vl.js storeCredential() — which returns false
+// instead of throwing, and also takes the mutation lock the lifecycle already
+// holds — a failed write was read as success and a route was published with
+// no credential behind it. Nothing is injected: secrets/ exists and is r-x, so
+// the real file vault's temp-file write fails with EACCES.
+test('a vault write that really fails stops the add at the vault stage (real vault)', () => {
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    console.log('    (skipped: running as root, where mode bits do not deny)');
+    return;
+  }
+  const dir = freshDir();
+  const secrets = path.join(dir, 'secrets');
+  fs.mkdirSync(secrets, { mode: 0o700 });
+  fs.chmodSync(secrets, 0o500);
+  try {
+    const r = run(dir, ADD_ACME);
+    assert.strictEqual(r.status, 5, `a failed vault write was not reported: ${r.stdout}${r.stderr}`);
+    assert.strictEqual(r.json.status, 'persist-failed');
+    assert.strictEqual(r.json.stage, 'vault');
+    assert.strictEqual(routeById(dir, 'custom-acme-plan'), null,
+      'a route was published with no credential behind it');
+    assert.doesNotMatch(r.stderr, /holds the lock/, 'the credential write re-entered the mutation lock');
+    assert.ok(!JSON.stringify(r.json).includes(KEY_A), 'the credential appeared in the result');
+  } finally {
+    fs.chmodSync(secrets, 0o700);
+  }
+  assert.deepStrictEqual(secretFiles(dir), [], 'a partial credential file was left behind');
+});
+
 test('a failed publication leaves the existing config.json byte-identical', () => {
   const dir = freshDir();
   assert.strictEqual(run(dir, ADD_ACME).status, 0);
@@ -330,8 +360,11 @@ test('a malformed config.json is refused, not overwritten', () => {
   const broken = '{\n "vault": { "backend": "file" },\n "routes": [\n  { "id": "mine", "provider": "kimi" },\n ]\n}\n';
   fs.writeFileSync(path.join(dir, 'config.json'), broken);
   const r = run(dir, ADD_ACME);
-  assert.strictEqual(r.status, 5, r.stderr);
-  assert.strictEqual(r.json.stage, 'config-unreadable');
+  // Refused at the command's own config read (exit 10, config-corrupt), before
+  // the lifecycle runs: its own guard (stage 'config-unreadable', exit 5) is
+  // pinned in test/provider-lifecycle.test.js.
+  assert.strictEqual(r.status, 10, r.stderr);
+  assert.match(r.stderr, /config\.json could not be read or parsed — fix it or move it aside, then rerun/);
   assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), broken,
     'a config we could not parse must be left exactly as it was');
   assert.deepStrictEqual(secretFiles(dir), [], 'and no credential may be stored');
@@ -512,9 +545,21 @@ test('removal is resumable: a failed config publication keeps the cleared creden
 // `fileDelete` swallows every unlink error and returns false. So a delete that
 // FAILED is byte-for-byte indistinguishable from a secret that was never
 // there, if all you have is get() and remove(). Here the secret is provably
-// still on disk and the delete provably failed, which is the case a read-back
+// still on disk, cannot be READ (get() is null — the premise is asserted, not
+// assumed), and the delete provably failed: exactly the case a read-back
 // would have announced as a successful removal — leaving an orphaned
 // credential behind a deleted route.
+function realVaultRead(dir, id) {
+  const script = `const v = require(${JSON.stringify(path.resolve(__dirname, '../lib/vault'))});` +
+    `process.stdout.write(JSON.stringify({ get: v.get(${JSON.stringify(id)}), probe: v.probe(${JSON.stringify(id)}) }));`;
+  const r = spawnSync(process.execPath, ['-e', script], {
+    env: { PATH: process.env.PATH, HOME: dir, CLAUDE_PLUGIN_DATA: dir, VIEW_LIMITS_MASTER_KEY: MASTER },
+    encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  assert.strictEqual(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
 test('a credential that could not be deleted is reported as failed, not removed (real vault)', () => {
   if (typeof process.getuid === 'function' && process.getuid() === 0) {
     console.log('    (skipped: running as root, where mode bits do not deny)');
@@ -525,11 +570,16 @@ test('a credential that could not be deleted is reported as failed, not removed 
   const secrets = path.join(dir, 'secrets');
   const blob = path.join(secrets, 'custom-acme-plan.enc');
   assert.strictEqual(fs.existsSync(blob), true, 'the add did not store a credential to delete');
-  // r-x: the blob can still be STAT'd (so presence is provable) but the
-  // directory cannot be written, so unlink fails. This is exactly the shape of
-  // a vault that is intact and inaccessible.
+  assert.strictEqual(realVaultRead(dir, 'custom-acme-plan').get, KEY_A, 'premise: the stored key reads back first');
+  // The blob is 000, so get() reads NOTHING — the null-read hazard — while the
+  // directory is r-x, so the blob can still be STAT'd (presence is provable)
+  // but not unlinked. This is a vault that is intact and inaccessible.
+  fs.chmodSync(blob, 0o000);
   fs.chmodSync(secrets, 0o500);
   try {
+    const premise = realVaultRead(dir, 'custom-acme-plan');
+    assert.strictEqual(premise.get, null, 'premise: the real vault must read the locked blob as null');
+    assert.strictEqual(premise.probe, 'present', 'premise: the strict probe must still see the blob');
     const r = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json']);
     assert.strictEqual(r.status, 5, r.stderr);
     assert.strictEqual(r.json.stage, 'vault');
@@ -543,6 +593,7 @@ test('a credential that could not be deleted is reported as failed, not removed 
     assert.ok(routeById(dir, 'custom-acme-plan'), 'the route entry must survive a failed vault stage');
   } finally {
     fs.chmodSync(secrets, 0o700);
+    fs.chmodSync(blob, 0o600);
   }
   // Idempotent: once the vault is reachable again the same command finishes.
   const again = run(dir, ['provider', 'remove', 'custom-acme-plan', '--json']);

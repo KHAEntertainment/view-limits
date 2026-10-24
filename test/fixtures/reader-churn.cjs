@@ -7,7 +7,8 @@
 //                     .prev) before which writer 1 begins. Default 1.
 // VL_TEST_HOOK_JOURNAL  every step is journaled there as one JSON line. Each
 //                     read names its `site`: the innermost bin/vl.js function
-//                     on the stack, so a test can aim the churn at one read.
+//                     on the stack other than its loadConfig wrapper, so a
+//                     test can aim the churn at one read.
 //
 // Each writer behaves as a real publisher in another process would: it takes
 // the REAL provider mutation lock for its whole publish, moves config.json
@@ -69,8 +70,11 @@ function site() {
   Error.stackTraceLimit = 50;
   const stack = new Error().stack;
   Error.stackTraceLimit = limit;
-  const m = String(stack).match(/at (?:async )?(\S+) \([^)]*bin\/vl\.js:/);
-  return m ? m[1] : null;
+  // bin/vl.js's own loadConfig wrapper is skipped: the site is its caller.
+  for (const m of String(stack).matchAll(/at (?:async )?(\S+) \([^)]*bin\/vl\.js:/g)) {
+    if (m[1] !== 'loadConfig') return m[1];
+  }
+  return null;
 }
 
 fs.readFileSync = function readWithChurn(file, ...rest) {

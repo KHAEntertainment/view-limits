@@ -569,11 +569,21 @@ test('pin 8: N writers exhaust every lock-free round — the strict read proves 
   }
 });
 
-test('pin 8: the same schedule through the lax reader is DEFAULTS marked inconclusive, and reaches the display', async () => {
+test('pin 8: the same schedule through the lax reader REFUSES by default; a display opt-in gets DEFAULTS marked inconclusive', async () => {
   const dir = scratch();
   fs.writeFileSync(PREV(dir), JSON.stringify(customDoc('custom-0')));
+  // The default (owner ruling "fix by default"): CONFIG_INCONCLUSIVE, never DEFAULTS.
+  const refused = await countingAcquires(() => onReaderMiss(
+    nWriterSchedule(dir, ['custom-1', 'custom-2', 'custom-3'].map(customDoc)), () => inDataDir(dir, () => {
+      try { return { cfg: loadConfig() }; } catch (e) { return { code: e && e.code }; }
+    })));
+  assert.deepStrictEqual(refused.value.misses, SIX_MISSES, 'premise');
+  assert.strictEqual(refused.count, 0, 'the lax reader took the lock');
+  assert.deepStrictEqual(refused.value.value, { code: 'CONFIG_INCONCLUSIVE' }, 'the default handed out DEFAULTS from an unconfirmed read');
+  // An opted-in caller gets DEFAULTS, marked so it can surface the mark.
+  fs.renameSync(path.join(dir, 'config.json'), PREV(dir));
   const { value, count } = await countingAcquires(() => onReaderMiss(
-    nWriterSchedule(dir, ['custom-1', 'custom-2', 'custom-3'].map(customDoc)), () => inDataDir(dir, () => loadConfig())));
+    nWriterSchedule(dir, ['custom-7', 'custom-8', 'custom-9'].map(customDoc)), () => inDataDir(dir, () => loadConfig({ display: true }))));
   assert.deepStrictEqual(value.misses, SIX_MISSES, 'premise');
   assert.strictEqual(count, 0, 'the lax reader took the lock');
   assert.strictEqual(config.configInconclusive(value.value), true, 'DEFAULTS from an unconfirmed read were not marked');
@@ -857,11 +867,10 @@ function readAt(prepare, args, site) {
   assert.ok(reads.length, `premise: ${args.join(' ')} reads config.json in ${site}`);
   return reads[reads.length - 1].attempt;
 }
-// Which config read the churn starts at. A command in MIGRATING_COMMANDS makes
-// one read first in the dispatcher (bin/vl.js, lifecycleIo for the migration,
-// which decides presence by lstat under its own lock), so its own read is the
-// 2nd; `config` does not migrate, so its own read is the 1st.
-const OWN_READ = (args) => (args[0] === 'config' ? 1 : 2);
+// Which config read the churn starts at: a command's own read is the 1st. The
+// dispatcher's migration makes no config read (it decides presence by lstat
+// under its own lock and is handed no cfg), so nothing comes before it.
+const OWN_READ = () => 1;
 const EXHAUSTED = (steps) => steps.filter((s) => s.step === 'miss').length === 6 && steps.filter((s) => s.step === 'complete').length === 3;
 
 test('pin 9: config and provider list on an unconfirmed read — the notice, exit 9, never DEFAULTS or an empty list', () => {
@@ -894,15 +903,15 @@ test('pin 9: check/remove/setup/update <id> on an unconfirmed read — exit 9 an
 });
 
 test('pin 9: Xiaomi setup reads, modifies and publishes under ONE lock hold — a concurrent publisher cannot interleave', () => {
-  // Read 4 is the route-list read inside planXiaomiConfig (1: the dispatcher's
-  // migration read; 2: setup's own; 3: the plan's base document). A writer that tries to begin there
+  // Read 3 is the route-list read inside planXiaomiConfig (1: setup's own;
+  // 2: the plan's base document). A writer that tries to begin there
   // cannot take the lock, so the plan is built from — and written back over —
   // exactly the document it read.
   const dir = seeded([builtInRoute('kimi-code-plan'), customDoc('custom-keep').routes[0]]);
   fs.mkdirSync(path.join(dir, 'home'), { recursive: true });
   const chrome = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-chrome-'));
   const { r, steps } = churnRun(dir, ['setup', 'xiaomi-token-plan', '--chrome-source', chrome, '--profile', 'Profile 46'],
-    { at: 4, preloads: [xiaomiPreload], extra: { HOME: path.join(dir, 'home') } });
+    { at: 3, preloads: [xiaomiPreload], extra: { HOME: path.join(dir, 'home') } });
   assert.strictEqual(r.status, 0, r.stderr);
   assert.deepStrictEqual(steps, [{ step: 'blocked', writer: 1 }], `a publisher interleaved with the Xiaomi read-modify-write: ${JSON.stringify(steps)}`);
   assert.deepStrictEqual(routeIds(dir), ['kimi-code-plan', 'custom-keep', 'xiaomi-token-plan'], 'a non-Xiaomi route was dropped');
@@ -910,7 +919,7 @@ test('pin 9: Xiaomi setup reads, modifies and publishes under ONE lock hold — 
   const early = seeded([builtInRoute('kimi-code-plan'), customDoc('custom-keep').routes[0]]);
   fs.mkdirSync(path.join(early, 'home'), { recursive: true });
   const e = churnRun(early, ['setup', 'xiaomi-token-plan', '--chrome-source', chrome, '--profile', 'Profile 46'],
-    { at: 2, preloads: [xiaomiPreload], extra: { HOME: path.join(early, 'home') } });
+    { at: 1, preloads: [xiaomiPreload], extra: { HOME: path.join(early, 'home') } });
   assert.ok(EXHAUSTED(e.steps), `premise: ${JSON.stringify(e.steps)}`);
   assert.strictEqual(e.r.status, 9, e.r.stderr);
   assert.deepStrictEqual(routeIds(early), ['kimi-code-plan', 'custom-w3'], 'an unconfirmed read wrote a Xiaomi document');
@@ -935,18 +944,18 @@ function xiaomiConfigured() {
 }
 
 test('pin 9: the Xiaomi revalidation and removal writers also read-modify-write under ONE lock hold', () => {
-  // Read 3 is each writer's base-document read, inside its hold (1: the
-  // dispatcher's migration read; 2: the command's own).
+  // Read 2 is each writer's base-document read, inside its hold (1: the
+  // command's own).
   const upd = xiaomiConfigured();
   const u = churnRun(upd.dir, ['update', 'xiaomi-token-plan', '--profile', 'Profile 47'],
-    { at: 3, preloads: [xiaomiPreload], extra: { HOME: path.join(upd.dir, 'home') } });
+    { at: 2, preloads: [xiaomiPreload], extra: { HOME: path.join(upd.dir, 'home') } });
   assert.strictEqual(u.r.status, 0, u.r.stderr);
   assert.deepStrictEqual(u.steps, [{ step: 'blocked', writer: 1 }], `a publisher interleaved with the revalidation write: ${JSON.stringify(u.steps)}`);
   assert.deepStrictEqual(routeIds(upd.dir), ['kimi-code-plan', 'custom-keep', 'xiaomi-token-plan'], 'revalidation dropped a route');
   assert.strictEqual(docAt(path.join(upd.dir, 'config.json')).xiaomi.chromeProfile, 'Profile 47');
   const rem = xiaomiConfigured();
   const m = churnRun(rem.dir, ['remove', 'xiaomi-token-plan'],
-    { at: 3, preloads: [xiaomiPreload], extra: { HOME: path.join(rem.dir, 'home') } });
+    { at: 2, preloads: [xiaomiPreload], extra: { HOME: path.join(rem.dir, 'home') } });
   assert.strictEqual(m.r.status, 0, m.r.stderr);
   assert.deepStrictEqual(m.steps, [{ step: 'blocked', writer: 1 }], `a publisher interleaved with the removal write: ${JSON.stringify(m.steps)}`);
   assert.deepStrictEqual(routeIds(rem.dir), ['kimi-code-plan', 'custom-keep'], 'removal dropped a non-Xiaomi route');
@@ -977,7 +986,7 @@ test('pin 9: refresh on an unconfirmed read — exit 9 and the notice, never "no
   const dir = seeded([builtInRoute('kimi-code-plan')]);
   inDataDir(dir, () => vault.set('kimi-code-plan', KEY_A));
   const { r, steps, reads, acquires } = churnRun(dir, ['refresh'], { at: OWN_READ(['refresh']) });
-  assert.strictEqual(siteAt(reads, 2), 'refresh', `premise: the churn starts at refresh's own read: ${JSON.stringify(reads)}`);
+  assert.strictEqual(siteAt(reads, 1), 'refresh', `premise: the churn starts at refresh's own read: ${JSON.stringify(reads)}`);
   assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
   assert.strictEqual(r.status, 9, `${r.stdout}${r.stderr}`);
   assert.strictEqual(r.stdout, '', `refresh presented an unconfirmed configuration: ${r.stdout}`);
@@ -992,7 +1001,7 @@ test('pin 9: refresh on an unconfirmed read — exit 9 and the notice, never "no
   const warmDir = seeded([builtInRoute('kimi-code-plan')]);
   inDataDir(warmDir, () => vault.set('kimi-code-plan', KEY_A));
   const warm = churnRun(warmDir, warmArgs, { at: OWN_READ(warmArgs) });
-  assert.strictEqual(siteAt(warm.reads, 2), 'refresh', `premise: ${JSON.stringify(warm.reads)}`);
+  assert.strictEqual(siteAt(warm.reads, 1), 'refresh', `premise: ${JSON.stringify(warm.reads)}`);
   assert.ok(EXHAUSTED(warm.steps), `premise: ${JSON.stringify(warm.steps)}`);
   assert.strictEqual(warm.r.status, 0, `the SessionStart warm-up failed the hook: ${warm.r.stderr}`);
   assert.strictEqual(warm.r.stdout + warm.r.stderr, '');
@@ -1004,7 +1013,7 @@ test('pin 9: serve on an unconfirmed read — exit 9 before it listens, never "u
   // custom-w3 is in the document the writers commit; DEFAULTS do not offer it.
   const args = ['serve', String(await freePort()), 'nonce-81', 'custom-w3'];
   const { r, steps, reads, acquires } = churnRun(dir, args, { at: OWN_READ(args) });
-  assert.strictEqual(siteAt(reads, 2), 'serve', `premise: the churn starts at serve's own read: ${JSON.stringify(reads)}`);
+  assert.strictEqual(siteAt(reads, 1), 'serve', `premise: the churn starts at serve's own read: ${JSON.stringify(reads)}`);
   assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
   assert.strictEqual(r.status, 9, `${r.stdout}${r.stderr}`);
   assert.match(r.stderr, /config unreadable mid-write; retry/);
@@ -1046,6 +1055,182 @@ test('pin 9: bare setup with an unconfirmed post-state reread — exit 9, never 
   assert.match(r.stderr, /config unreadable mid-write; retry/);
   assert.doesNotMatch(r.stderr, /still have no route|all credentials present/);
   assert.deepStrictEqual(r.j.read(r.j.browser), [], 'bare setup opened a form');
+});
+
+// ---- owner ruling "fix by default": loadConfig refuses unless the call site opts in ----
+//
+// Every opt-in site surfaces the mark itself. Each test below runs the real CLI
+// under the same churn, aimed at that site's own read, and fails if the opt-in
+// is removed (the site would exit 9) as well as if the site shows DEFAULTS.
+test('opt-in: the gate on an unconfirmed read stays fail-open — exit 0, nothing denied', () => {
+  const dir = seeded([builtInRoute('kimi-code-plan')]);
+  const { r, steps, reads, acquires } = churnRun(dir, ['gate'], { at: OWN_READ() });
+  assert.strictEqual(siteAt(reads, 1), 'gate', `premise: ${JSON.stringify(reads)}`);
+  assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
+  assert.strictEqual(r.status, 0, `the gate did not fail open: ${r.stdout}${r.stderr}`);
+  assert.strictEqual(r.stdout, '', `the gate emitted a decision on an unconfirmed read: ${r.stdout}`);
+  assert.deepStrictEqual(acquires, [], 'the gate took the lock');
+});
+
+test('opt-in: report on an unconfirmed read prints the notice, exit 0, never "no credentials configured"', () => {
+  const dir = seeded([builtInRoute('kimi-code-plan')]);
+  inDataDir(dir, () => vault.set('kimi-code-plan', KEY_A));
+  const { r, steps, reads, acquires } = churnRun(dir, ['report'], { at: OWN_READ() });
+  assert.strictEqual(siteAt(reads, 1), 'reportCmd', `premise: ${JSON.stringify(reads)}`);
+  assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
+  assert.strictEqual(r.status, 0, `${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /config unreadable mid-write; retry/);
+  assert.doesNotMatch(r.stdout, /no credentials configured/i);
+  assert.deepStrictEqual(r.j.read(r.j.net), [], 'report called a provider on an unconfirmed read');
+  assert.deepStrictEqual(acquires, [], 'report took the lock');
+});
+
+test('opt-in: session-start on an unconfirmed read reports the notice as its systemMessage, exit 0', () => {
+  const dir = seeded([builtInRoute('kimi-code-plan')]);
+  const { r, steps, reads, acquires } = churnRun(dir, ['session-start'], { at: OWN_READ() });
+  assert.strictEqual(siteAt(reads, 1), 'sessionStart', `premise: ${JSON.stringify(reads)}`);
+  assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
+  assert.strictEqual(r.status, 0, `the SessionStart hook failed: ${r.stderr}`);
+  assert.match(JSON.parse(r.stdout).systemMessage, /config unreadable mid-write; retry/);
+  assert.deepStrictEqual(acquires, [], 'session-start took the lock to display');
+});
+
+test('opt-in: recommend on an unconfirmed read fails safe — exit 0, Jev handed {} behind its gate', () => {
+  const dir = seeded([builtInRoute('kimi-code-plan')]);
+  const { r, steps, reads, acquires } = churnRun(dir, ['recommend', '--json'], { at: OWN_READ() });
+  assert.strictEqual(siteAt(reads, 1), 'recommendCmd', `premise: ${JSON.stringify(reads)}`);
+  assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
+  assert.strictEqual(r.status, 0, `${r.stdout}${r.stderr}`);
+  assert.ok(r.json && typeof r.json === 'object', `recommend printed no document: ${r.stdout}`);
+  assert.deepStrictEqual(r.j.read(r.j.net), [], 'recommend reached the network (Jev) on an unconfirmed read');
+  assert.deepStrictEqual(acquires, [], 'recommend took the lock');
+});
+
+test('setup <id> --headless exits 1 when its row does not materialize, as setup <id> --key does (CodeRabbit)', () => {
+  const dir = seeded([]);
+  const held = lifecycle.acquireMutationLock(dir);
+  assert.ok(held.ok);
+  try {
+    const j = journals();
+    const r = spawnSync(process.execPath, [cli, 'setup', 'kimi-code-plan', '--headless'], {
+      env: envFor(dir, j), encoding: 'utf8', timeout: 20000, input: `${KEY_A}\n`,
+    });
+    assert.strictEqual(inDataDir(dir, () => vault.get('kimi-code-plan')), KEY_A, `premise: the credential was stored: ${r.stderr}`);
+    assert.ok(!routeIds(dir).includes('kimi-code-plan'), 'premise: the row did not materialize');
+    assert.strictEqual(r.status, 1, `a row-less headless store reported success: ${r.stderr}`);
+    assert.match(r.stderr, /the credential for "kimi-code-plan" is stored, but its route is not configured yet/);
+  } finally {
+    held.release();
+  }
+});
+
+// The guard: every config-reading call in bin/, lib/ and harness/, by file,
+// enclosing function, helper and its exact arguments. The set must equal this
+// table exactly, so a new call site (in any mode), a widened opt-in and a
+// removed one all fail here until the table — the PR's review artifact — is
+// updated to match. Modes: strict-default (loadConfig() refuses), display /
+// session-warmup opt-in, strict by construction, lstat presence.
+const CONFIG_READERS = [
+  // loadConfig: the five opt-ins, each surfacing the mark itself.
+  'bin/vl.js | gate | loadConfig | { display: true }',
+  'bin/vl.js | refresh | loadConfig | fromSessionStart ? { sessionWarmup: true } : undefined',
+  'bin/vl.js | reportCmd | loadConfig | { display: true }',
+  'bin/vl.js | recommendCmd | loadConfig | { display: true }',
+  'bin/vl.js | sessionStart | loadConfig | { display: true }',
+  // loadConfig: strict default (refuses, exit 9).
+  'bin/vl.js | check | loadConfig | ',
+  'bin/vl.js | serve | loadConfig | ',
+  'bin/vl.js | requireRowAfterStore | loadConfig | ',
+  'bin/vl.js | setup | loadConfig | ',
+  'bin/vl.js | setup | loadConfig | ',
+  'bin/vl.js | update | loadConfig | ',
+  'bin/vl.js | remove | loadConfig | ',
+  'bin/vl.js | providerCmd | loadConfig | ',
+  'bin/vl.js | config | loadConfig | ',
+  // The bin wrapper: the throw becomes exit 9 at the call.
+  'bin/vl.js | loadConfig | libLoadConfig | opts',
+  // Strict by construction (proves absence under the lock, or throws / exits 9).
+  'bin/vl.js | planXiaomiConfig | loadConfigStrict | ',
+  'bin/vl.js | lifecycleIo | loadConfigStrict | ',
+  'lib/vault.js | vaultCfg | loadConfigStrict | ',
+  'bin/vl.js | readUserConfig | readConfigText | { strict: true }',
+  'bin/vl.js | readUserConfigStrict | readConfigText | { strict: true }',
+  'bin/vl.js | materializeBuiltInRoute | readUserConfigStrict | ',
+  'bin/vl.js | planXiaomiConfig | readUserConfig | ',
+  'bin/vl.js | writeXiaomiSourceProfile | readUserConfig | ',
+  'bin/vl.js | removeXiaomi | readUserConfig | ',
+  'lib/provider-lifecycle.js | persistRoute | readUserConfig | ',
+  'lib/provider-lifecycle.js | removeWithinLock | readUserConfig | ',
+  'lib/provider-lifecycle.js | userConfigBlocked | readUserConfigStrict | ',
+  // The snapshot's own reader: carries the config-inconclusive diagnostic.
+  'lib/runtime-snapshot.js | defaultReadConfig | readConfigTextIn | dir',
+  // lstat presence (the migration), never a document read.
+  'lib/provider-lifecycle.js | configPresenceOf | configPresence | ',
+  // lib/config.js internals.
+  'lib/config.js | buildConfig | readConfigText | { strict }',
+  'lib/config.js | loadConfig | buildConfig | false',
+  'lib/config.js | loadConfigStrict | buildConfig | true',
+  'lib/config.js | readConfigText | readConfigTextIn | dataDir(), opts',
+];
+const READER_NAMES = ['loadConfig', 'libLoadConfig', 'loadConfigStrict', 'buildConfig', 'readConfigText',
+  'readConfigTextIn', 'readUserConfig', 'readUserConfigStrict', 'configPresence'];
+
+function configReaderCalls() {
+  const root = path.resolve(__dirname, '..');
+  const calls = [];
+  const bypasses = [];
+  const call = new RegExp(`(?<![\\w$])(${READER_NAMES.join('|')})\\(`, 'g');
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir)) {
+      const file = path.join(dir, name);
+      if (fs.statSync(file).isDirectory()) { if (name !== 'node_modules') walk(file); continue; }
+      if (!/\.c?js$/.test(name)) continue;
+      const rel = path.relative(root, file);
+      const lines = fs.readFileSync(file, 'utf8').split('\n');
+      let fn = '(top level)';
+      lines.forEach((line, i) => {
+        const decl = line.match(/^(?:async\s+)?function\s+(\w+)/);
+        if (decl) fn = decl[1];
+        else if (/^\S/.test(line) && !/^(\/\/|\}|\*)/.test(line)) fn = '(top level)';
+        const code = line.replace(/\/\/.*$/, '');
+        // A document read that bypasses the helpers.
+        if (rel !== 'lib/config.js' && /readFileSync\(/.test(code) && /config\.json|configPath\(/.test(code)) bypasses.push(`${rel}:${i + 1}`);
+        for (const m of code.matchAll(call)) {
+          if (/function\s+$/.test(code.slice(0, m.index))) continue;
+          let depth = 0;
+          let args = '';
+          for (let k = m.index + m[1].length; k < code.length; k += 1) {
+            const c = code[k];
+            if (c === '(') { depth += 1; if (depth === 1) continue; }
+            if (c === ')') { depth -= 1; if (depth === 0) break; }
+            args += c;
+          }
+          calls.push(`${rel} | ${fn} | ${m[1]} | ${args.trim()}`);
+        }
+      });
+    }
+  };
+  for (const sub of ['bin', 'lib', 'harness']) if (fs.existsSync(path.join(root, sub))) walk(path.join(root, sub));
+  return { calls, bypasses };
+}
+
+test('guard: every config reader in bin/, lib/ and harness/ is exactly the reviewed table — no unlisted site, no widened opt-in', () => {
+  const { calls, bypasses } = configReaderCalls();
+  assert.deepStrictEqual(calls.slice().sort(), CONFIG_READERS.slice().sort(),
+    'the config readers changed: classify the new or changed site in CONFIG_READERS (and the PR table) — a strict-default loadConfig() needs no opt-in; an opt-in must surface the mark itself');
+  assert.deepStrictEqual(bypasses, [], 'a config.json read bypasses the shared reader');
+});
+
+test('guard: lib loadConfig honors only the two named opt-ins; anything else is the strict default', () => {
+  const dir = scratch();
+  inDataDir(dir, () => {
+    for (const opts of [undefined, {}, { display: 'yes' }, { display: 1 }, { sessionWarmup: 'true' }, { strict: false }]) {
+      assert.throws(() => loadConfig(opts), (e) => e && e.code === 'CONFIG_INCONCLUSIVE', `opted in with ${JSON.stringify(opts)}`);
+    }
+    for (const opts of [{ display: true }, { sessionWarmup: true }]) {
+      assert.strictEqual(config.configInconclusive(loadConfig(opts)), true);
+    }
+  });
 });
 
 test('the lifecycle publish path, called directly with the migration pending, is refused', async () => {
@@ -1093,10 +1278,14 @@ test('setup <id> --key exits 1 when its row does not materialize, as bare setup 
   assert.ok(routeIds(dir).includes('kimi-code-plan'));
 });
 
-test('a fresh install loads zero routes, and reading writes nothing', () => {
+test('a fresh install: the default read refuses, a display read loads zero routes marked, and reading writes nothing', () => {
+  // A lax read cannot tell an absent config.json from one being replaced.
   const dir = scratch();
   inDataDir(dir, () => {
-    assert.deepStrictEqual(loadConfig().routes, []);
+    assert.throws(() => loadConfig(), (e) => e && e.code === 'CONFIG_INCONCLUSIVE');
+    const shown = loadConfig({ display: true });
+    assert.deepStrictEqual(shown.routes, []);
+    assert.strictEqual(config.configInconclusive(shown), true);
     assert.strictEqual(fs.existsSync(configPath()), false);
   });
 });
@@ -1563,6 +1752,54 @@ test('lock busy after the vault write, then a bare setup rerun, and the row exis
   assert.ok(routeIds(dir).includes('kimi-code-plan'), 'bare setup did not repair the row its own message promised');
   assert.match(r.stderr, /added the missing route for stored credentials: kimi-code-plan/);
   assert.match(r.stderr, /all credentials present\./);
+  assert.deepStrictEqual(r.j.read(r.j.browser), [], 'nothing was missing, so no form should open');
+});
+
+// Issue #83: the other two repair failure modes. Each must reach the post-loop
+// disk re-read and report its own reason; success is read from disk, never
+// inferred from having attempted the repair. Real file vault, nothing stubbed.
+test('#83: bare setup on an unparseable config.json reports the row-less credential, exit 1, and leaves the file byte-identical', () => {
+  // Every built-in stored, so no form opens. The broken document hides every
+  // row, so every built-in is row-less (in catalog order); kimi among them.
+  const ids = BUILT_IN_ROUTES.map((r) => r.id);
+  const dir = seeded([]);
+  inDataDir(dir, () => { for (const id of ids) vault.set(id, `sk-${id}-TEST-83`); });
+  const broken = '{ "routes": [ { "id": "mine", } ] }';
+  fs.writeFileSync(path.join(dir, 'config.json'), broken);
+  const r = run(dir, ['setup']);
+  assert.strictEqual(r.status, 1, r.stderr);
+  assert.match(r.stderr, /stored credentials still have no route: [^\n]*\bkimi-code-plan\b/);
+  assert.match(r.stderr, /config\.json could not be read \(\w+\) — fix it and rerun to add the "kimi-code-plan" route\./);
+  assert.doesNotMatch(r.stderr, /all credentials present/);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), broken, 'bare setup rewrote an unparseable config.json');
+  assert.deepStrictEqual(r.j.read(r.j.browser), [], 'nothing was missing, so no form should open');
+});
+
+test('#83: bare setup whose config publish really fails reports the row-less credential, exit 1, config.json unchanged', () => {
+  if (IS_ROOT) return; // root ignores the directory mode the fault relies on
+  // The other four configured and stored; only kimi is row-less.
+  const dir = setUpOthers();
+  inDataDir(dir, () => vault.set('kimi-code-plan', KEY_A));
+  const before = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+  // The fault: a read-only data dir, made so AFTER the lock directory exists.
+  // A lock ticket is written inside that directory, so the lock can still be
+  // taken; the atomic temp-file write of config.json beside it cannot.
+  const once = lifecycle.acquireMutationLock(dir);
+  assert.ok(once.ok, 'premise: the lock directory was created');
+  once.release();
+  fs.chmodSync(dir, 0o500);
+  let r;
+  try {
+    r = run(dir, ['setup']);
+  } finally {
+    fs.chmodSync(dir, 0o700);
+  }
+  assert.strictEqual(r.status, 1, r.stderr);
+  assert.match(r.stderr, /the "kimi-code-plan" route could not be added to config\.json/);
+  assert.match(r.stderr, /stored credentials still have no route: kimi-code-plan/);
+  assert.doesNotMatch(r.stderr, /all credentials present/);
+  assert.doesNotMatch(r.stderr, /another provider mutation holds the lock/, 'premise: the lock was taken; the publish itself failed');
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before, 'config.json changed');
   assert.deepStrictEqual(r.j.read(r.j.browser), [], 'nothing was missing, so no form should open');
 });
 

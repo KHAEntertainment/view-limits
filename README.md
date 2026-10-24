@@ -671,22 +671,26 @@ vl.js recommend --json            # advisory recommendation (Jev-dormant by defa
 | Subcommand | Success | Error |
 | --- | --- | --- |
 | `gate` | `0` (always — fail-open dispatch contract) | n/a (never exits non-zero) |
-| `refresh` | `0` | `0` on contention ("refresh already in progress"); `0` when no credentials configured (print guidance); per-adapter failures downgrade the entry to `unknown` and do not raise the exit code |
-| `status` / `report` | `0` (`--json` writes one pretty JSON document to stdout) | n/a — always exits `0` (unknown flags are ignored; an unset config renders the no-credentials guidance) |
-| `check <routeId>` | `0` (one JSON `NormalizedStatus` on stdout) | `1` on unknown route, missing credential, or classified adapter error (one-line `view-limits: check <id> failed: …` on stderr; never a stack trace) |
+| `refresh` | `0` | `0` on contention ("refresh already in progress"); `0` when no credentials configured (print guidance); per-adapter failures downgrade the entry to `unknown` and do not raise the exit code; `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun. The SessionStart warm-up (`refresh --quiet --session-start`) exits `0` silently in that case instead: the `session-start` hook reports it |
+| `status` / `report` | `0` (`--json` writes one pretty JSON document to stdout) | n/a — always exits `0` (unknown flags are ignored; with no configured routes it prints the no-credentials guidance, or `config unreadable mid-write; retry` when config.json could not be confirmed) |
+| `check <routeId>` | `0` (one JSON `NormalizedStatus` on stdout) | `1` on unknown route, missing credential, or classified adapter error (one-line `view-limits: check <id> failed: …` on stderr; never a stack trace); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun |
 | `snapshot --json` | `0` (one pretty JSON envelope on stdout) | `1` when `--json` is missing or any other flag is passed |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |
-| `setup` / `update` / `remove` | `0` | `1` on bad args or credential-storage failure; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)) |
-| `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)) — see [the lifecycle section](#adding-updating-and-removing-a-custom-provider) |
-| `session-start` / `config` | `0` | `0` (purely advisory; surface failures via the receipt/sidecar instead) |
+| `setup` / `update` / `remove` | `0` | `1` on bad args, credential-storage failure, or a stored credential whose route row was not added; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun |
+| `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun — see [the lifecycle section](#adding-updating-and-removing-a-custom-provider) |
+| `session-start` | `0` | `0` (purely advisory; surface failures via the receipt/sidecar or its `systemMessage` instead) |
+| `config` | `0` | `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun (never the built-in defaults presented as the configuration) |
 | unknown command | n/a | `1` with the full usage line on stderr |
 
-`refresh` and `report` always exit `0` because partial-failure rendering is
-the data plane, not an error condition. Diagnose via the rendered text or
-`status --json`; do not treat a non-zero exit from these two commands as
-"nothing happened". All other failure modes (bad args, missing config,
-classified provider errors, credential-storage failures) raise `exit 1`
-with a one-line message on stderr.
+`report` always exits `0`, and `refresh` exits `0` for everything except an
+unconfirmed config.json, because partial-failure rendering is the data plane,
+not an error condition. Diagnose via the rendered text or `status --json`.
+Exit `9` from any command means config.json could not be confirmed: rerun
+it. A command refuses before acting, with one exception: `setup <id>` that
+stored a credential and then could not confirm its route says so ("stored
+credential for …"), and the rerun confirms the route. Other failure modes (bad args, classified
+provider errors, credential-storage failures) raise `exit 1` with a one-line
+message on stderr.
 
 ## Testing
 

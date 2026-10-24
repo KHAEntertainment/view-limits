@@ -30,7 +30,7 @@ const os = require('os');
 const readline = require('readline');
 const { spawn } = require('child_process');
 
-const { loadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
+const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive } = require('../lib/config');
 const {
   readCache, writeCache, isFresh, recoveryBoundedFreshUntil,
@@ -200,7 +200,9 @@ function readStdin() {
 // ---- gate -------------------------------------------------------------------
 
 async function gate() {
-  const cfg = loadConfig();
+  // Opt-in: fail-open by design. DEFAULTS have gate.mode 'off', so an
+  // unconfirmed read exits 0 at once and never denies.
+  const cfg = loadConfig({ display: true });
   if (cfg.gate.mode === 'off') process.exit(0);
 
   const input = await readStdin();
@@ -312,12 +314,12 @@ function unknownStatus(detail) {
 }
 
 async function refresh(quiet, fromSessionStart = false) {
-  const cfg = loadConfig();
-  // The SessionStart warm-up is async and silent: on an unconfirmed read it
-  // does nothing, and the `session-start` hook reports the notice instead.
+  // A manual refresh refuses an unconfirmed read (the default): it is not "no
+  // credentials configured yet". Opt-in for the async SessionStart warm-up
+  // only: a hook that exits 9 surfaces as a hook error, so it does nothing,
+  // and the `session-start` hook reports the notice instead.
+  const cfg = loadConfig(fromSessionStart ? { sessionWarmup: true } : undefined);
   if (fromSessionStart && (configInconclusive(cfg) || !cfg.refreshOnSessionStart)) return;
-  // An unconfirmed read is not "no credentials configured yet" (PR #82 R6 C1).
-  refuseInconclusive(cfg);
   // Xiaomi eligibility is config-only (route presence) — no vault read.
   // Custom routes (Issue #55) carry their source on a valid route.monitor
   // rather than in cfg.providers; they still need a vault credential keyed
@@ -462,7 +464,8 @@ function renderInventory(snap, updatedAt) {
 // envelopes.
 
 async function reportCmd(args) {
-  const cfg = loadConfig();
+  // Opt-in: an unconfirmed read prints the notice below, never DEFAULTS.
+  const cfg = loadConfig({ display: true });
   const cache = readCache();
   // [#7] Surface any fresh credential receipt even on first-run (no creds).
   const receiptMsg = formatReceipt(receiptFact(dataDir()));
@@ -512,7 +515,6 @@ async function reportCmd(args) {
 
 async function check(routeId) {
   const cfg = loadConfig();
-  refuseInconclusive(cfg);
   const route = cfg.routes.find((r) => r.id === routeId);
   if (!route) err(`unknown route "${routeId}" (known: ${cfg.routes.map((r) => r.id).join(', ')})`);
   if (isXiaomi(route)) {
@@ -717,8 +719,6 @@ function pickFreePort() {
 // 5-minute abandon timeout, then exits).
 function serve(port, nonce, ids) {
   const cfg = loadConfig();
-  // An unconfirmed read would make an existing route look unknown.
-  refuseInconclusive(cfg);
   // The known set is the SETUP CANDIDATES, not only cfg.routes. config.json is
   // assembled by setup, so on a fresh install a built-in has no row until its
   // credential is stored — by this very form. Validating against cfg.routes
@@ -913,6 +913,9 @@ async function promptHeadless(ids) {
     rl.close();
   }
   logWriteResults(saved, failed);
+  // A stored credential whose row did not materialize is not a success, here
+  // exactly as for `setup <id> --key`.
+  for (const id of saved) requireRowAfterStore(id);
 }
 
 async function openForm(ids) {
@@ -1049,11 +1052,9 @@ function parseCredentialArgs(cfg, args, opts = {}) {
 // and exit 1 when it is missing, exactly as bare setup does in that state.
 function requireRowAfterStore(id) {
   if (!builtInRoute(id)) return;
-  const cfg = loadConfig();
   // The store succeeded; an unconfirmed reread proves neither that the row is
-  // missing nor that it exists, so it reports neither (exit 9, retry).
-  refuseInconclusive(cfg);
-  const routes = cfg.routes;
+  // missing nor that it exists, so it reports neither (the default: exit 9).
+  const routes = loadConfig().routes;
   if (Array.isArray(routes) && routes.some((r) => r && r.id === id)) return;
   log(`the credential for "${id}" is stored, but its route is not configured yet — run: vl.js setup (with no route id) to add it.`);
   process.exitCode = 1;
@@ -1382,7 +1383,6 @@ function removeXiaomi(cfg, routeId) {
 
 function setup(args) {
   const cfg = loadConfig();
-  refuseInconclusive(cfg);
   const options = parseCredentialArgs(cfg, args, { offerBuiltIns: true });
 
   // Xiaomi: config + helper build, never the vault or a paste form.
@@ -1427,8 +1427,6 @@ function setup(args) {
   // Report from the POST-state, re-read from disk: "present" is only true if
   // every stored credential also has its row.
   const after = loadConfig();
-  // An unconfirmed reread would report every stored credential as row-less.
-  refuseInconclusive(after);
   const rowlessAfter = rowlessCredentials(after);
   // "Added" is read off the rows that now exist, not inferred from leaving the
   // row-less set: a credential removed meanwhile leaves that set too, with no row.
@@ -1450,7 +1448,6 @@ function setup(args) {
 
 async function update(args) {
   const cfg = loadConfig();
-  refuseInconclusive(cfg);
   const options = parseCredentialArgs(cfg, args);
 
   // Xiaomi: revalidate source/profile — no vault preflight, no form.
@@ -1487,7 +1484,6 @@ async function update(args) {
 
 function remove(routeId) {
   const cfg = loadConfig();
-  refuseInconclusive(cfg);
   const route = cfg.routes.find((r) => r.id === routeId);
   if (routeId === XIAOMI_ROUTE_ID || (route && isXiaomi(route))) {
     if (!route) {
@@ -1545,7 +1541,10 @@ function remove(routeId) {
 function lifecycleIo(cfg) {
   return {
     // Re-read on every call so a step that follows a config write sees it.
-    effectiveRoutes: () => loadConfig().routes,
+    // Strict: every caller (setupProvider/updateProvider/removeProvider) HOLDS
+    // the mutation lock, so no publish can be in flight and a miss is proven
+    // absence. `provider list` passes the cfg it already read instead.
+    effectiveRoutes: () => loadConfigStrict().routes,
     readUserConfig,
     readUserConfigStrict,
     saveConfig,
@@ -1754,7 +1753,6 @@ async function providerCmd(args) {
   const sub = args[0];
   if (!['add', 'update', 'remove', 'list'].includes(sub)) err(providerUsage());
   const cfg = loadConfig();
-  refuseInconclusive(cfg);
   const opts = parseProviderArgs(args.slice(1));
   const io = lifecycleIo(cfg);
 
@@ -1882,7 +1880,11 @@ async function recommendCmd(args) {
   }
   if (!sawJson) err(usage);
 
-  const cfg = loadConfig();
+  // Opt-in: fails safe. The candidates come only from the snapshot, which
+  // carries its own config-inconclusive diagnostic and lists no configured
+  // route; cfg feeds only cfg.jev, absent from DEFAULTS, so Jev gets {} behind
+  // its readiness gate.
+  const cfg = loadConfig({ display: true });
   const snap = await getRuntimeSnapshot({ callerContext: cliCallerContext() });
   const candidates = (Array.isArray(snap.routes) ? snap.routes : [])
     .filter((r) => r && r.configured)
@@ -1919,7 +1921,6 @@ async function recommendCmd(args) {
 
 function config() {
   const cfg = loadConfig();
-  refuseInconclusive(cfg);
   const out = {
     dataDir: dataDir(),
     vaultBackend: cfg.vault.backend,
@@ -1950,7 +1951,9 @@ function config() {
 // ---- session-start (first-run nudge) ----------------------------------------
 
 function sessionStart() {
-  const cfg = loadConfig();
+  // Opt-in: an unconfirmed read is reported through the systemMessage below;
+  // exit 9 from a hook would surface as a hook error instead.
+  const cfg = loadConfig({ display: true });
   // Xiaomi counts as configured from config metadata alone — never vault.has.
   const hasCreds = cfg.routes.some((r) => (isXiaomi(r) ? true : vault.has(r.id)));
   // Surface any fresh credential receipt and ack it (session-start already
@@ -2034,8 +2037,18 @@ const CONFIG_INCONCLUSIVE_NOTICE = 'config unreadable mid-write; retry. (config.
 // read that could not confirm config.json refuses instead: never "unknown
 // route", an empty list or DEFAULTS presented as the real configuration. The
 // exit code is distinct (9). Read-only: it never takes the lock.
-function refuseInconclusive(cfg) {
-  if (configInconclusive(cfg)) exitInconclusive();
+//
+// That is the DEFAULT of every config read (owner ruling "fix by default"):
+// lib/config.js loadConfig throws CONFIG_INCONCLUSIVE unless the call site
+// opts in by naming why, and this wrapper turns the throw into exit 9 AT the
+// call, so no surrounding try/catch can swallow it into DEFAULTS.
+function loadConfig(opts) {
+  try {
+    return libLoadConfig(opts);
+  } catch (e) {
+    if (e && e.code === 'CONFIG_INCONCLUSIVE') exitInconclusive();
+    throw e;
+  }
 }
 function exitInconclusive() {
   log(CONFIG_INCONCLUSIVE_NOTICE);
@@ -2067,7 +2080,10 @@ const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been mig
 // systemMessage instead (see sessionStart).
 let migration = null;
 if (MIGRATING_COMMANDS.has(cmd)) {
-  migration = lifecycle.migrateFromVault(lifecycleIo(loadConfig()));
+  // No config read: the migration decides presence by lstat under its own
+  // lock (io.configPresence) and never uses the cfg, which only the
+  // provider probe needs.
+  migration = lifecycle.migrateFromVault(lifecycleIo(null));
   if (migration.migrated && migration.ids.length) {
     process.stderr.write(`view-limits: migrated existing credentials into routes: ${migration.ids.join(', ')}\n`);
   } else if (migration.reason === 'vault-unreadable') {

@@ -67,7 +67,7 @@ const { validProfile } = require('../lib/cookies/chrome');
 const { buildHelper } = require('../lib/helper-install');
 // Phase 0 (Issue #35): transport-neutral view model — owns the presentation
 // layer's rendering; vl.js only joins its pre-formatted text lines.
-const { buildViewModel, reauthNote } = require('../lib/view-model');
+const { buildViewModel, reauthNote, buildViewSchema, renderViewText, VIEW_SCHEMA_VERSION } = require('../lib/view-model');
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 const XIAOMI_ROUTE_ID = xiaomiSession.XIAOMI_ROUTE_ID;
@@ -1850,6 +1850,144 @@ async function snapshot(args) {
   process.stdout.write(JSON.stringify(snap, null, 2) + '\n');
 }
 
+// ---- view (Phase 3, Issue #59) ----------------------------------------------
+//
+// `vl.js view [--condensed] [--json]` renders the versioned view schema
+// (lib/view-model.js) as the approved text format or as exactly one
+// always-valid JSON envelope.
+//
+// It is cache-only: no provider network, no refresh, no subprocess and no
+// write — the same guarantee the report/status/snapshot reads carry. The
+// configuration is read through the CONFIRMED reader (the #81 fix-by-default
+// path), and the states it can be in map onto the dispatch's own exit codes:
+//
+//   a confirmed document            -> the view (exit 0)
+//   the document is ABSENT          -> the one-time vault->routes migration
+//                                       has not resolved: nothing was ever
+//                                       published, so a rerun cannot help
+//                                       (exit 8)
+//   the document is UNCONFIRMABLE   -> it is there but could not be read: a
+//                                       publish is in flight, so a rerun may
+//                                       (exit 9)
+//   a document that cannot be parsed-> CONFIG_CORRUPT (exit 10)
+//
+// The absence is RE-CONFIRMED after the refused read: lib/config.js's
+// presence check (an lstat, never a document read) tells a document that was
+// never published (neither config.json nor the .prev a swap leaves behind)
+// from one that exists but could not be read. The credential store is NOT
+// consulted: an absent configuration is the migration-pending class on its
+// own, and a read command must not touch the credential store.
+//
+// The dispatch-time migration is NOT run for `view`: `view` is a read, and
+// the migration publishes config.json. report/status/snapshot do not take it
+// either.
+
+// The notice for each refusing state. It is a function, not a constant: the
+// fixed config notices are declared further down the file, and reading them
+// at call time keeps the module free of a declaration-order trap.
+function viewFailureNotice(kind) {
+  if (kind === 'config-absent') {
+    return 'No configuration yet: run /view-limits:setup to add a provider, or start a new session to finish first-run setup.';
+  }
+  if (kind === 'config-corrupt') return CONFIG_CORRUPT_NOTICE;
+  return CONFIG_INCONCLUSIVE_NOTICE;
+}
+
+const VIEW_FAILURE_STATUS = {
+  'config-absent': lifecycle.STATUS.MIGRATION_PENDING,
+  'config-inconclusive': lifecycle.STATUS.CONFIG_INCONCLUSIVE,
+  'config-corrupt': lifecycle.STATUS.CONFIG_CORRUPT,
+};
+
+// The always-valid envelope for a refusing state: `not-configured` names the
+// absent document, `failed` the two unreadable ones.
+function viewFailureEnvelope(kind) {
+  const reasonCodes = kind === 'config-corrupt' ? ['config-corrupt']
+    : kind === 'config-absent' ? ['config-absent']
+    : ['config-inconclusive'];
+  return {
+    schemaVersion: VIEW_SCHEMA_VERSION,
+    generatedAt: new Date().toISOString(),
+    status: kind === 'config-absent' ? 'not-configured' : 'failed',
+    reasonCodes,
+    routes: [],
+  };
+}
+
+function viewFailure(kind, asJson) {
+  if (asJson) process.stdout.write(JSON.stringify(viewFailureEnvelope(kind), null, 2) + '\n');
+  process.stderr.write(`view-limits: ${viewFailureNotice(kind)}\n`);
+  // The exit code is set, not forced: the JSON envelope on stdout must be
+  // flushed before the process ends.
+  process.exitCode = lifecycle.exitCodeFor(VIEW_FAILURE_STATUS[kind]);
+}
+
+async function viewCmd(args) {
+  const allowed = new Set(['--condensed', '--json']);
+  if (args.some((a) => !allowed.has(a))) err('usage: vl.js view [--condensed] [--json]');
+  const asJson = args.includes('--json');
+  const condensed = args.includes('--condensed');
+
+  // The confirmed reader: a document it could not confirm REFUSES instead of
+  // falling back to the built-in defaults (#81).
+  let cfg;
+  try {
+    cfg = libLoadConfig();
+  } catch (e) {
+    if (e && e.code === 'CONFIG_CORRUPT') { viewFailure('config-corrupt', asJson); return; }
+    if (!e || e.code !== 'CONFIG_INCONCLUSIVE') throw e;
+    // The read was refused. Re-confirm the document's presence: a document
+    // that was never published means the one-time vault->routes migration has
+    // not resolved (a rerun cannot fix that); a document that IS there but
+    // could not be read is unconfirmable (a publish is in flight, so a rerun
+    // may).
+    const presence = configPresence();
+    viewFailure(presence === 'absent' ? 'config-absent' : 'config-inconclusive', asJson);
+    return;
+  }
+
+  // The cache is read once and used for BOTH the snapshot and the gate's own
+  // freshness decision, so the two can never describe different data.
+  const statusDoc = defaultReadStatus(dataDir());
+  const doc = statusDoc && statusDoc.doc && typeof statusDoc.doc === 'object' ? statusDoc.doc : null;
+  const cacheRoutes = doc && doc.routes && typeof doc.routes === 'object' && !Array.isArray(doc.routes)
+    ? doc.routes
+    : {};
+
+  const routesById = {};
+  const recipeOf = {};
+  for (const r of (Array.isArray(cfg.routes) ? cfg.routes : [])) {
+    if (!r || typeof r.id !== 'string') continue;
+    routesById[r.id] = r;
+    // A recipe route's provider id is free-form; the recipe is its stable
+    // identity, and the product name keys on it.
+    if (r.monitor && typeof r.monitor.recipe === 'string') recipeOf[r.id] = r.monitor.recipe;
+  }
+
+  const snap = await getRuntimeSnapshot({
+    callerContext: cliCallerContext(),
+    io: {
+      readConfig: () => ({ cfg, corrupt: false, inconclusive: false }),
+      readStatus: () => statusDoc,
+    },
+  });
+  const schema = buildViewSchema(snap, {
+    generatedAt: snap.generatedAt,
+    gate: { entries: cacheRoutes, routes: routesById, now: Date.now() },
+    recipeOf,
+    // The same threshold the gate marks a route constrained at.
+    threshold: (cfg.gate && typeof cfg.gate.constrainedThreshold === 'number')
+      ? cfg.gate.constrainedThreshold : 0.2,
+    now: Date.now(),
+  });
+
+  if (asJson) {
+    process.stdout.write(JSON.stringify(schema, null, 2) + '\n');
+    return;
+  }
+  process.stdout.write(renderViewText(schema, { condensed }).join('\n') + '\n');
+}
+
 // ---- recommend ---------------------------------------------------------------
 //
 // Advisory recommendation over the cache-only snapshot. One configured route
@@ -2160,8 +2298,9 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     case 'remove': return remove(args[0]);
     case 'config': return config();
     case 'snapshot': return snapshot(args);
+    case 'view': return viewCmd(args);
     case 'recommend': return recommendCmd(args);
     default:
-      return err('usage: vl.js status|report [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
   }
 })();

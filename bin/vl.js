@@ -1975,6 +1975,10 @@ async function viewCmd(args) {
     generatedAt: snap.generatedAt,
     gate: { entries: cacheRoutes, routes: routesById, now: Date.now() },
     recipeOf,
+    // The same threshold the gate marks a route constrained at.
+    threshold: (cfg.gate && typeof cfg.gate.constrainedThreshold === 'number')
+      ? cfg.gate.constrainedThreshold : 0.2,
+    now: Date.now(),
   });
 
   if (asJson) {

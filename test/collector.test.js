@@ -66,8 +66,8 @@ const HEALTHY = { state: 'healthy', windows: [], balance: null, resetAt: null, d
 
 // The injected world: a fake adapter per route, a fake vault, a fake Xiaomi
 // session and a fixed clock. Nothing here touches a network or a keychain.
-function world({ adapters = {}, vault = { has: () => true, get: () => 'fake-token' }, xiaomi = null } = {}) {
-  const calls = { adapters: [], xiaomi: 0, vault: [] };
+function world({ adapters = {}, vault = { has: () => true, get: () => 'fake-token' }, xiaomi = null, native = null } = {}) {
+  const calls = { adapters: [], xiaomi: 0, vault: [], native: 0 };
   const io = {
     getAdapter: (provider, route) => {
       calls.adapters.push(route.id);
@@ -88,6 +88,16 @@ function world({ adapters = {}, vault = { has: () => true, get: () => 'fake-toke
       errorStatus: (text) => ({ state: 'unknown', windows: [], balance: null, resetAt: null, detail: { error: text } }),
       pendingStatus: () => ({ state: 'unknown', windows: [], balance: null, resetAt: null, detail: { error: 'pending', pending: true } }),
     }, xiaomi || {}),
+    // The bounded native observation, hermetic by default: never touch the
+    // real runtime snapshot machinery or a real traycer CLI in the unit
+    // tests. `native` may be a snapshot to return, an Error to throw, or a
+    // function.
+    getRuntimeSnapshot: async (opts) => {
+      calls.native += 1;
+      if (typeof native === 'function') return native(opts);
+      if (native instanceof Error) throw native;
+      return native || { generatedAt: new Date(FIXED_NOW).toISOString(), profiles: [], sessions: [], harnesses: [], routes: [], diagnostics: [] };
+    },
     now: () => FIXED_NOW,
   };
   return { io, calls };
@@ -461,6 +471,169 @@ await testAsync('a retained route keeps its own expiry — the collection never 
   assert.strictEqual(entry.freshUntil, PRIOR_UNTIL, 'the expiry is the prior one');
   assert.ok(Date.parse(entry.freshUntil) < FIXED_NOW,
     'a retained observation is not made fresh by the collection');
+});
+
+// ---- Issue #60 fix batch 2 (B1 / B3 / A1) -----------------------------------
+
+// B1 — the REAL lenient-false vault: a corrupt encrypted blob makes
+// `vault.has` return false (it never throws). The route is skipped, but its
+// prior entry must survive a sibling's publish.
+await testAsync('B1: a skipped route (corrupt credential) keeps its prior entry; the gate still denies', async () => {
+  const dir = scratch();
+  process.env.VIEW_LIMITS_MASTER_KEY = 'b1-test-master-key';
+  // The REAL vault reads its backend from the on-disk configuration.
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    routes: [],
+    gate: { mode: 'deny', constrainedThreshold: 0.2 },
+    vault: { backend: 'file', service: 'com.kha.view-limits' },
+  }));
+  const vault = require('../lib/vault');
+  vault.set('minimax-token-plan', 'good-secret');
+  vault.set('deepseek-direct', 'good-secret');
+  // Corrupt the MiniMax blob: present by probe, undecryptable by get.
+  const blobPath = path.join(dir, 'secrets', 'minimax-token-plan.enc');
+  fs.writeFileSync(blobPath, 'not-a-blob');
+  assert.strictEqual(vault.probe('minimax-token-plan'), 'present');
+  assert.strictEqual(vault.has('minimax-token-plan'), false, 'the lenient vault reports absent');
+
+  const cfg = Object.assign({}, CFG, {
+    routes: [route('minimax-token-plan', 'minimax'), route('deepseek-direct', 'deepseek')],
+  });
+  const { io } = world({ adapters: { deepseek: () => HEALTHY }, native: {} });
+  delete io.vault; // the REAL vault
+  // A fresh exhaustion for MiniMax: while it stands, the gate denies.
+  const priorExhausted = {
+    routeId: 'minimax-token-plan',
+    observedAt: '2026-10-24T11:58:00.000Z',
+    freshUntil: '2099-01-01T00:00:00.000Z',
+    source: 'minimax',
+    status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+  };
+  cache.writeCache({ 'minimax-token-plan': priorExhausted });
+  const before = fs.readFileSync(path.join(dir, 'status.json'), 'utf8');
+
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED, 'DeepSeek succeeded; MiniMax was skipped, not failed');
+  assert.deepStrictEqual(
+    result.routes.map((r) => [r.id, r.outcome]),
+    [['minimax-token-plan', 'skipped'], ['deepseek-direct', 'completed']],
+  );
+  assert.strictEqual(result.routes[0].retained, true, 'the skipped route retained its prior entry');
+
+  const after = cache.readCache();
+  assert.deepStrictEqual(after.routes['minimax-token-plan'], priorExhausted,
+    'the skipped route prior entry is byte-identical');
+  assert.strictEqual(after.routes['minimax-token-plan'].observedAt, '2026-10-24T11:58:00.000Z', 'age unchanged');
+  assert.ok(after.routes['deepseek-direct'], 'the sibling published');
+
+  // The gate still sees the exhaustion and still denies.
+  const decision = decide({
+    route: cfg.routes[0],
+    entry: after.routes['minimax-token-plan'],
+    now: FIXED_NOW,
+    config: { gate: { mode: 'deny', injectContext: false } },
+  });
+  assert.strictEqual(decision.action, 'deny', 'a skipped route must never lose a denial');
+  assert.notStrictEqual(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'), before,
+    'the publish did rewrite the document (sibling) — but kept the skipped entry');
+  delete process.env.VIEW_LIMITS_MASTER_KEY;
+});
+
+// B3 — the bounded native observation is part of the shared operation.
+await testAsync('B3: native success — the collection carries the refreshed snapshot', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const nativeSnap = { generatedAt: '2026-10-24T12:00:00Z', profiles: [{ key: { host: 'h', provider: 'p', profileId: 'a' } }], sessions: [], harnesses: [], routes: [], diagnostics: [] };
+  const { io, calls } = world({ native: nativeSnap });
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED);
+  assert.strictEqual(calls.native, 1, 'the bounded native observation ran');
+  assert.strictEqual(result.snapshot, nativeSnap, 'the snapshot is carried');
+  assert.deepStrictEqual(result.native, { outcome: 'completed', error: null });
+});
+
+await testAsync('B3: native-only — profiles observed, so it is NOT no-credentials', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io, calls } = world({
+    vault: { has: () => false, get: () => null },
+    native: { generatedAt: '2026-10-24T12:00:00Z', profiles: [{ key: { host: 'h', provider: 'p', profileId: 'a' } }], sessions: [], harnesses: [], routes: [], diagnostics: [] },
+  });
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED, 'native-only is a completed collection');
+  assert.strictEqual(calls.native, 1);
+  assert.strictEqual(result.published, false, 'nothing external was published');
+  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'skipped', error: null, retained: false }]);
+});
+
+await testAsync('B3: native-only with nothing observed is still no-credentials', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io } = world({ vault: { has: () => false, get: () => null }, native: {} });
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.NO_CREDENTIALS);
+});
+
+await testAsync('B3: a native failure is classified and isolated from external siblings', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io, calls } = world({ native: new Error('traycer cli missing') });
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED, 'external success is unaffected');
+  assert.strictEqual(calls.native, 1);
+  assert.deepStrictEqual(result.native, { outcome: 'failed', error: 'traycer cli missing' });
+  assert.strictEqual(result.snapshot, null);
+});
+
+await testAsync('B3: a native-only setup whose native source fails is a classified failure', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io } = world({ vault: { has: () => false, get: () => null }, native: new Error('boom') });
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.FAILED);
+  assert.strictEqual(result.reason, collector.REASON.NATIVE_UNAVAILABLE);
+});
+
+// A1 — the worker lock is released after every outcome, and a publish throw
+// leaves the prior cache byte-identical.
+async function assertLockReleased(io) {
+  const handle = await cache.acquireWorker({ ownerToken: 'post-collection' });
+  assert.strictEqual(handle.acquired, true, 'the lock was released by the collection');
+  await cache.releaseWorker(handle);
+}
+
+await testAsync('A1: the lock is released after a successful collection', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io } = world();
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED);
+  await assertLockReleased(io);
+});
+
+await testAsync('A1: the lock is released after a failed fetch', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io } = world({ adapters: { minimax: () => { throw new Error('boom'); } } });
+  cache.writeCache({ 'minimax-token-plan': priorEntry('minimax-token-plan') });
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.FAILED);
+  await assertLockReleased(io);
+});
+
+await testAsync('A1: a publish throw releases the lock and leaves the prior cache byte-identical', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io } = world();
+  cache.writeCache({ 'minimax-token-plan': priorEntry('minimax-token-plan') });
+  const beforeBytes = fs.readFileSync(path.join(process.env.CLAUDE_PLUGIN_DATA, 'status.json'), 'utf8');
+  io.writeCache = () => { throw new Error('EACCES: read-only file system'); };
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.FAILED);
+  assert.strictEqual(result.reason, collector.REASON.PUBLISH_FAILED);
+  assert.strictEqual(fs.readFileSync(path.join(process.env.CLAUDE_PLUGIN_DATA, 'status.json'), 'utf8'), beforeBytes,
+    'the prior cache is byte-identical');
+  await assertLockReleased(io);
 });
 
 // ---- the vocabulary ---------------------------------------------------------

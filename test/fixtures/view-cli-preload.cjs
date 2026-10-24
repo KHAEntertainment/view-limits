@@ -56,6 +56,21 @@ Module._load = function (id, ...args) {
       ADAPTERS: {},
     };
   }
+  if (isModuleId(id, 'xiaomi-session')) {
+    // A synthetic successful Xiaomi session for the R2-2 view projection: the
+    // collector's ONE session call returns healthy token counts.
+    const real = load.call(this, id, ...args);
+    return Object.assign({}, real, {
+      fetchStatus: async () => ({
+        state: 'healthy',
+        windows: [{ type: 'tokens', remaining: 75, limit: 100 }],
+        balance: null,
+        resetAt: null,
+        detail: {},
+        basis: 'token-count',
+      }),
+    });
+  }
   if (isModuleId(id, 'traycer-adapter')) {
     // The collector's bounded native observation (B3) must stay hermetic in
     // the CLI tests: never spawn a real traycer CLI. Keep every other export

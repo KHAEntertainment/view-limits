@@ -260,6 +260,23 @@ test('view --json emits exactly ONE envelope for a successful collection', () =>
   assert.strictEqual(minimax.freshness, 'fresh');
 });
 
+test('view --json projects a live Xiaomi success as healthy/fresh (R2-2)', () => {
+  const dir = scratch();
+  writeConfig(dir, [{
+    id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+    match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+  }]);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
+  assert.ok(row, 'the Xiaomi route is listed');
+  assert.strictEqual(row.state, 'healthy', 'the live observation renders healthy');
+  assert.strictEqual(row.freshness, 'fresh', 'the live observation renders fresh');
+  assert.strictEqual(row.windows[0].remaining, 75);
+  assert.strictEqual(row.windows[0].type, 'tokens');
+});
+
 test('view --json emits exactly ONE envelope when there are no credentials', () => {
   const dir = scratch();
   writeConfig(dir, ROUTES);

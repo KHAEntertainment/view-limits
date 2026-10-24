@@ -1927,8 +1927,12 @@ function collectionNotice(result) {
     lines.push(`view-limits: collection failed — ${diagText(result.reason || 'unknown')}${detail}`);
   } else if (result.outcome === collector.OUTCOME.NO_CREDENTIALS) {
     lines.push('view-limits: no credentials configured yet — showing the last cached status');
-  } else if (result.native && result.native.outcome === 'failed') {
-    lines.push(`view-limits: native collection failed — ${diagText(result.native.error || 'unknown error')}`);
+  }
+  // A native failure is disclosed beside any external outcome that is not
+  // itself a collection failure (round-2 R2-1), with the diagnostic codes.
+  if (result.native && result.native.outcome === 'failed' && result.outcome !== collector.OUTCOME.FAILED) {
+    const codes = (result.native.codes || []).join(', ');
+    lines.push(`view-limits: native collection failed — ${diagText(codes || result.native.error || 'unknown error')}`);
   }
   // The failed routes are named, with their errors, on every outcome.
   for (const line of failedRouteLines(result, 'collection', false)) lines.push(line);
@@ -1969,23 +1973,22 @@ async function viewCmd(args) {
     return;
   }
 
-  // Issue #60: the view runs the SHARED collector with a bounded wait (the
-  // refresh worker's own admission deadline), then renders what the
-  // collection published — or what it kept, when a route failed. The
-  // collector is the only live path: the gate and the snapshot stay
-  // cache-only.
+  // Issue #60: the view runs the SHARED full-view collection
+  // (`collectView`) — the external collection under the worker lock, then
+  // the bounded NATIVE observation outside it — and renders what the
+  // collection published, or what it kept. The gate and the snapshot stay
+  // cache-only (round-2 R2-3).
   //
-  // The collection includes the bounded NATIVE observation (B3): the result
-  // carries the refreshed runtime snapshot, so the view renders the native
-  // facts the same live path `snapshot --refresh` would have produced. The
-  // confirmed configuration is handed to the collector so the snapshot reads
-  // it once, and the cache is read after the collection so the view
-  // describes what was published (or what was kept).
-  const result = await collector.collect({
+  // The native snapshot is assembled with the display-only Xiaomi overlay
+  // (round-2 R2-2): the just-observed Xiaomi statuses are projected so a
+  // successful live collection renders healthy/fresh, while the gate keeps
+  // reading the raw zero-TTL cache.
+  const result = await collector.collectView({
     cfg,
     io: {
       callerContext: cliCallerContext(),
       readConfig: () => ({ cfg, corrupt: false, inconclusive: false }),
+      readStatusFor: (statuses) => overlayReader(cfg, xiaomiLiveEntries(cfg, statuses)),
     },
   });
 

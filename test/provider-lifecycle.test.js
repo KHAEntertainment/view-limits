@@ -781,6 +781,7 @@ test('every status maps to a stable code, and 1 stays reserved for bad args', ()
       'not-found': 7,
       'migration-pending': 8,
       'config-inconclusive': 9,
+      'config-corrupt': 10,
     },
   );
   assert.strictEqual(lifecycle.exitCodeFor('something-unknown'), 1);

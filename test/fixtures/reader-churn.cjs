@@ -5,6 +5,9 @@
 // VL_TEST_CHURN_DOCS  JSON array of documents, one per writer.
 // VL_TEST_CHURN_AT    1-based index of the read attempt of config.json (or
 //                     .prev) before which writer 1 begins. Default 1.
+// VL_TEST_CORRUPT_AT  1-based read attempt that returns a syntactically broken
+//                     document instead of the file's contents — that one read
+//                     only; the file on disk is never touched.
 // VL_TEST_HOOK_JOURNAL  every step is journaled there as one JSON line. Each
 //                     read names its `site`: the innermost bin/vl.js function
 //                     on the stack other than its loadConfig wrapper, so a
@@ -24,6 +27,8 @@ const path = require('path');
 
 const docs = JSON.parse(process.env.VL_TEST_CHURN_DOCS || '[]');
 const at = Number(process.env.VL_TEST_CHURN_AT || 1);
+const corruptAt = Number(process.env.VL_TEST_CORRUPT_AT || 0);
+const BROKEN = '{ "routes": [ { "id": "mine", } ] }';
 const journalFile = process.env.VL_TEST_HOOK_JOURNAL;
 function journal(entry) {
   if (!journalFile) return;
@@ -84,6 +89,11 @@ fs.readFileSync = function readWithChurn(file, ...rest) {
     attempts += 1;
     journal({ step: 'read', attempt: attempts, name, site: site() });
     if (!stopped && attempts === at && writer === 0) begin();
+    if (attempts === corruptAt) {
+      journal({ step: 'corrupt', attempt: attempts, name });
+      const encoding = typeof rest[0] === 'string' ? rest[0] : rest[0] && rest[0].encoding;
+      return encoding ? BROKEN : Buffer.from(BROKEN);
+    }
   }
   try {
     return realRead.call(this, file, ...rest);

@@ -360,8 +360,11 @@ test('a malformed config.json is refused, not overwritten', () => {
   const broken = '{\n "vault": { "backend": "file" },\n "routes": [\n  { "id": "mine", "provider": "kimi" },\n ]\n}\n';
   fs.writeFileSync(path.join(dir, 'config.json'), broken);
   const r = run(dir, ADD_ACME);
-  assert.strictEqual(r.status, 5, r.stderr);
-  assert.strictEqual(r.json.stage, 'config-unreadable');
+  // Refused at the command's own config read (exit 10, config-corrupt), before
+  // the lifecycle runs: its own guard (stage 'config-unreadable', exit 5) is
+  // pinned in test/provider-lifecycle.test.js.
+  assert.strictEqual(r.status, 10, r.stderr);
+  assert.match(r.stderr, /config\.json could not be read or parsed — fix it or move it aside, then rerun/);
   assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), broken,
     'a config we could not parse must be left exactly as it was');
   assert.deepStrictEqual(secretFiles(dir), [], 'and no credential may be stored');

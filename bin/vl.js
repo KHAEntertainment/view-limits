@@ -31,7 +31,7 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
-  BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive } = require('../lib/config');
+  BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt } = require('../lib/config');
 const {
   readCache, writeCache, isFresh, recoveryBoundedFreshUntil,
   tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
@@ -319,7 +319,7 @@ async function refresh(quiet, fromSessionStart = false) {
   // only: a hook that exits 9 surfaces as a hook error, so it does nothing,
   // and the `session-start` hook reports the notice instead.
   const cfg = loadConfig(fromSessionStart ? { sessionWarmup: true } : undefined);
-  if (fromSessionStart && (configInconclusive(cfg) || !cfg.refreshOnSessionStart)) return;
+  if (fromSessionStart && (configInconclusive(cfg) || configCorrupt(cfg) || !cfg.refreshOnSessionStart)) return;
   // Xiaomi eligibility is config-only (route presence) — no vault read.
   // Custom routes (Issue #55) carry their source on a valid route.monitor
   // rather than in cfg.providers; they still need a vault credential keyed
@@ -476,7 +476,8 @@ async function reportCmd(args) {
   if (!anyConfigured) {
     // DEFAULTS from a read that could not confirm config.json are not "no
     // credentials": say what actually happened.
-    process.stdout.write(configInconclusive(cfg) ? `view-limits: ${CONFIG_INCONCLUSIVE_NOTICE}\n` : noCredentialMessage());
+    const notice = unconfirmedNotice(cfg);
+    process.stdout.write(notice ? `view-limits: ${notice}\n` : noCredentialMessage());
     if (receiptMsg) process.stdout.write('  ' + receiptMsg + '\n');
     return;
   }
@@ -1090,25 +1091,35 @@ function setupOne(cfg, options, allowImport) {
 // explicitly invokes setup — and is never executed by setup itself.
 
 function readUserConfig() {
+  // A writer's base document. Only a PROVEN-absent document is {}: starting
+  // from {} because a publish was in flight, or because the file is
+  // unreadable or malformed, would publish a document with everything else in
+  // it dropped. Those refuse (exit 9 / exit 10), writing nothing.
+  let raw;
   try {
-    const doc = JSON.parse(readConfigText({ strict: true }));
-    return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : {};
+    raw = readConfigText({ strict: true });
   } catch (e) {
-    // A writer's base document: starting from {} because a publish was in
-    // flight would publish a document with everything else dropped.
+    if (e && e.code === 'ENOENT') return {};
     if (e && e.code === 'CONFIG_INCONCLUSIVE') exitInconclusive();
-    return {};
+    exitCorrupt();
   }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch {
+    exitCorrupt();
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) exitCorrupt();
+  return doc;
 }
 
 // Like readUserConfig, but tells absent apart from broken (Issue #58).
 //
-// readUserConfig deliberately swallows everything and returns `{}` so a
-// malformed config can never crash a read path. That is wrong for a WRITE: a
-// lifecycle write replaces config.json wholesale, so starting from `{}`
-// because of one typo would silently discard every setting the user put
-// there. The lifecycle refuses in that case; see userConfigBlocked in
-// lib/provider-lifecycle.js.
+// readUserConfig exits on a broken document; this variant RETURNS the reason
+// instead, for callers that report it themselves. A lifecycle write replaces
+// config.json wholesale, so starting from `{}` because of one typo would
+// silently discard every setting the user put there. The lifecycle refuses in
+// that case; see userConfigBlocked in lib/provider-lifecycle.js.
 //
 //   { ok: true, doc }            absent (first run, doc = {}) or well-formed
 //   { ok: false, reason }        'malformed' | 'not-an-object' | 'unreadable' | 'inconclusive'
@@ -1985,8 +1996,8 @@ function sessionStart() {
   // lock and may be migrating right now: the state is in flux, so say nothing
   // rather than a nudge that could be wrong. It is re-evaluated next session.
   if (migration && migration.reason === 'lock-busy') process.exit(0);
-  if (configInconclusive(cfg)) {
-    process.stdout.write(JSON.stringify({ systemMessage: `view-limits: ${CONFIG_INCONCLUSIVE_NOTICE}` }));
+  if (unconfirmedNotice(cfg)) {
+    process.stdout.write(JSON.stringify({ systemMessage: `view-limits: ${unconfirmedNotice(cfg)}` }));
     process.exit(0);
   }
   process.stdout.write(JSON.stringify({
@@ -2032,6 +2043,18 @@ const MIGRATION_VAULT_UNREADABLE = 'the credential vault could not be read, so s
 // readConfigTextIn): it was being replaced by another process while it was
 // read, or it does not exist. Fixed text — no path or error detail.
 const CONFIG_INCONCLUSIVE_NOTICE = 'config unreadable mid-write; retry. (config.json could not be confirmed — it was being replaced while it was read, or does not exist — so the configured providers are not shown.)';
+// config.json exists but cannot be read or parsed as an object. A rerun reads
+// the same file, so the action is different. Fixed text — no path, no parser
+// or errno detail.
+const CONFIG_CORRUPT_NOTICE = 'config.json could not be read or parsed — fix it or move it aside, then rerun. (It exists, so the built-in defaults are not used in its place: its routes and its vault backend are unknown.)';
+
+// The notice for DEFAULTS an opt-in caller received in place of config.json,
+// or null when the document was read. The two marks are mutually exclusive.
+function unconfirmedNotice(cfg) {
+  if (configCorrupt(cfg)) return CONFIG_CORRUPT_NOTICE;
+  if (configInconclusive(cfg)) return CONFIG_INCONCLUSIVE_NOTICE;
+  return null;
+}
 
 // A command that would act on — or display — built-in DEFAULTS from a config
 // read that could not confirm config.json refuses instead: never "unknown
@@ -2041,18 +2064,25 @@ const CONFIG_INCONCLUSIVE_NOTICE = 'config unreadable mid-write; retry. (config.
 // That is the DEFAULT of every config read (owner ruling "fix by default"):
 // lib/config.js loadConfig throws CONFIG_INCONCLUSIVE unless the call site
 // opts in by naming why, and this wrapper turns the throw into exit 9 AT the
-// call, so no surrounding try/catch can swallow it into DEFAULTS.
+// call, so no surrounding try/catch can swallow it into DEFAULTS. A corrupt
+// document (CONFIG_CORRUPT) is refused the same way, with its own notice and
+// exit 10.
 function loadConfig(opts) {
   try {
     return libLoadConfig(opts);
   } catch (e) {
     if (e && e.code === 'CONFIG_INCONCLUSIVE') exitInconclusive();
+    if (e && e.code === 'CONFIG_CORRUPT') exitCorrupt();
     throw e;
   }
 }
 function exitInconclusive() {
   log(CONFIG_INCONCLUSIVE_NOTICE);
   process.exit(lifecycle.exitCodeFor(lifecycle.STATUS.CONFIG_INCONCLUSIVE));
+}
+function exitCorrupt() {
+  log(CONFIG_CORRUPT_NOTICE);
+  process.exit(lifecycle.exitCodeFor(lifecycle.STATUS.CONFIG_CORRUPT));
 }
 
 // Commands that can write config.json. While the migration is unresolved they

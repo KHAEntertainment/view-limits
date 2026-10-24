@@ -850,6 +850,17 @@ function churnRun(dir, args, { at = 1, preloads = [], extra = {} } = {}) {
     acquires: read(locks).filter((c) => c.startsWith('acquireMutationLock')),
   };
 }
+// One read, attempt `at`, sees a syntactically broken document; the file is untouched.
+function corruptRun(dir, args, at, { preloads = [], extra = {} } = {}) {
+  const side = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-corrupt-'));
+  const hook = path.join(side, 'hook');
+  const r = run(dir, args, journals(), {
+    NODE_OPTIONS: [preload, ...preloads, churnPreload].map((p) => `--require=${p}`).join(' '),
+    VL_TEST_CHURN_DOCS: '[]', VL_TEST_CORRUPT_AT: String(at), VL_TEST_HOOK_JOURNAL: hook, ...extra,
+  });
+  const all = fs.existsSync(hook) ? fs.readFileSync(hook, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  return { r, steps: all.filter((s) => s.step !== 'read'), reads: all.filter((s) => s.step === 'read') };
+}
 // The bin/vl.js function that made read attempt `at`.
 const siteAt = (reads, at) => (reads.find((s) => s.attempt === at) || {}).site;
 // The attempt number of the LAST config read made in `site`, from an
@@ -1080,7 +1091,7 @@ test('opt-in: report on an unconfirmed read prints the notice, exit 0, never "no
   assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
   assert.strictEqual(r.status, 0, `${r.stdout}${r.stderr}`);
   assert.match(r.stdout, /config unreadable mid-write; retry/);
-  assert.doesNotMatch(r.stdout, /no credentials configured/i);
+  assert.doesNotMatch(r.stdout, /no credentials configured|could not be read or parsed/i);
   assert.deepStrictEqual(r.j.read(r.j.net), [], 'report called a provider on an unconfirmed read');
   assert.deepStrictEqual(acquires, [], 'report took the lock');
 });
@@ -1092,6 +1103,7 @@ test('opt-in: session-start on an unconfirmed read reports the notice as its sys
   assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
   assert.strictEqual(r.status, 0, `the SessionStart hook failed: ${r.stderr}`);
   assert.match(JSON.parse(r.stdout).systemMessage, /config unreadable mid-write; retry/);
+  assert.doesNotMatch(r.stdout, /could not be read or parsed/, 'a publish in flight was reported as a corrupt file');
   assert.deepStrictEqual(acquires, [], 'session-start took the lock to display');
 });
 
@@ -1231,6 +1243,162 @@ test('guard: lib loadConfig honors only the two named opt-ins; anything else is 
       assert.strictEqual(config.configInconclusive(loadConfig(opts)), true);
     }
   });
+  // The same two opt-ins, and only they, let a corrupt document through.
+  const broken = scratch();
+  fs.writeFileSync(path.join(broken, 'config.json'), '{ "routes": [ ');
+  inDataDir(broken, () => {
+    for (const opts of [undefined, {}, { display: 'yes' }, { display: 1 }, { sessionWarmup: 'true' }, { strict: false }]) {
+      assert.throws(() => loadConfig(opts), (e) => e && e.code === 'CONFIG_CORRUPT', `opted in with ${JSON.stringify(opts)}`);
+    }
+    for (const opts of [{ display: true }, { sessionWarmup: true }]) {
+      assert.strictEqual(config.configCorrupt(loadConfig(opts)), true);
+    }
+  });
+});
+
+// ---- CodeRabbit finding A: a config.json that EXISTS but cannot be used ----
+//
+// Invalid JSON, JSON that is not an object, or a read error other than ENOENT.
+// The backend choice lives in that document, so nothing can know it was the
+// file vault: the property is that NO backend is touched, never DEFAULTS'.
+const keychainPreload = path.join(__dirname, 'fixtures/keychain-tripwire.cjs');
+const CORRUPT_NOTICE = /config\.json could not be read or parsed — fix it or move it aside, then rerun/;
+const RETRY_NOTICE = /config unreadable mid-write; retry/;
+const CORRUPT_DOCS = ['{ "vault": { "backend": "file" }, "routes": [ ', 'null', '[]', '42'];
+
+test('A: both variants refuse a corrupt config.json with CONFIG_CORRUPT; opt-ins get DEFAULTS marked corrupt, never inconclusive', () => {
+  for (const raw of CORRUPT_DOCS) {
+    const dir = scratch();
+    fs.writeFileSync(path.join(dir, 'config.json'), raw);
+    inDataDir(dir, () => {
+      assert.throws(() => config.loadConfigStrict(), (e) => e && e.code === 'CONFIG_CORRUPT', `strict on ${raw}`);
+      assert.throws(() => loadConfig(), (e) => e && e.code === 'CONFIG_CORRUPT', `default on ${raw}`);
+      for (const opts of [{ display: true }, { sessionWarmup: true }]) {
+        const shown = loadConfig(opts);
+        assert.strictEqual(config.configCorrupt(shown), true, `${JSON.stringify(opts)} on ${raw}`);
+        assert.strictEqual(config.configInconclusive(shown), false, 'a corrupt document was also marked inconclusive');
+        assert.deepStrictEqual(shown.routes, []);
+      }
+    });
+  }
+  // A read error other than ENOENT: a directory where the file should be.
+  const isDir = scratch();
+  fs.mkdirSync(path.join(isDir, 'config.json'));
+  inDataDir(isDir, () => {
+    assert.throws(() => config.loadConfigStrict(), (e) => e && e.code === 'CONFIG_CORRUPT');
+    assert.strictEqual(config.configCorrupt(loadConfig({ display: true })), true);
+  });
+  if (!IS_ROOT) {
+    const unreadable = seeded([builtInRoute('kimi-code-plan')]);
+    fs.chmodSync(path.join(unreadable, 'config.json'), 0o000);
+    try {
+      inDataDir(unreadable, () => {
+        assert.throws(() => config.loadConfigStrict(), (e) => e && e.code === 'CONFIG_CORRUPT', 'EACCES');
+        assert.throws(() => loadConfig(), (e) => e && e.code === 'CONFIG_CORRUPT', 'EACCES');
+      });
+    } finally {
+      fs.chmodSync(path.join(unreadable, 'config.json'), 0o600);
+    }
+  }
+  // The marks are mutually exclusive, and a document that was read carries neither.
+  const fine = seeded([builtInRoute('kimi-code-plan')]);
+  inDataDir(fine, () => {
+    const cfg = loadConfig({ display: true });
+    assert.strictEqual(config.configCorrupt(cfg) || config.configInconclusive(cfg), false);
+  });
+  const absent = scratch();
+  inDataDir(absent, () => {
+    const cfg = loadConfig({ display: true });
+    assert.strictEqual(config.configInconclusive(cfg), true);
+    assert.strictEqual(config.configCorrupt(cfg), false, 'an unconfirmed read was also marked corrupt');
+  });
+});
+
+test('A: the vault picks NO backend from a corrupt config.json — set/get/probe throw CONFIG_CORRUPT and no blob is written', () => {
+  for (const raw of CORRUPT_DOCS) {
+    const dir = scratch();
+    fs.writeFileSync(path.join(dir, 'config.json'), raw);
+    inDataDir(dir, () => {
+      // This process forces DEFAULTS' backend to the file vault, so a fallback
+      // to DEFAULTS would show up as a blob written here.
+      assert.throws(() => vault.set('kimi-code-plan', KEY_A), (e) => e && e.code === 'CONFIG_CORRUPT', `set on ${raw}`);
+      assert.throws(() => vault.get('kimi-code-plan'), (e) => e && e.code === 'CONFIG_CORRUPT', `get on ${raw}`);
+      assert.throws(() => vault.probe('kimi-code-plan'), (e) => e && e.code === 'CONFIG_CORRUPT', `probe on ${raw}`);
+    });
+    assert.strictEqual(fs.existsSync(path.join(dir, 'secrets')), false, `a credential was written on ${raw}`);
+  }
+});
+
+test('A end to end: a file-vault user with a malformed config.json — setup/update/remove write to NEITHER backend, exit 10', () => {
+  // The real darwin default (the Keychain) is restored, and every `security`
+  // call is refused and journaled: a fallback to DEFAULTS would show up there.
+  for (const args of [['setup', 'kimi-code-plan', '--key', KEY_B], ['update', 'kimi-code-plan', '--key', KEY_B], ['remove', 'kimi-code-plan']]) {
+    const dir = seeded([builtInRoute('kimi-code-plan')]);
+    inDataDir(dir, () => vault.set('kimi-code-plan', KEY_A));
+    const blob = fs.readFileSync(path.join(dir, 'secrets', 'kimi-code-plan.enc'));
+    // The user's file-vault document, with one typo.
+    const broken = '{ "routes": [ { "id": "kimi-code-plan", "provider": "kimi" } ], "vault": { "backend": "file" }, }';
+    fs.writeFileSync(path.join(dir, 'config.json'), broken);
+    const keychain = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-keychain-')), 'journal');
+    const r = run(dir, args, journals(), {
+      NODE_OPTIONS: `--require=${preload} --require=${keychainPreload}`, VL_KEYCHAIN_JOURNAL: keychain,
+    });
+    assert.strictEqual(r.status, 10, `${args.join(' ')}: ${r.stderr}`);
+    assert.match(r.stderr, CORRUPT_NOTICE);
+    assert.strictEqual(fs.existsSync(keychain) ? fs.readFileSync(keychain, 'utf8') : '', '', `${args.join(' ')} reached the Keychain`);
+    assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'secrets')), ['kimi-code-plan.enc'], `${args.join(' ')} changed the file vault`);
+    assert.ok(fs.readFileSync(path.join(dir, 'secrets', 'kimi-code-plan.enc')).equals(blob), `${args.join(' ')} rewrote the stored credential`);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), broken, `${args.join(' ')} rewrote config.json`);
+  }
+});
+
+test('A: each opt-in site surfaces the CORRUPT notice for a corrupt document — never the retry notice, never DEFAULTS', () => {
+  const broken = '{ "routes": [ ';
+  const at = (args) => {
+    const dir = seeded([builtInRoute('kimi-code-plan')]);
+    fs.writeFileSync(path.join(dir, 'config.json'), broken);
+    return run(dir, args);
+  };
+  const rep = at(['report']);
+  assert.strictEqual(rep.status, 0, rep.stderr);
+  assert.match(rep.stdout, CORRUPT_NOTICE);
+  assert.doesNotMatch(rep.stdout, /no credentials configured|retry\./i);
+  const ss = at(['session-start']);
+  assert.strictEqual(ss.status, 0, ss.stderr);
+  assert.match(JSON.parse(ss.stdout).systemMessage, CORRUPT_NOTICE);
+  assert.doesNotMatch(ss.stdout, RETRY_NOTICE);
+  const gate = at(['gate']);
+  assert.strictEqual(gate.status, 0, gate.stderr);
+  assert.strictEqual(gate.stdout, '');
+  const rec = at(['recommend', '--json']);
+  assert.strictEqual(rec.status, 0, rec.stderr);
+  assert.ok(rec.json && typeof rec.json === 'object');
+  const warm = at(['refresh', '--quiet', '--session-start']);
+  assert.strictEqual(warm.status, 0, warm.stderr);
+  assert.strictEqual(warm.stdout + warm.stderr, '');
+  // And a strict-default command refuses it with exit 10, not 9.
+  for (const args of [['refresh'], ['check', 'kimi-code-plan'], ['config'], ['provider', 'list']]) {
+    const r = at(args);
+    assert.strictEqual(r.status, 10, `${args.join(' ')}: ${r.stderr}`);
+    assert.match(r.stderr, CORRUPT_NOTICE);
+    assert.doesNotMatch(r.stderr, RETRY_NOTICE);
+  }
+  for (const r of [rep, ss, gate, rec, warm]) assert.deepStrictEqual(r.j.read(r.j.net), [], 'a provider was called on a corrupt document');
+});
+
+test('A (second fallback): a Xiaomi writer whose base read finds config.json unparseable refuses — it never publishes from {}', () => {
+  // Read 2 is the in-hold base-document read (readUserConfig). Without the
+  // refusal the writer started from {} and replaced the whole document.
+  const upd = xiaomiConfigured();
+  const before = fs.readFileSync(path.join(upd.dir, 'config.json'), 'utf8');
+  const { r, steps, reads } = corruptRun(upd.dir, ['update', 'xiaomi-token-plan', '--profile', 'Profile 47'], 2,
+    { preloads: [xiaomiPreload], extra: { HOME: path.join(upd.dir, 'home') } });
+  assert.strictEqual(siteAt(reads, 2), 'readUserConfig', `premise: ${JSON.stringify(reads)}`);
+  assert.deepStrictEqual(steps, [{ step: 'corrupt', attempt: 2, name: 'config.json' }]);
+  assert.strictEqual(r.status, 10, r.stderr);
+  assert.match(r.stderr, CORRUPT_NOTICE);
+  assert.strictEqual(fs.readFileSync(path.join(upd.dir, 'config.json'), 'utf8'), before, 'the Xiaomi writer published over the document');
+  assert.deepStrictEqual(fs.readdirSync(path.join(upd.dir, lockModule.LOCK_DIR)), [], 'the refusal left its lock ticket behind');
 });
 
 test('the lifecycle publish path, called directly with the migration pending, is refused', async () => {
@@ -1758,20 +1926,43 @@ test('lock busy after the vault write, then a bare setup rerun, and the row exis
 // Issue #83: the other two repair failure modes. Each must reach the post-loop
 // disk re-read and report its own reason; success is read from disk, never
 // inferred from having attempted the repair. Real file vault, nothing stubbed.
-test('#83: bare setup on an unparseable config.json reports the row-less credential, exit 1, and leaves the file byte-identical', () => {
-  // Every built-in stored, so no form opens. The broken document hides every
-  // row, so every built-in is row-less (in catalog order); kimi among them.
-  const ids = BUILT_IN_ROUTES.map((r) => r.id);
-  const dir = seeded([]);
-  inDataDir(dir, () => { for (const id of ids) vault.set(id, `sk-${id}-TEST-83`); });
+// #83 mode 1 moved forward with CodeRabbit finding A: a config.json that is
+// really broken is now refused at entry (exit 10), so the repair loop's
+// unparseable branch is reached by breaking ONLY the repair's own read.
+test('#83 (1a): bare setup on a really unparseable config.json refuses at entry — exit 10, nothing written, file byte-identical', () => {
+  const dir = setUpOthers();
+  inDataDir(dir, () => vault.set('kimi-code-plan', KEY_A));
   const broken = '{ "routes": [ { "id": "mine", } ] }';
   fs.writeFileSync(path.join(dir, 'config.json'), broken);
   const r = run(dir, ['setup']);
-  assert.strictEqual(r.status, 1, r.stderr);
-  assert.match(r.stderr, /stored credentials still have no route: [^\n]*\bkimi-code-plan\b/);
-  assert.match(r.stderr, /config\.json could not be read \(\w+\) — fix it and rerun to add the "kimi-code-plan" route\./);
-  assert.doesNotMatch(r.stderr, /all credentials present/);
+  assert.strictEqual(r.status, 10, r.stderr);
+  assert.match(r.stderr, /config\.json could not be read or parsed — fix it or move it aside, then rerun/);
+  assert.doesNotMatch(r.stderr, /all credentials present|retry\./);
   assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), broken, 'bare setup rewrote an unparseable config.json');
+  assert.deepStrictEqual(r.j.read(r.j.browser), [], 'a refused setup opened a form');
+});
+
+test('#83 (1b): the repair\'s own read finds config.json unparseable — the row-less credential is reported, exit 1, file byte-identical', () => {
+  // The other four configured and stored; only kimi is row-less. Only the
+  // repair's strict base read (readUserConfigStrict, in materializeBuiltInRoute)
+  // sees a broken document; setup's entry read and its post-state reread see
+  // the real file.
+  const prepare = () => {
+    const dir = setUpOthers();
+    inDataDir(dir, () => vault.set('kimi-code-plan', KEY_A));
+    return dir;
+  };
+  const at = readAt(prepare, ['setup'], 'readUserConfigStrict');
+  const dir = prepare();
+  const before = fs.readFileSync(path.join(dir, 'config.json'), 'utf8');
+  const { r, steps, reads } = corruptRun(dir, ['setup'], at);
+  assert.strictEqual(siteAt(reads, at), 'readUserConfigStrict', `premise: ${JSON.stringify(reads)}`);
+  assert.deepStrictEqual(steps, [{ step: 'corrupt', attempt: at, name: 'config.json' }], 'premise: exactly the repair read was broken');
+  assert.strictEqual(r.status, 1, r.stderr);
+  assert.match(r.stderr, /stored credentials still have no route: kimi-code-plan/);
+  assert.match(r.stderr, /config\.json could not be read \(malformed\) — fix it and rerun to add the "kimi-code-plan" route\./);
+  assert.doesNotMatch(r.stderr, /all credentials present/);
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), before, 'config.json changed');
   assert.deepStrictEqual(r.j.read(r.j.browser), [], 'nothing was missing, so no form should open');
 });
 

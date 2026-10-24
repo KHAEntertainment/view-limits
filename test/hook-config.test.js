@@ -224,8 +224,9 @@ function settings(mode, injectContext) {
     assert.strictEqual(absent.status, 9, absent.stderr);
     assert.strictEqual(absent.stdout, '');
     assert.match(absent.stderr, /config unreadable mid-write; retry/);
-    // Present but malformed or partial: the documented defaults apply.
-    for (const raw of ['{}', 'null', '[]', '{broken',
+    // Present and an object, with invalid or missing fields: each field is
+    // normalized to its documented default.
+    for (const raw of ['{}',
       JSON.stringify({ gate: { mode: 'bad', injectContext: 'true' }, refreshOnSessionStart: 'true' }),
       JSON.stringify({ gate: null }),
     ]) {
@@ -234,6 +235,17 @@ function settings(mode, injectContext) {
       assert.strictEqual(cfg.gate.mode, 'off');
       assert.strictEqual(cfg.gate.injectContext, false);
       assert.strictEqual(cfg.refreshOnSessionStart, false);
+    }
+    // Present but not a JSON object (malformed, or JSON of another type): the
+    // document is corrupt, so `config` refuses (exit 10) instead of presenting
+    // the built-in defaults as the configuration (PR #82, CodeRabbit finding A).
+    for (const raw of ['null', '[]', '42', '{broken']) {
+      fs.writeFileSync(configPath, raw);
+      const corrupt = spawnSync(process.execPath, [cli, 'config'], { env: refreshEnv, encoding: 'utf8', timeout: 5000 });
+      assert.strictEqual(corrupt.status, 10, `${raw}: ${corrupt.stderr}`);
+      assert.strictEqual(corrupt.stdout, '');
+      assert.match(corrupt.stderr, /config\.json could not be read or parsed — fix it or move it aside, then rerun/);
+      assert.doesNotMatch(corrupt.stderr, /retry\./, 'a corrupt file was reported as a publish in flight');
     }
     assert.deepStrictEqual(hooks.hooks.SessionStart[1].hooks[0], {
       type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/bin/vl.js', 'session-start'], timeout: 5,

@@ -686,8 +686,17 @@ What the schema guarantees:
   reason code `reauth-url-invalid`.
 
 The JSON envelope always has `schemaVersion`, `generatedAt`, `status`
-(`ok` | `empty` | `pending` | `failed`), `reasonCodes` and `routes` — the
-empty, pending and failed envelopes are valid documents too.
+(`ok` | `empty` | `pending` | `failed` | `not-configured`), `reasonCodes` and
+`routes` — the empty, pending and failed envelopes are valid documents too.
+
+The condensed layout lists **the same routes** as the expanded one: a route
+with no measurement at all (an unknown state, no windows, no balance) still
+appears, with its state and no bar.
+
+`view` never touches the credential store, and it never writes. When
+config.json has never been published — the one-time vault→routes migration
+has not resolved — it refuses with exit `8` and the hint that names the
+action, because a rerun cannot fix an absent document.
 
 ## CLI reference
 
@@ -718,7 +727,7 @@ vl.js recommend --json            # advisory recommendation (Jev-dormant by defa
 | `status` / `report` | `0` (`--json` writes one pretty JSON document to stdout) | n/a — always exits `0` (unknown flags are ignored; with no configured routes it prints the no-credentials guidance, `config unreadable mid-write; retry` when config.json could not be confirmed, or `config.json could not be read or parsed …` when it is unreadable or malformed) |
 | `check <routeId>` | `0` (one JSON `NormalizedStatus` on stdout) | `1` on unknown route, missing credential, or classified adapter error (one-line `view-limits: check <id> failed: …` on stderr; never a stack trace); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr |
 | `snapshot --json` | `0` (one pretty JSON envelope on stdout) | `1` when `--json` is missing or any other flag is passed |
-| `view [--condensed] [--json]` | `0` (the text layout, or one always-valid JSON envelope on stdout) | `1` on an unknown flag (usage on stderr); `8` stored credentials that were never migrated into routes ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr. `--json` still prints exactly one valid envelope (`status: "failed"`, `routes: []`, the reason code) in every refusing case |
+| `view [--condensed] [--json]` | `0` (the text layout, or one always-valid JSON envelope on stdout) | `1` on an unknown flag (usage on stderr); `8` config.json has never been published (the one-time vault→routes migration has not resolved — a rerun cannot fix it): `No configuration yet: run /view-limits:setup to add a provider, or start a new session to finish first-run setup` on stderr; `9` config.json could not be confirmed (another process was replacing it, or it exists but could not be read): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr. `--json` still prints exactly one valid envelope (`routes: []`, the status and the reason code) in every refusing case |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |
 | `setup` / `update` / `remove` | `0` | `1` on bad args, credential-storage failure, or a stored credential whose route row was not added; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr |
 | `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr — see [the lifecycle section](#adding-updating-and-removing-a-custom-provider) |

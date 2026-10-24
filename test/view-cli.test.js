@@ -160,7 +160,7 @@ test('view --json prints exactly one always-valid envelope', () => {
   assert.ok(deepseek.reasonCodes.includes('no-cached-observation'));
 });
 
-test('a fresh install (a confirmed configuration with no routes) prints the empty envelope', () => {
+test('a confirmed configuration with no routes is the always-valid empty envelope', () => {
   const dir = scratch();
   writeConfig(dir, []);
   const r = vl(dir, ['view', '--json']);
@@ -172,7 +172,7 @@ test('a fresh install (a confirmed configuration with no routes) prints the empt
   assert.deepStrictEqual(doc.reasonCodes, ['no-routes-configured']);
 });
 
-test('the text form of a fresh install is a valid empty view', () => {
+test('the text form of a confirmed configuration with no routes is a valid empty view', () => {
   const dir = scratch();
   writeConfig(dir, []);
   const r = vl(dir, ['view']);
@@ -182,18 +182,6 @@ test('the text form of a fresh install is a valid empty view', () => {
 });
 
 // ---- the refusing states ----------------------------------------------------
-
-test('a configuration that cannot be confirmed exits 9 with a valid envelope', () => {
-  const dir = scratch();
-  const r = vl(dir, ['view', '--json']);
-  assert.strictEqual(r.status, 9, `exit 9 (stderr: ${r.stderr})`);
-  const doc = JSON.parse(r.stdout);
-  assert.strictEqual(doc.schemaVersion, 1);
-  assert.strictEqual(doc.status, 'failed');
-  assert.deepStrictEqual(doc.routes, []);
-  assert.deepStrictEqual(doc.reasonCodes, ['config-inconclusive']);
-  assert.ok(r.stderr.includes('config'), 'the diagnostic goes to stderr');
-});
 
 test('a corrupt configuration exits 10 with a valid envelope', () => {
   const dir = scratch();
@@ -207,23 +195,31 @@ test('a corrupt configuration exits 10 with a valid envelope', () => {
   assert.deepStrictEqual(doc.reasonCodes, ['config-corrupt']);
 });
 
-test('stored credentials that were never migrated exit 8 with a valid envelope', () => {
+test('an ABSENT configuration is the migration-pending class: exit 8, not a retry', () => {
   const dir = scratch();
-  writeConfig(dir, []);
-  writeCache(dir, { 'minimax-token-plan': freshEntry('minimax-token-plan', { state: 'healthy' }) });
-  // A stored credential for a route the configuration does not define: the
-  // credential vault→routes migration has not resolved. The FILE backend
-  // keeps one encrypted blob per route id inside the data directory, and the
-  // probe reads its presence only — never the secret.
-  fs.mkdirSync(path.join(dir, 'secrets'), { recursive: true });
-  fs.writeFileSync(path.join(dir, 'secrets', 'minimax-token-plan.enc'), 'not-a-real-ciphertext');
   const r = vl(dir, ['view', '--json']);
   assert.strictEqual(r.status, 8, `exit 8 (stderr: ${r.stderr})`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.schemaVersion, 1);
+  assert.strictEqual(doc.status, 'not-configured');
+  assert.deepStrictEqual(doc.routes, []);
+  assert.deepStrictEqual(doc.reasonCodes, ['config-absent']);
+  assert.match(r.stderr, /No configuration yet/, 'the hint names the state');
+  assert.match(r.stderr, /\/view-limits:setup/, 'the hint names the action');
+});
+
+test('a configuration that exists but cannot be confirmed is exit 9', () => {
+  const dir = scratch();
+  // Present by lstat (a swap in flight leaves the file there) but unreadable
+  // by the reader: the unconfirmable class. A rerun may succeed.
+  fs.symlinkSync(path.join(dir, 'never-published.json'), path.join(dir, 'config.json'));
+  const r = vl(dir, ['view', '--json']);
+  assert.strictEqual(r.status, 9, `exit 9 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.schemaVersion, 1);
   assert.strictEqual(doc.status, 'failed');
   assert.deepStrictEqual(doc.routes, []);
-  assert.deepStrictEqual(doc.reasonCodes, ['migration-pending']);
+  assert.deepStrictEqual(doc.reasonCodes, ['config-inconclusive']);
 });
 
 // ---- the cache-only guarantee -----------------------------------------------

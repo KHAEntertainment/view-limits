@@ -62,6 +62,67 @@ function gateContext(entries, routes, now) {
 const NOW = Date.parse('2026-10-13T09:46:00Z');
 const TZ = 'America/Los_Angeles';
 
+// ---- the three surfaces list the SAME routes -------------------------------
+
+{
+  // A healthy route, an unknown route with counts, a route with NO
+  // measurement at all and a stale route: every one of them must appear in
+  // the expanded text, in the condensed text and in the JSON.
+  const snapshot = {
+    generatedAt: '2026-10-13T09:46:00Z',
+    routes: [
+      route('minimax-token-plan', 'minimax', 'token-plan', {
+        state: observed('healthy'),
+        windows: [{ type: 'rolling-5h', remaining: 72, limit: 100 }],
+      }),
+      route('xiaomi-token-plan', 'xiaomi', 'token-plan', {
+        state: observed('unknown'),
+        basis: observed('token-count'),
+        windows: [{ type: 'tokens', remaining: 12000000, limit: 20000000 }],
+      }),
+      route('alibaba-coding-plan', 'alibaba-coding-plan', 'personal', {
+        state: observed('unknown'),
+      }),
+      route('glm-coding-plan', 'glm', 'coding-plan', {
+        state: observed('exhausted'),
+        freshness: 'stale',
+        observedAt: observed('2026-10-13T09:40:00Z'),
+        windows: [{ type: 'credit', remaining: 0, limit: 100 }],
+      }),
+    ],
+  };
+  const schema = vm.buildViewSchema(snapshot, {
+    recipeOf: { 'alibaba-coding-plan': 'alibaba-coding-plan' },
+  });
+  const expanded = vm.renderViewText(schema, { now: NOW, timeZone: TZ });
+  const condensed = vm.renderViewText(schema, { now: NOW, timeZone: TZ, condensed: true });
+
+  // The expanded route header lines: <label> <STATE> <FRESHNESS>.
+  const expandedLabels = expanded
+    .filter((l) => /^(.*?)\s{2,}(HEALTHY|CONSTRAINED|EXHAUSTED|UNKNOWN)\s{2,}(FRESH|STALE|UNKNOWN)$/.test(l))
+    .map((l) => l.match(/^(.*?)\s{2,}(HEALTHY|CONSTRAINED|EXHAUSTED|UNKNOWN)\s{2,}(FRESH|STALE|UNKNOWN)$/)[1]);
+  // The condensed provider column: the non-empty entries are the routes
+  // (the continuation rows leave it empty).
+  const condensedLabels = condensed
+    .filter((l) => l.trim() && !l.startsWith('VIEW-LIMITS') && !l.startsWith('PROVIDER'))
+    .map((l) => l.split(/\s{2,}/)[0])
+    .filter((label) => label !== '');
+
+  assert.strictEqual(expandedLabels.length, 4, 'the expanded view lists every route');
+  assert.strictEqual(condensedLabels.length, 4, 'the condensed view lists every route');
+  assert.deepStrictEqual(condensedLabels, expandedLabels, 'the condensed view lists the same routes');
+  assert.deepStrictEqual(schema.routes.map((r) => r.label), expandedLabels, 'the JSON lists the same routes');
+
+  // The route with no measurement at all is still listed, with its state.
+  assert.ok(condensed.some((l) => l.includes('Alibaba Cloud') && l.includes('UNKNOWN')),
+    'a route with no measurement still appears in the condensed view');
+  assert.ok(expanded.some((l) => l.includes('Alibaba Cloud')), 'and in the expanded view');
+  assert.ok(condensed.some((l) => l.includes('Xiaomi MiMo') && l.includes('UNKNOWN')),
+    'an unknown route with counts appears in the condensed view');
+  assert.ok(condensed.some((l) => l.includes('Z.ai / GLM') && l.includes('UNKNOWN')),
+    'a stale route appears in the condensed view');
+}
+
 // ---- the approved example (Issue #59, owner-approved 2026-10-20) -----------
 
 const approvedSnapshot = {
@@ -385,6 +446,15 @@ const APPROVED_CONDENSED = [
   assert.strictEqual(vm.validateReauthUrl(null).value, null);
   assert.deepStrictEqual(vm.validateReauthUrl('http://x.example/').reasonCodes, ['reauth-url-invalid']);
 
+  // A URL that carries a control character or whitespace is refused: the URL
+  // parser strips tab and newline silently, so it would otherwise parse
+  // cleanly and then reach the route line as a second one.
+  assert.strictEqual(vm.validateReauthUrl('https://host.example/\n    evil-route: healthy').value, null);
+  assert.strictEqual(vm.validateReauthUrl('https://host.example/\tlogin').value, null);
+  assert.strictEqual(vm.validateReauthUrl('https://host.example/\u009blogin').value, null);
+  assert.strictEqual(vm.validateReauthUrl('https://host.example\\login').value, null);
+  assert.strictEqual(vm.validateReauthUrl('https://host.example/a b').value, null);
+
   const snapshot = { routes: [route('r', 'xiaomi', 'token-plan', {
     state: observed('unknown'),
     reauth: { reason: 'auth-expired', url: 'http://insecure.example/login' },
@@ -395,6 +465,17 @@ const APPROVED_CONDENSED = [
   assert.strictEqual(r.reauth.url, null, 'an invalid URL is never displayed');
   assert.ok(r.reasonCodes.includes('reauth-url-invalid'));
   assert.ok(r.reasonCodes.includes('reauth-required'));
+
+  // A reauth URL that carries a newline cannot become a second route line.
+  const hostile = { routes: [route('r2', 'xiaomi', 'token-plan', {
+    state: observed('unknown'),
+    reauth: { reason: 'auth-expired', url: 'https://host.example/\n    evil-route: healthy' },
+  })] };
+  const hostileRoute = vm.buildViewSchema(hostile).routes[0];
+  assert.strictEqual(hostileRoute.reauth.url, null, 'a URL with a newline is refused');
+  assert.ok(hostileRoute.reasonCodes.includes('reauth-url-invalid'));
+  const hostileLines = vm.renderViewText(vm.buildViewSchema(hostile)).join('\n').split('\n');
+  assert.ok(!hostileLines.some((l) => /^\s*evil-route/.test(l)), 'no fabricated route line');
 }
 
 // ---- the reported period end is disclosed, never a reset --------------------
@@ -419,8 +500,13 @@ const APPROVED_CONDENSED = [
   assert.strictEqual(escape('a\tb'), 'a\\tb');
   assert.strictEqual(escape('a\u001bb'), 'a\\u001bb');
   assert.strictEqual(escape('a\u0000b'), 'a\\u0000b');
+  // The C1 range reaches the terminal too: NEL and CSI among them.
+  assert.strictEqual(escape('a\u009bb'), 'a\\u009bb');
+  assert.strictEqual(escape('a\u0085b'), 'a\\u0085b');
+  assert.strictEqual(escape('a\u007fb'), 'a\\u007fb');
   assert.strictEqual(escape('plain text'), 'plain text', 'a value without control characters is untouched');
   assert.strictEqual(escape('say "hi"'), 'say "hi"', 'quotes are not escaped: the text stays byte-identical');
+  assert.strictEqual(escape('café'), 'café', 'a non-ASCII value is untouched');
   assert.strictEqual(escape(null), '');
 
   // A provider error may not fabricate a route line.

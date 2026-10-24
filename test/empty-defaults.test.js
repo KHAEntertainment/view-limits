@@ -1163,6 +1163,10 @@ const CONFIG_READERS = [
   // surfaced by the command itself — the JSON envelope is printed before
   // the exit, so the wrapper's immediate exit cannot be used here.
   'bin/vl.js | viewCmd | libLoadConfig | ',
+  // The view's re-confirmation of an absent document: an lstat presence
+  // check (never a document read), which tells a document that was never
+  // published from one that exists but could not be read.
+  'bin/vl.js | viewCmd | configPresence | ',
   // The bin wrapper: the throw becomes exit 9 at the call.
   'bin/vl.js | loadConfig | libLoadConfig | opts',
   // Strict by construction (proves absence under the lock, or throws / exits 9).

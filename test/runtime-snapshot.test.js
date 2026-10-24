@@ -9,7 +9,7 @@ const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process');
 
-const { getRuntimeSnapshot, SNAPSHOT_SCHEMA_VERSION, DECLARED_BASIS_PROVIDERS, PLAN_PERIOD_END_PROVIDERS } = require('../lib/runtime-snapshot');
+const { getRuntimeSnapshot, SNAPSHOT_SCHEMA_VERSION, DECLARED_BASIS_PROVIDERS, PLAN_PERIOD_END_PROVIDERS, inapplicableDiagnostics } = require('../lib/runtime-snapshot');
 const { parseStrictIsoTimestamp } = require('../lib/gate');
 const { BUILT_IN_ROUTES } = require('../lib/config');
 
@@ -859,6 +859,65 @@ test('#87 — drift guard: the adapters that declare a basis match the capabilit
     adapterProducers(/\bbasis\s*:/),
     'an adapter now declares a basis — add it to DECLARED_BASIS_PROVIDERS in lib/runtime-snapshot.js (or drop the capability)',
   );
+});
+
+test('#87 — a caller-supplied not-applicable reason is NOT an exemption — the inventory stays partial', async () => {
+  const dir = scratch();
+  writeJson(dir, 'runtime.json', {
+    version: 1,
+    harnesses: [{ key: { host: 'h', harness: 'claude', surface: 'tui' } }],
+  });
+  writeJson(dir, 'config.json', {
+    routes: [{ id: 'kimi-route', provider: 'kimi', account: 'main', match: { model: 'kimi', harness: 'cli' } }],
+  });
+  writeJson(dir, 'status.json', {
+    updatedAt: iso(0),
+    routes: {
+      'kimi-route': {
+        routeId: 'kimi-route', observedAt: iso(-100), freshUntil: iso(60_000), source: 'kimi',
+        status: {
+          state: 'healthy', windows: [{ type: 'weekly', remaining: 400, limit: 500 }],
+          balance: null, resetAt: iso(3_600_000), detail: { model: 'kimi-k2' },
+        },
+      },
+    },
+  });
+  // The caller's own unknown fact carries the SAME reason string the module
+  // uses for its inapplicable diagnostics. It must still count as missing
+  // evidence: the exemption is keyed on the two positions this module emits,
+  // never on the reason string.
+  const s = await snap(dir, {
+    callerContext: { ...FULL_CTX, selectedAccount: { value: null, provenance: 'unknown', reason: 'not-applicable' } },
+  });
+  assert.strictEqual(s.caller.selectedAccount.provenance, 'unknown');
+  assert.strictEqual(s.caller.selectedAccount.reason, 'not-applicable');
+  // The routes' own inapplicable diagnostics stay exempt.
+  assert.strictEqual(s.routes[0].resource.basis.reason, 'not-applicable');
+  assert.strictEqual(s.routes[0].resource.periodEnd.reason, 'not-applicable');
+  assert.strictEqual(s.completeness, 'partial', 'a caller fact with not-applicable is still missing evidence');
+});
+
+test('#87 — the exemption covers only the two inapplicable diagnostics at their own positions', () => {
+  const unknownFact = (reason) => ({ value: null, provenance: 'unknown', source: null, observedAt: null, freshUntil: null, reason });
+  const basis = unknownFact('not-applicable');
+  const periodEnd = unknownFact('not-applicable');
+  const resetAt = unknownFact('not-applicable');
+  const state = unknownFact('not-applicable');
+  const provider = unknownFact('not-applicable');
+  const exempt = inapplicableDiagnostics([
+    { id: 'r', provider, resource: { state, resetAt, basis, periodEnd } },
+  ]);
+  assert.ok(exempt.has(basis), 'the inapplicable basis is exempt');
+  assert.ok(exempt.has(periodEnd), 'the inapplicable period end is exempt');
+  assert.ok(!exempt.has(resetAt), 'another resource fact must never be exempt');
+  assert.ok(!exempt.has(state), 'another resource fact must never be exempt');
+  assert.ok(!exempt.has(provider), 'a route-level fact must never be exempt');
+
+  // A fact at an exempt POSITION that carries a different reason is a gap.
+  const absent = inapplicableDiagnostics([
+    { resource: { basis: unknownFact('cached-field-absent'), periodEnd: unknownFact('cached-field-absent') } },
+  ]);
+  assert.strictEqual(absent.size, 0, 'only the module-emitted inapplicable facts are exempt');
 });
 
 console.log('\nruntime snapshot — purity');

@@ -75,8 +75,23 @@ function vl(dir, args, opts = {}) {
     env.NODE_OPTIONS = `--require ${GUARD}`;
     if (opts.log) env.REVIEW_LOG = opts.log;
   }
+  if (opts.preload) {
+    env.NODE_OPTIONS = `--require ${opts.preload}`;
+  }
+  if (opts.env) Object.assign(env, opts.env);
   const r = spawnSync(process.execPath, [VL, ...args], { env, encoding: 'utf8' });
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+// Hold the shared refresh-worker lock, so the next collector finds another
+// owner. The record names THIS process (which is alive), so the lock's
+// recovery pass keeps it and the contender yields.
+function holdWorkerLock(dir) {
+  const workers = path.join(dir, 'refresh-workers');
+  fs.mkdirSync(workers, { recursive: true });
+  const file = path.join(workers, `${process.pid}-${'a'.repeat(32)}.json`);
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, owner: 'test-holder', number: 1 }));
+  return () => { try { fs.unlinkSync(file); } catch { /* already gone */ } };
 }
 
 // ---- the happy path ---------------------------------------------------------
@@ -222,18 +237,104 @@ test('a configuration that exists but cannot be confirmed is exit 9', () => {
   assert.deepStrictEqual(doc.reasonCodes, ['config-inconclusive']);
 });
 
+// ---- the live collection (Issue #60) ---------------------------------------
+//
+// The view is a LIVE surface now: it runs the shared collector with a bounded
+// wait and then renders what the collection published — or what it kept. The
+// gate and the snapshot stay cache-only.
+
+const PRELOAD = path.join(PLUGIN_ROOT, 'test', 'fixtures', 'view-cli-preload.cjs');
+
+test('view --json emits exactly ONE envelope for a successful collection', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout); // exactly one JSON document
+  assert.strictEqual(doc.schemaVersion, 1);
+  assert.strictEqual(doc.collection.outcome, 'completed');
+  assert.strictEqual(doc.collection.published, true);
+  const minimax = doc.routes.find((x) => x.id === 'minimax-token-plan');
+  assert.strictEqual(minimax.collection.outcome, 'completed');
+  assert.strictEqual(minimax.state, 'healthy');
+  assert.strictEqual(minimax.freshness, 'fresh');
+});
+
+test('view --json emits exactly ONE envelope when there are no credentials', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  const r = vl(dir, ['view', '--json']);
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.collection.outcome, 'no-credentials');
+  assert.strictEqual(doc.collection.published, false);
+  assert.strictEqual(doc.routes.length, 2, 'the configured routes are still listed');
+});
+
+test('view --json emits exactly ONE envelope when another worker owns the collector', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  writeCache(dir, {
+    'minimax-token-plan': freshEntry('minimax-token-plan', { state: 'healthy', windows: [] }),
+  });
+  const release = holdWorkerLock(dir);
+  try {
+    const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+    assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+    const doc = JSON.parse(r.stdout);
+    assert.strictEqual(doc.collection.outcome, 'in-progress');
+    assert.strictEqual(doc.collection.published, false);
+    const minimax = doc.routes.find((x) => x.id === 'minimax-token-plan');
+    assert.strictEqual(minimax.collection.outcome, 'pending');
+    assert.ok(minimax.reasonCodes.includes('collection-pending'));
+    assert.match(r.stderr, /collection in progress/);
+  } finally {
+    release();
+  }
+});
+
+test('view --json emits exactly ONE envelope for a partial failure, and the failed route keeps its age', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  writeCache(dir, {
+    'minimax-token-plan': freshEntry('minimax-token-plan', {
+      state: 'healthy', windows: [{ type: 'weekly', remaining: 5, limit: 10 }],
+    }),
+  });
+  const r = vl(dir, ['view', '--json'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_FAIL: 'minimax-token-plan' },
+  });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.collection.outcome, 'partial');
+  const minimax = doc.routes.find((x) => x.id === 'minimax-token-plan');
+  assert.strictEqual(minimax.collection.outcome, 'failed');
+  assert.match(minimax.collection.error, /synthetic provider failure/);
+  assert.ok(minimax.reasonCodes.includes('collection-failed'));
+  // The prior fact is still the fact, with its own age.
+  assert.strictEqual(minimax.observedAt, '2026-10-13T09:45:00Z');
+  assert.strictEqual(minimax.state, 'healthy');
+  // The successful sibling published independently.
+  const deepseek = doc.routes.find((x) => x.id === 'deepseek-direct');
+  assert.strictEqual(deepseek.collection.outcome, 'completed');
+  assert.match(r.stderr, /collection partial/);
+  // The cache kept the failed route's prior entry verbatim.
+  const published = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
+  assert.strictEqual(published.routes['minimax-token-plan'].observedAt, '2026-10-13T09:45:00Z');
+});
+
 // ---- the cache-only guarantee -----------------------------------------------
 
-test('view performs no network access and no subprocess', () => {
+test('the gate and the snapshot stay cache-only: no network, no subprocess', () => {
   const dir = scratch();
   const log = path.join(dir, 'review.log');
   writeConfig(dir, ROUTES);
   writeCache(dir, {
     'minimax-token-plan': freshEntry('minimax-token-plan', { state: 'healthy', windows: [{ type: 'weekly', remaining: 5, limit: 10 }] }),
   });
-  const r = vl(dir, ['view'], { guard: true, log });
-  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
-  assert.ok(r.stdout.includes('MiniMax'));
+  const snap = vl(dir, ['snapshot', '--json'], { guard: true, log });
+  assert.strictEqual(snap.status, 0, `exit 0 (stderr: ${snap.stderr})`);
   const attempts = fs.existsSync(log)
     ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
     : [];

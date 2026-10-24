@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 const cp = require('child_process');
+const { isModuleId } = require('./module-id.cjs');
 const dir = process.env.CLAUDE_PLUGIN_DATA;
 function log(kind, extra = {}) {
   fs.appendFileSync(path.join(dir, 'events'), JSON.stringify({ kind, pid: process.pid, ...extra }) + '\n');
@@ -49,7 +50,7 @@ const load = Module._load;
 Module._load = function (id, ...args) {
   // No credential exists for stepfun-plan: the vault is present but empty.
   // Every consultation is recorded so the test can assert zero.
-  if (id.endsWith('/lib/vault')) {
+  if (isModuleId(id, 'vault')) {
     return {
       has: (routeId) => { log('vault-has', { routeId }); return false; },
       get: (routeId) => { log('vault-get', { routeId }); return null; },

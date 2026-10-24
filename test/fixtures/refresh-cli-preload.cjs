@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 const cp = require('child_process');
+const { isModuleId } = require('./module-id.cjs');
 const dir = process.env.CLAUDE_PLUGIN_DATA;
 function log(kind, extra = {}) {
   fs.appendFileSync(path.join(dir, 'events'), JSON.stringify({ kind, pid: process.pid, ...extra }) + '\n');
@@ -24,8 +25,8 @@ cp.spawn = function (...args) {
 process.on('exit', () => log('exit', { command: process.argv[2] }));
 const load = Module._load;
 Module._load = function (id, ...args) {
-  if (id.endsWith('/lib/vault')) return { has: () => true, get: () => 'fake-test-key' };
-  if (id.endsWith('/lib/adapters')) return { getAdapter: () => ({
+  if (isModuleId(id, 'vault')) return { has: () => true, get: () => 'fake-test-key' };
+  if (isModuleId(id, 'adapters')) return { getAdapter: () => ({
     async fetchStatus() {
       log('provider');
       const end = Date.now() + 8000;

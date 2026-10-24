@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 const cp = require('child_process');
+const { isModuleId } = require('./module-id.cjs');
 
 const VAULT_LOG = process.env.VL_XIAOMI_VAULT_LOG;
 const FETCH_LOG = process.env.VL_XIAOMI_FETCH_LOG;
@@ -87,7 +88,7 @@ const originalLoad = Module._load;
 Module._load = function xiaomiTestLoad(id) {
   const mod = originalLoad.apply(this, arguments);
   if (typeof id !== 'string') return mod;
-  if (id.endsWith('/lib/vault')) {
+  if (isModuleId(id, 'vault')) {
     const spy = { ...mod };
     for (const fn of ['has', 'get', 'set', 'remove']) {
       const original = mod[fn];

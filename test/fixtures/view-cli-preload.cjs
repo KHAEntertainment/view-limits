@@ -1,0 +1,57 @@
+'use strict';
+// Preload for the view CLI tests (installed via NODE_OPTIONS).
+//
+// A fake vault (a credential is present), a fake adapter (one healthy
+// observation) and a controllable failure. No network, no keychain, no
+// provider: every provider call is this file's fake.
+//
+//   VL_VIEW_FAIL=<routeId>   the adapter throws for that route (an external
+//                            failure), so the collector has to keep the
+//                            route's prior entry.
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const Module = require('module');
+const { isModuleId } = require('./module-id.cjs');
+
+const dir = process.env.CLAUDE_PLUGIN_DATA;
+
+function log(kind, extra = {}) {
+  try {
+    fs.appendFileSync(path.join(dir, 'events'), JSON.stringify({ kind, ...extra }) + '\n');
+  } catch { /* the scratch dir may be gone at teardown */ }
+}
+
+global.fetch = () => { throw new Error('network forbidden'); };
+
+const load = Module._load;
+Module._load = function (id, ...args) {
+  if (isModuleId(id, 'vault')) {
+    return {
+      has: (routeId) => { log('vault-has', { routeId }); return true; },
+      get: (routeId) => { log('vault-get', { routeId }); return 'fake-test-key'; },
+    };
+  }
+  if (isModuleId(id, 'adapters')) {
+    return {
+      getAdapter: (provider, route) => ({
+        async fetchStatus() {
+          const routeId = route && route.id;
+          log('provider', { routeId, provider });
+          if (process.env.VL_VIEW_FAIL && process.env.VL_VIEW_FAIL === routeId) {
+            throw new Error('synthetic provider failure');
+          }
+          return {
+            state: 'healthy',
+            windows: [{ type: 'rolling-5h', remaining: 72, limit: 100 }],
+            balance: null,
+            resetAt: null,
+            detail: {},
+          };
+        },
+      }),
+      ADAPTERS: {},
+    };
+  }
+  return load.call(this, id, ...args);
+};

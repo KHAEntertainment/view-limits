@@ -2,11 +2,12 @@
 // `vl.js check` with a fake vault and adapter; no network or credentials.
 // VL_CHECK_MODE picks the adapter outcome: ok | auth | multiline | plain.
 const Module = require('module');
+const { isModuleId } = require('./module-id.cjs');
 global.fetch = () => { throw new Error('network forbidden'); };
 const load = Module._load;
 Module._load = function (id, ...args) {
-  if (id.endsWith('/lib/vault')) return { has: () => true, get: () => 'fake-test-key' };
-  if (id.endsWith('/lib/adapters')) return { getAdapter: () => ({
+  if (isModuleId(id, 'vault')) return { has: () => true, get: () => 'fake-test-key' };
+  if (isModuleId(id, 'adapters')) return { getAdapter: () => ({
     async fetchStatus() {
       switch (process.env.VL_CHECK_MODE) {
         case 'auth':

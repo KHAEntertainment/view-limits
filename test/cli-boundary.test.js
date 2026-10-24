@@ -127,14 +127,14 @@ function fakeVaultAdapterPreload(dirPath, { failProvider = null } = {}) {
     const Module = require('module');
     const load = Module._load;
     Module._load = function (id, ...args) {
-      if (id.endsWith('/lib/vault')) return {
+      if (typeof id === 'string' && (id.endsWith('/lib/vault') || id === './vault')) return {
         has: () => true,
         get: () => 'fake-test-key',
         remove: () => true,
         set: () => true,
         assertWritable: () => {},
       };
-      if (id.endsWith('/lib/adapters')) return {
+      if (typeof id === 'string' && (id.endsWith('/lib/adapters') || id === './adapters')) return {
         getAdapter: (provider) => ({
           async fetchStatus() {
             ${throwBlock}

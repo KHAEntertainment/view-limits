@@ -24,12 +24,15 @@ function log(kind, extra = {}) {
 
 global.fetch = () => { throw new Error('network forbidden'); };
 
+const emptyNativeRead = async () => ({ caller: null, sessions: [], harnesses: [], profiles: [], diagnostics: [] });
+
 const load = Module._load;
 Module._load = function (id, ...args) {
   if (isModuleId(id, 'vault')) {
+    const noVault = process.env.VL_VIEW_NO_VAULT === '1';
     return {
-      has: (routeId) => { log('vault-has', { routeId }); return true; },
-      get: (routeId) => { log('vault-get', { routeId }); return 'fake-test-key'; },
+      has: (routeId) => { log('vault-has', { routeId }); return noVault ? false : true; },
+      get: (routeId) => { log('vault-get', { routeId }); return noVault ? null : 'fake-test-key'; },
     };
   }
   if (isModuleId(id, 'adapters')) {
@@ -52,6 +55,15 @@ Module._load = function (id, ...args) {
       }),
       ADAPTERS: {},
     };
+  }
+  if (isModuleId(id, 'traycer-adapter')) {
+    // The collector's bounded native observation (B3) must stay hermetic in
+    // the CLI tests: never spawn a real traycer CLI. Keep every other export
+    // (the CLI reads traycerEnvCallerContext from this module).
+    const real = load.call(this, id, ...args);
+    return Object.assign({}, real, {
+      readTraycerRuntime: emptyNativeRead,
+    });
   }
   return load.call(this, id, ...args);
 };

@@ -263,7 +263,7 @@ test('view --json emits exactly ONE envelope for a successful collection', () =>
 test('view --json emits exactly ONE envelope when there are no credentials', () => {
   const dir = scratch();
   writeConfig(dir, ROUTES);
-  const r = vl(dir, ['view', '--json']);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD, env: { VL_VIEW_NO_VAULT: '1' } });
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.collection.outcome, 'no-credentials');
@@ -399,7 +399,7 @@ test('a native profile is carried in the JSON envelope', () => {
       },
     }],
   }, null, 2));
-  const r = vl(dir, ['view', '--json']);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.profiles.length, 1, 'the native profile is carried');
@@ -439,7 +439,7 @@ test('a native fact with no expiry is never promoted to healthy', () => {
       },
     }],
   }, null, 2));
-  const r = vl(dir, ['view', '--json']);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.profiles.length, 1);

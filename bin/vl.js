@@ -1974,7 +1974,20 @@ async function viewCmd(args) {
   // collection published — or what it kept, when a route failed. The
   // collector is the only live path: the gate and the snapshot stay
   // cache-only.
-  const result = await collector.collect({ cfg });
+  //
+  // The collection includes the bounded NATIVE observation (B3): the result
+  // carries the refreshed runtime snapshot, so the view renders the native
+  // facts the same live path `snapshot --refresh` would have produced. The
+  // confirmed configuration is handed to the collector so the snapshot reads
+  // it once, and the cache is read after the collection so the view
+  // describes what was published (or what was kept).
+  const result = await collector.collect({
+    cfg,
+    io: {
+      callerContext: cliCallerContext(),
+      readConfig: () => ({ cfg, corrupt: false, inconclusive: false }),
+    },
+  });
 
   // The cache is read AFTER the collection, so the view describes what was
   // published (or what was kept). It is read once and used for BOTH the
@@ -1996,21 +2009,14 @@ async function viewCmd(args) {
     if (r.monitor && typeof r.monitor.recipe === 'string') recipeOf[r.id] = r.monitor.recipe;
   }
 
-  // The Xiaomi rows are LIVE (F1/F4): a cached Xiaomi count never satisfies
-  // a normal render. The observation this collection made replaces them; a
-  // Xiaomi route the collection did not observe reads as pending. The gate
-  // probe still reads the RAW cache below, so the view's eligibility is the
-  // gate's own decision on the same entries the gate reads.
-  const xiaomiById = {};
-  for (const route of (Array.isArray(cfg.routes) ? cfg.routes : [])) {
-    if (!route || !isXiaomi(route)) continue;
-    xiaomiById[route.id] = result.statuses[route.id] || xiaomiSession.pendingStatus();
-  }
-  const snap = await getRuntimeSnapshot({
+  // The snapshot the collector ran is the one the view renders. If the
+  // native observation itself threw (defensive — the snapshot service
+  // degrades by contract), fall back to the cache-only snapshot so the view
+  // still renders.
+  const snap = result.snapshot || await getRuntimeSnapshot({
     callerContext: cliCallerContext(),
     io: {
       readConfig: () => ({ cfg, corrupt: false, inconclusive: false }),
-      readStatus: () => overlayDoc(cfg, xiaomiLiveEntries(cfg, xiaomiById), statusDoc),
     },
   });
   const schema = buildViewSchema(snap, {
@@ -2027,6 +2033,7 @@ async function viewCmd(args) {
       reason: result.reason,
       error: result.error,
       routes: result.routes,
+      native: result.native,
     }),
   });
 

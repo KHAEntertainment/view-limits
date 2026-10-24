@@ -649,6 +649,46 @@ it; `harness/codex/` and `harness/opencode/` are the equivalent wiring for the
 Codex and OpenCode harnesses. Each surface file delegates to the CLI and
 relays its output verbatim — all rendering lives in `lib/view-model.js`.
 
+## The view schema (`vl.js view`)
+
+`vl.js view` renders the shared, versioned view schema — the structured quota,
+balance and reauth facts every surface (text, JSON, the dashboard) reads. It
+is **cache-only**: it reads the cached snapshot and the configuration, and
+never performs a provider request, a refresh, a subprocess or a write.
+
+```sh
+vl.js view                 # the expanded text layout
+vl.js view --condensed     # one line per measurement
+vl.js view --json          # one always-valid JSON envelope (schemaVersion 1)
+```
+
+The text and the JSON come from the SAME object, so they can never disagree:
+the text renderer never re-derives a fact the schema does not carry.
+
+What the schema guarantees:
+
+- **Nothing is fabricated.** A missing fact is `null`, never `0`, `false` or
+  `healthy`. A window that reports only a percentage keeps `remaining` and
+  `limit` null; a balance is never inferred from windows; a window's `unit`
+  is `null` (with a `window-unit-unavailable` reason code) unless the source
+  declares one.
+- **The adapter's state is the only state.** The view never derives a state
+  from a measurement: a route the adapter called `unknown` stays `unknown`
+  (with its raw counts shown and no bar), whatever its numbers say.
+- **Stale is never healthy.** A route whose observation is no longer fresh is
+  serialized as `unknown` with the reason code `stale-observation`; its
+  last-known facts stay visible, marked `(last seen …)`.
+- **`quotaEligibility` is the gate's own decision** (`eligible`,
+  `ineligible`, `unresolved`), so the view and the dispatch gate can never
+  disagree about a route.
+- **`reauth` is structured and validated.** The URL must be https, carry no
+  userinfo and no query string; a URL that fails becomes `null` plus the
+  reason code `reauth-url-invalid`.
+
+The JSON envelope always has `schemaVersion`, `generatedAt`, `status`
+(`ok` | `empty` | `pending` | `failed`), `reasonCodes` and `routes` — the
+empty, pending and failed envelopes are valid documents too.
+
 ## CLI reference
 
 ```sh
@@ -665,6 +705,7 @@ vl.js provider add|update|remove|list   # custom-provider lifecycle (validate �
                                   #   headless statuses and exit codes
 vl.js config                      # effective config (secrets masked)
 vl.js snapshot --json [--refresh] # diagnostic runtime snapshot
+vl.js view [--condensed] [--json] # the versioned view schema: text or JSON
 vl.js recommend --json            # advisory recommendation (Jev-dormant by default)
 ```
 
@@ -677,6 +718,7 @@ vl.js recommend --json            # advisory recommendation (Jev-dormant by defa
 | `status` / `report` | `0` (`--json` writes one pretty JSON document to stdout) | n/a — always exits `0` (unknown flags are ignored; with no configured routes it prints the no-credentials guidance, `config unreadable mid-write; retry` when config.json could not be confirmed, or `config.json could not be read or parsed …` when it is unreadable or malformed) |
 | `check <routeId>` | `0` (one JSON `NormalizedStatus` on stdout) | `1` on unknown route, missing credential, or classified adapter error (one-line `view-limits: check <id> failed: …` on stderr; never a stack trace); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr |
 | `snapshot --json` | `0` (one pretty JSON envelope on stdout) | `1` when `--json` is missing or any other flag is passed |
+| `view [--condensed] [--json]` | `0` (the text layout, or one always-valid JSON envelope on stdout) | `1` on an unknown flag (usage on stderr); `8` stored credentials that were never migrated into routes ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr. `--json` still prints exactly one valid envelope (`status: "failed"`, `routes: []`, the reason code) in every refusing case |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |
 | `setup` / `update` / `remove` | `0` | `1` on bad args, credential-storage failure, or a stored credential whose route row was not added; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr |
 | `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr — see [the lifecycle section](#adding-updating-and-removing-a-custom-provider) |

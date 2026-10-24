@@ -177,6 +177,68 @@ await testAsync('a failed route with NO prior entry publishes the classified unk
     'a first-time failure is published with its own observation time');
 });
 
+await testAsync('a route whose credential store throws keeps its prior entry — a sibling cannot drop it', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, {
+    routes: [route('minimax-token-plan', 'minimax'), route('deepseek-direct', 'deepseek')],
+  });
+  // Route A's credential store throws; route B is a healthy sibling.
+  const { io } = world({
+    vault: {
+      has: (id) => { if (id === 'minimax-token-plan') throw new Error('keychain locked'); return true; },
+      get: () => 'fake-test-key',
+    },
+  });
+  // A's prior observation is a FRESH exhaustion: while it stands, the gate
+  // denies dispatch to that account.
+  const prior = {
+    routeId: 'minimax-token-plan',
+    observedAt: '2026-10-24T11:58:00.000Z',
+    freshUntil: '2026-10-24T12:03:00.000Z',
+    source: 'minimax',
+    status: { state: 'exhausted', windows: [], balance: null, resetAt: null },
+  };
+  cache.writeCache({ 'minimax-token-plan': prior });
+  const before = cache.readCache().routes['minimax-token-plan'];
+
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.PARTIAL);
+  assert.deepStrictEqual(
+    result.routes.map((r) => [r.id, r.outcome]),
+    [['minimax-token-plan', 'failed'], ['deepseek-direct', 'completed']],
+  );
+
+  const after = cache.readCache().routes['minimax-token-plan'];
+  assert.deepStrictEqual(after, before, "the failed route's entry is byte-identical");
+  assert.strictEqual(after.observedAt, '2026-10-24T11:58:00.000Z', 'the age is unchanged');
+
+  // The gate still sees the exhaustion and still denies.
+  const decision = decide({
+    route: cfg.routes[0],
+    entry: after,
+    now: FIXED_NOW,
+    config: { gate: { mode: 'deny', injectContext: false } },
+  });
+  assert.strictEqual(decision.action, 'deny', 'a sibling success must not drop a denial');
+});
+
+await testAsync('a route whose credential store throws keeps its prior entry even when it is the ONLY route', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  const { io, calls } = world({
+    vault: { has: () => { throw new Error('keychain locked'); }, get: () => null },
+  });
+  const prior = priorEntry('minimax-token-plan');
+  cache.writeCache({ 'minimax-token-plan': prior });
+  const before = cache.readCache().routes['minimax-token-plan'];
+  const result = await collector.collect({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.FAILED);
+  assert.strictEqual(result.reason, collector.REASON.VAULT_UNREADABLE);
+  assert.deepStrictEqual(calls.adapters, [], 'no provider is called');
+  assert.deepStrictEqual(cache.readCache().routes['minimax-token-plan'], before,
+    'the prior entry survives');
+});
+
 await testAsync('a partial failure publishes the successful sibling independently', async () => {
   scratch();
   const cfg = Object.assign({}, CFG, {

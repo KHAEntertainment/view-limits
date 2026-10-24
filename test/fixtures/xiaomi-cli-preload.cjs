@@ -99,7 +99,7 @@ Module._load = function xiaomiTestLoad(id) {
     }
     return spy;
   }
-  if (id.endsWith('/lib/xiaomi-session')) {
+  if (isModuleId(id, 'xiaomi-session')) {
     const realFetchStatus = mod.fetchStatus;
     return {
       ...mod,

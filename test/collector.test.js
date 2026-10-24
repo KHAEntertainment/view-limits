@@ -144,7 +144,7 @@ await testAsync('a failed fetch keeps the prior entry VERBATIM — same age, sam
   const result = await collector.collect({ cfg, io });
   assert.strictEqual(result.outcome, collector.OUTCOME.FAILED, 'the only route failed');
   assert.strictEqual(result.published, true);
-  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'failed', error: 'HTTP 502' }]);
+  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'failed', error: 'HTTP 502', retained: true }]);
 
   const after = cache.readCache().routes['minimax-token-plan'];
   assert.deepStrictEqual(after, before, 'the prior entry is kept byte-for-byte');
@@ -339,7 +339,7 @@ await testAsync('the lock has one owner: the loser observes nothing and publishe
   assert.strictEqual(result.outcome, collector.OUTCOME.IN_PROGRESS);
   assert.strictEqual(result.published, false);
   assert.deepStrictEqual(calls.adapters, [], 'the loser calls no provider');
-  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'pending', error: null }]);
+  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'pending', error: null, retained: false }]);
   assert.strictEqual(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'), before,
     'the loser publishes nothing');
 
@@ -379,7 +379,7 @@ await testAsync('nothing eligible means no-credentials, and nothing is published
   assert.strictEqual(result.outcome, collector.OUTCOME.NO_CREDENTIALS);
   assert.strictEqual(result.published, false);
   assert.deepStrictEqual(calls.adapters, []);
-  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'skipped', error: null }]);
+  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'skipped', error: null, retained: false }]);
   assert.strictEqual(fs.existsSync(path.join(dir, 'status.json')), false, 'no cache is written');
 });
 
@@ -390,7 +390,7 @@ await testAsync('a credential store that cannot be read is a failure, never "no 
   const result = await collector.collect({ cfg, io });
   assert.strictEqual(result.outcome, collector.OUTCOME.FAILED);
   assert.strictEqual(result.reason, collector.REASON.VAULT_UNREADABLE);
-  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'failed', error: 'credential store could not be read' }]);
+  assert.deepStrictEqual(result.routes, [{ id: 'minimax-token-plan', outcome: 'failed', error: 'credential store could not be read', retained: false }]);
 });
 
 // ---- Xiaomi -----------------------------------------------------------------

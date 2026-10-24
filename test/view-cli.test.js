@@ -319,6 +319,8 @@ test('view --json emits exactly ONE envelope for a partial failure, and the fail
   const deepseek = doc.routes.find((x) => x.id === 'deepseek-direct');
   assert.strictEqual(deepseek.collection.outcome, 'completed');
   assert.match(r.stderr, /collection partial/);
+  assert.match(r.stderr, /minimax-token-plan/, 'the notice names the failed route');
+  assert.match(r.stderr, /synthetic provider failure/, 'the notice names the error');
   // The cache kept the failed route's prior entry verbatim.
   const published = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
   assert.strictEqual(published.routes['minimax-token-plan'].observedAt, '2026-10-13T09:45:00Z');

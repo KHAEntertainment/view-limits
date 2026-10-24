@@ -360,6 +360,10 @@ async function refresh(quiet, fromSessionStart = false) {
     // explicit note; they are never silently dropped.
     const ub = unmonitoredBlock(cfg);
     if (ub) process.stdout.write(ub + '\n');
+    // A failed route keeps its prior observation — so the output must still
+    // say that the fetch failed. On stdout, where the inventory printed the
+    // error before, and never under --quiet.
+    for (const line of failedRouteLines(result, 'refresh', true)) process.stdout.write(line + '\n');
   }
 }
 
@@ -1872,28 +1876,50 @@ function viewFailureEnvelope(kind) {
   };
 }
 
+// One line per FAILED route.
+//
+// A failed route keeps its prior observation — that is the point — but an old
+// fact is never a SILENT substitute for a failure: the output has to say that
+// the fetch failed, which route it was and what the error was.
+//
+// The rotate hint appears where the inventory printed it (the report's route
+// line carried it for every provider error); the view never carried one.
+function failedRouteLines(result, what, withRotate) {
+  const lines = [];
+  for (const r of (result && result.routes) || []) {
+    if (r.outcome !== collector.ROUTE_OUTCOME.FAILED) continue;
+    const error = collector.oneLine(r.error || 'unknown error');
+    const entry = result.entries && result.entries[r.id];
+    const observedAt = entry && typeof entry.observedAt === 'string' ? entry.observedAt : null;
+    const kept = (r.retained === true && observedAt)
+      ? `showing the last observation from ${observedAt}`
+      : 'no cached observation to fall back to';
+    const rotate = withRotate ? ` (rotate via /view-limits:update ${r.id})` : '';
+    lines.push(`view-limits: ${r.id} ${what} failed (${error}); ${kept}${rotate}`);
+  }
+  return lines;
+}
+
 // The collection diagnostic. It goes to STDERR: the view's stdout is the
 // approved text layout (or the one JSON envelope) and nothing else, so a
 // machine consumer never has to parse a human line.
 function collectionNotice(result) {
   if (!result) return null;
+  const lines = [];
   if (result.outcome === collector.OUTCOME.PARTIAL) {
     const failed = (result.routes || []).filter((r) => r.outcome === collector.ROUTE_OUTCOME.FAILED);
-    if (!failed.length) return null;
-    const names = failed.map((r) => `${r.id}${r.error ? ` (${r.error})` : ''}`).join(', ');
-    return `view-limits: collection partial — ${failed.length} route(s) kept their last known status: ${names}`;
-  }
-  if (result.outcome === collector.OUTCOME.IN_PROGRESS) {
-    return 'view-limits: collection in progress — another worker is refreshing; showing the last cached status';
-  }
-  if (result.outcome === collector.OUTCOME.FAILED) {
+    lines.push(`view-limits: collection partial — ${failed.length} route(s) failed`);
+  } else if (result.outcome === collector.OUTCOME.IN_PROGRESS) {
+    lines.push('view-limits: collection in progress — another worker is refreshing; showing the last cached status');
+  } else if (result.outcome === collector.OUTCOME.FAILED) {
     const detail = result.error ? ` (${result.error})` : '';
-    return `view-limits: collection failed — ${result.reason || 'unknown'}${detail}`;
+    lines.push(`view-limits: collection failed — ${result.reason || 'unknown'}${detail}`);
+  } else if (result.outcome === collector.OUTCOME.NO_CREDENTIALS) {
+    lines.push('view-limits: no credentials configured yet — showing the last cached status');
   }
-  if (result.outcome === collector.OUTCOME.NO_CREDENTIALS) {
-    return 'view-limits: no credentials configured yet — showing the last cached status';
-  }
-  return null;
+  // The failed routes are named, with their errors, on every outcome.
+  for (const line of failedRouteLines(result, 'collection', false)) lines.push(line);
+  return lines.length ? lines.join('\n') : null;
 }
 
 function viewFailure(kind, asJson) {

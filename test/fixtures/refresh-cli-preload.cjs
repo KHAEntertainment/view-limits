@@ -29,6 +29,12 @@ Module._load = function (id, ...args) {
   if (isModuleId(id, 'adapters')) return { getAdapter: () => ({
     async fetchStatus() {
       log('provider');
+      // VL_REFRESH_FAIL=1 makes the provider throw, so a test can drive the
+      // failed-fetch path (the route keeps its prior observation and the
+      // refresh says so).
+      if (process.env.VL_REFRESH_FAIL === '1') {
+        throw new Error('HTTP 502: upstream unavailable');
+      }
       const end = Date.now() + 8000;
       while (!fs.existsSync(path.join(dir, 'release'))) {
         if (Date.now() > end) throw new Error('test provider release timeout');

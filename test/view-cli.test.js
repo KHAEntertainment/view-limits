@@ -291,6 +291,8 @@ test('a native profile is carried in the JSON envelope', () => {
         },
         provenance: 'observed',
         observedAt: '2026-10-13T09:45:00Z',
+        // A CURRENT deadline: the freshness is positive evidence only.
+        freshUntil: '2099-01-01T00:00:00Z',
       },
     }],
   }, null, 2));
@@ -315,6 +317,34 @@ test('a native profile is carried in the JSON envelope', () => {
   assert.strictEqual(text.status, 0);
   assert.ok(!text.stdout.includes('claude-code'), 'the text layouts carry no profile rows');
   assert.ok(!text.stdout.includes('ambient'), 'the text layouts carry no profile rows');
+});
+
+test('a native fact with no expiry is never promoted to healthy', () => {
+  const dir = scratch();
+  writeConfig(dir, []);
+  fs.writeFileSync(path.join(dir, 'runtime.json'), JSON.stringify({
+    version: 1,
+    sessions: [],
+    harnesses: [],
+    profiles: [{
+      key: { host: 'mac', provider: 'claude-code', profileId: 'ambient' },
+      nativeRateLimits: {
+        value: { provider: 'claude-code', available: true, fiveHour: { usedPercent: 36 } },
+        provenance: 'observed',
+        observedAt: '2026-10-13T09:45:00Z',
+        freshUntil: null,
+      },
+    }],
+  }, null, 2));
+  const r = vl(dir, ['view', '--json']);
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.profiles.length, 1);
+  assert.strictEqual(doc.profiles[0].state, 'unknown', 'no expiry means no state');
+  assert.strictEqual(doc.profiles[0].freshness, 'unknown');
+  assert.ok(doc.profiles[0].reasonCodes.includes('freshness-unproven'));
+  assert.strictEqual(doc.profiles[0].windows.length, 1, 'the typed windows are kept');
+  assert.strictEqual(doc.profiles[0].windows[0].remainingRatio, 0.64);
 });
 
 test('an unknown flag is a usage error', () => {

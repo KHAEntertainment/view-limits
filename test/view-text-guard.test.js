@@ -34,8 +34,10 @@ const SOURCE = fs.readFileSync(path.resolve(__dirname, '..', 'lib', 'view-model.
 
 // The renderers that build a rendered line, and the helpers they call.
 const SCANNED = [
+  'renderViewText',  // both layouts' line assembly
   'expandedRows',    // the expanded layout's rows
   'condensedRows',   // the condensed layout's rows
+  'summaryLine',     // the summary line
   'viewNote',        // the note cell
   'formatResetAt',   // the reset cell
   'countsText',      // the raw counts cell
@@ -44,21 +46,26 @@ const SCANNED = [
   'withLastSeen',    // the last-seen suffix
   'barFor',          // the bar
   'formatCount',     // the count formatter
+  'pctLabel',        // the percentage formatter
+  'windowLabel',     // the window label
+  'providerLabel',   // the display name
 ];
 
 // The allowed interpolation forms, named explicitly.
+//
+// The rule is on the WHOLE expression, not on a prefix: an operand is
+// allowed only when the expression IS one of these forms. A bare local is
+// NOT allowed - a provider string bound to a local first would slip through
+// - and neither is a `+` composite (`textCell('') + route.stateReason`).
 const ALLOWED = [
-  [/^textCell\(/, 'the one sanitizer'],
-  [/^balanceText\(/, 'the money cell, which sanitizes the currency'],
-  [/^barFor\(/, 'the numeric bar formatter'],
-  [/^formatCount\(/, 'the numeric count formatter'],
-  [/^Math\.(?:round|max)\(/, 'a numeric formatter'],
-  [/^ownLookup\(/, 'a fixed-vocabulary lookup'],
-  [/^'[^']*'\.repeat\(/, 'a fixed literal'],
+  [/^textCell\([\s\S]*\)(?:\.(?:padEnd|padStart|toUpperCase|repeat)\([\s\S]*\))?$/, 'the one sanitizer'],
+  [/^balanceText\([\s\S]*\)(?:\.(?:padEnd|padStart|toUpperCase)\([\s\S]*\))?$/, 'the money cell, which sanitizes the currency'],
+  [/^barFor\([\s\S]*\)(?:\.(?:padEnd|padStart)\([\s\S]*\))?$/, 'the numeric bar formatter'],
+  [/^formatCount\([\s\S]*\)(?:\.(?:padEnd|padStart)\([\s\S]*\))?$/, 'the numeric count formatter'],
+  [/^Math\.(?:round|max)\([\s\S]*\)(?:\.(?:padEnd|padStart|toFixed)\([\s\S]*\))?$/, 'a numeric formatter'],
+  [/^ownLookup\([\s\S]*\)(?:\.(?:padEnd|padStart)\([\s\S]*\))?$/, 'a fixed-vocabulary lookup'],
+  [/^'[^']*'\.(?:repeat|padEnd|padStart)\([\s\S]*\)$/, 'a fixed literal'],
   [/^\([\s\S]*\)\.toFixed\(\d\)$/, 'a numeric formatter'],
-  [/^`[\s\S]*`(?:\.[A-Za-z_$][\w$]*\([\s\S]*\))?$/, 'a template expression - its own interpolations are checked separately'],
-  [/^[A-Za-z_$][\w$]*$/, 'a local that was sanitized where it was produced'],
-  [/^[A-Za-z_$][\w$]*\[[\s\S]*\]$/, 'an element of such a local'],
 ];
 
 // Skip a line or block comment starting at `i` (which is the first `/`).
@@ -176,11 +183,27 @@ function topLevelConcatenations(source) {
   return out;
 }
 
-// One function's source, by matching its braces.
+// One function's source, by matching its braces. The BODY starts after the
+// parameter list, which may carry braces of its own (a destructuring
+// parameter or a default value) - taking the first `{` after the name would
+// stop at those and scan nothing.
 function functionSource(name) {
   const start = SOURCE.search(new RegExp(`^function ${name}\\(`, 'm'));
   assert.notStrictEqual(start, -1, `${name} must exist in lib/view-model.js`);
-  const open = SOURCE.indexOf('{', start);
+  let p = start;
+  while (p < SOURCE.length && SOURCE[p] !== '(') p += 1;
+  let parenDepth = 1;
+  p += 1;
+  while (p < SOURCE.length && parenDepth > 0) {
+    const c = SOURCE[p];
+    if (c === '\\') { p += 2; continue; }
+    if (c === "'" || c === '"') { p = skipString(SOURCE, p); continue; }
+    if (c === '`') { p = skipTemplate(SOURCE, p); continue; }
+    if (c === '(') parenDepth += 1;
+    else if (c === ')') parenDepth -= 1;
+    p += 1;
+  }
+  const open = SOURCE.indexOf('{', p);
   let depth = 0;
   let i = open;
   while (i < SOURCE.length) {
@@ -210,11 +233,14 @@ for (const name of SCANNED) {
     }
   }
   for (const { append, rest } of topLevelConcatenations(source)) {
-    // A concatenation of rendered text is not allowed: build the string with
-    // a template literal whose interpolations are checked above. An append of
-    // a template literal (or of an allowed call) is fine.
-    const head = rest.split('`')[0].trim() || rest;
-    const ok = append && (rest.startsWith('`') || ALLOWED.some(([re]) => re.test(head)));
+    // Every operand of a concatenation must itself be an allowed form: a
+    // template literal (whose own interpolations are checked above), an
+    // allowed call, or a fixed literal. A bare local is not - and neither is
+    // a `+` composite, whose right operand would escape the sanitizer.
+    const operand = rest.startsWith('`') ? '`a template`' : rest;
+    const ok = append
+      && (rest.startsWith('`') || ALLOWED.some(([re]) => re.test(operand)))
+      && !/\+/.test(operand);
     if (!ok) {
       findings.push(`${name}: a string concatenation (${append ? '+=' : '+'}) is not an allowed form`);
     }

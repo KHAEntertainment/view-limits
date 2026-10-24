@@ -45,7 +45,10 @@ function route(id, provider, account, resource, extra = {}) {
       periodEnd: unknown('cached-field-absent'),
       resetAt: unknown('cached-field-absent'),
       observedAt: observed('2026-10-13T09:45:00Z'),
-      freshUntil: observed('2026-10-13T09:48:00Z'),
+      // A CURRENT deadline: the freshness predicate is positive evidence
+      // only, so the fixture must carry one (the tests for the unproven and
+      // the expired cases build their own).
+      freshUntil: observed('2099-01-01T00:00:00Z'),
       freshness: 'fresh',
       source: observed('adapter'),
       ...resource,
@@ -85,8 +88,10 @@ const TZ = 'America/Los_Angeles';
       }),
       route('glm-coding-plan', 'glm', 'coding-plan', {
         state: observed('exhausted'),
-        freshness: 'stale',
         observedAt: observed('2026-10-13T09:40:00Z'),
+        // An EXPIRED deadline: the freshness predicate is positive evidence
+        // only, so a stale observation is proven by its deadline.
+        freshUntil: observed('2026-10-13T09:45:00Z'),
         windows: [{ type: 'credit', remaining: 0, limit: 100 }],
       }),
     ],
@@ -211,7 +216,9 @@ const APPROVED_CONDENSED = [
 ].join('\n');
 
 {
-  const schema = vm.buildViewSchema(approvedSnapshot);
+  // The same clock as the renderer: the example's own timestamps are relative
+  // to NOW, and the freshness predicate reads the same clock.
+  const schema = vm.buildViewSchema(approvedSnapshot, { now: NOW });
   assert.strictEqual(schema.schemaVersion, 1, 'schema version is 1');
   assert.strictEqual(schema.schemaVersion, vm.VIEW_SCHEMA_VERSION);
   assert.strictEqual(schema.status, 'ok');
@@ -234,7 +241,7 @@ const APPROVED_CONDENSED = [
   assert.strictEqual(byId['minimax-token-plan'].state, 'healthy');
   assert.strictEqual(byId['minimax-token-plan'].freshness, 'fresh');
   assert.strictEqual(byId['minimax-token-plan'].observedAt, '2026-10-13T09:45:00Z');
-  assert.strictEqual(byId['minimax-token-plan'].freshUntil, '2026-10-13T09:48:00Z');
+  assert.strictEqual(byId['minimax-token-plan'].freshUntil, '2099-01-01T00:00:00Z');
   assert.strictEqual(byId['minimax-token-plan'].balance, null, 'no balance is invented');
   assert.strictEqual(byId['minimax-token-plan'].reauth, null);
   assert.deepStrictEqual(byId['minimax-token-plan'].windows.map((w) => w.type), ['rolling-5h', 'weekly']);
@@ -407,30 +414,104 @@ const APPROVED_CONDENSED = [
   const exhausted = route('r', 'minimax', 'token-plan', { state: observed('exhausted') });
   const unknownState = route('r', 'minimax', 'token-plan', { state: observed('unknown') });
   const fresh = '2099-01-01T00:00:00Z';
-  const stale = '2020-01-01T00:00:00Z';
 
   const eligible = vm.buildViewSchema({ routes: [healthy] }, {
     gate: gateContext({ r: entry('healthy', fresh) }, { r: cfgRoute }, NOW),
-  }).routes[0];
+  }, { now: NOW }).routes[0];
   assert.strictEqual(eligible.quotaEligibility, 'eligible');
 
   const ineligible = vm.buildViewSchema({ routes: [exhausted] }, {
     gate: gateContext({ r: entry('exhausted', fresh) }, { r: cfgRoute }, NOW),
-  }).routes[0];
+  }, { now: NOW }).routes[0];
   assert.strictEqual(ineligible.quotaEligibility, 'ineligible');
   assert.ok(ineligible.reasonCodes.includes('fresh-exhausted'));
 
   const unresolved = vm.buildViewSchema({ routes: [unknownState] }, {
     gate: gateContext({ r: entry('unknown', fresh) }, { r: cfgRoute }, NOW),
-  }).routes[0];
+  }, { now: NOW }).routes[0];
   assert.strictEqual(unresolved.quotaEligibility, 'unresolved');
 
-  // A stale entry is never eligible — the gate would not act on it.
-  const staleEntry = route('r', 'minimax', 'token-plan', { state: observed('healthy'), freshness: 'stale' });
+  // A route whose observation is not current is never eligible - the gate
+  // would not act on it either.
+  const staleEntry = route('r', 'minimax', 'token-plan', {
+    state: observed('healthy'),
+    freshUntil: observed('2020-01-01T00:00:00Z'),
+  });
   const notFresh = vm.buildViewSchema({ routes: [staleEntry] }, {
-    gate: gateContext({ r: entry('healthy', stale) }, { r: cfgRoute }, NOW),
-  }).routes[0];
+    gate: gateContext({ r: entry('healthy', '2020-01-01T00:00:00Z') }, { r: cfgRoute }, NOW),
+  }, { now: NOW }).routes[0];
   assert.strictEqual(notFresh.quotaEligibility, 'unresolved');
+  assert.strictEqual(notFresh.state, 'unknown');
+}
+
+// ---- ONE freshness predicate, ONE state rule: routes and profiles alike ---
+
+{
+  // The same cases, run through the route path and the profile path. The two
+  // paths must answer identically: a missing, null or malformed deadline is
+  // UNPROVEN, never "fresh until further notice", and a non-current
+  // observation never carries a state.
+  const CASES = [
+    {
+      name: 'a current deadline',
+      observedAt: '2026-10-13T09:45:00Z', freshUntil: '2099-01-01T00:00:00Z',
+      freshness: 'fresh', state: 'healthy', reason: null,
+    },
+    {
+      name: 'an expired deadline',
+      observedAt: '2026-10-13T09:40:00Z', freshUntil: '2026-10-13T09:45:00Z',
+      freshness: 'stale', state: 'unknown', reason: 'stale-observation',
+    },
+    {
+      name: 'a missing deadline',
+      observedAt: '2026-10-13T09:45:00Z', freshUntil: null,
+      freshness: 'unknown', state: 'unknown', reason: 'freshness-unproven',
+    },
+    {
+      name: 'a malformed deadline',
+      observedAt: '2026-10-13T09:45:00Z', freshUntil: 'bad-date',
+      freshness: 'unknown', state: 'unknown', reason: 'freshness-unproven',
+    },
+    {
+      name: 'a 2020 observation without a deadline',
+      observedAt: '2020-01-01T00:00:00Z', freshUntil: null,
+      freshness: 'unknown', state: 'unknown', reason: 'freshness-unproven',
+    },
+    {
+      name: 'a missing observation time',
+      observedAt: null, freshUntil: '2099-01-01T00:00:00Z',
+      freshness: 'unknown', state: 'unknown', reason: 'freshness-unproven',
+    },
+  ];
+  for (const c of CASES) {
+    const routeSchema = vm.buildViewSchema({
+      routes: [route('r', 'minimax', 'token-plan', {
+        state: observed('healthy'),
+        observedAt: c.observedAt === null ? unknown('no-cached-observation') : observed(c.observedAt),
+        freshUntil: c.freshUntil === null ? unknown('no-cached-observation') : observed(c.freshUntil),
+      })],
+    }, { now: NOW }).routes[0];
+    const profileSchema = vm.buildViewSchema({
+      routes: [],
+      profiles: [{
+        key: { host: 'mac', provider: 'claude-code', profileId: 'ambient' },
+        nativeRateLimits: {
+          value: { provider: 'claude-code', available: true, fiveHour: { usedPercent: 36 } },
+          provenance: 'observed',
+          observedAt: c.observedAt,
+          freshUntil: c.freshUntil,
+        },
+      }],
+    }, { now: NOW }).profiles[0];
+    assert.strictEqual(routeSchema.freshness, c.freshness, `route freshness: ${c.name}`);
+    assert.strictEqual(profileSchema.freshness, c.freshness, `profile freshness: ${c.name}`);
+    assert.strictEqual(routeSchema.state, c.state, `route state: ${c.name}`);
+    assert.strictEqual(profileSchema.state, c.state, `profile state: ${c.name}`);
+    if (c.reason) {
+      assert.ok(routeSchema.reasonCodes.includes(c.reason), `route reason: ${c.name}`);
+      assert.ok(profileSchema.reasonCodes.includes(c.reason), `profile reason: ${c.name}`);
+    }
+  }
 }
 
 // ---- reauth is structured and validated ------------------------------------
@@ -571,7 +652,47 @@ function setAt(node, path, value) {
   // A route with EVERY string field populated: the provider, the account,
   // the window type, the currency, the reset, the error, the reauth URL and
   // profile, the period end, the state reason, the bindings.
-  const fixture = {
+  //
+  // The variants are the MUTUALLY EXCLUSIVE branches of the note: the reauth
+  // branch takes priority over the error branch, which takes priority over
+  // the state reason. A variant per branch, or a branch stays masked and the
+  // enumeration alone would not prove it.
+  const VARIANTS = [
+    {
+      name: 'the reauth branch',
+      resource: {
+        state: observed('unknown'),
+        reauth: { reason: 'auth-expired', url: 'https://platform.xiaomimimo.com/', profile: 'Default' },
+        error: 'provider error',
+      },
+    },
+    {
+      name: 'the error branch',
+      resource: {
+        state: observed('unknown'),
+        reauth: null,
+        error: 'provider error',
+      },
+    },
+    {
+      name: 'the state-reason branch',
+      resource: {
+        state: unknown('the reason'),
+        reauth: null,
+        error: null,
+      },
+    },
+    {
+      name: 'a known state (no note at all)',
+      resource: {
+        state: observed('healthy'),
+        reauth: null,
+        error: null,
+      },
+    },
+  ];
+
+  const base = (resource) => ({
     generatedAt: '2026-10-13T09:46:00Z',
     routes: [{
       id: 'minimax-token-plan',
@@ -584,38 +705,43 @@ function setAt(node, path, value) {
         state: observed('healthy'),
         windows: [{ type: 'rolling-5h', remaining: 72, limit: 100, resetAt: '2026-10-13T12:00:00Z' }],
         balance: { available: 8.42, currency: 'USD', spent: { daily: 1.32, weekly: 6.84 } },
-        error: 'provider error',
-        reauth: { reason: 'auth-expired', url: 'https://platform.xiaomimimo.com/', profile: 'Default' },
+        error: null,
+        reauth: null,
         basis: observed('quota-window'),
         periodEnd: observed('2026-11-07 23:59:59'),
         resetAt: observed('2026-10-13T12:00:00Z'),
         observedAt: observed('2026-10-13T09:45:00Z'),
-        freshUntil: observed('2026-10-13T09:48:00Z'),
+        freshUntil: observed('2099-01-01T00:00:00Z'),
         freshness: 'fresh',
         source: observed('adapter'),
+        ...resource,
       },
     }],
-  };
-  const cleanSchema = vm.buildViewSchema(fixture);
-  const cleanExpanded = vm.renderViewText(cleanSchema, { now: NOW, timeZone: TZ });
-  const cleanCondensed = vm.renderViewText(cleanSchema, { now: NOW, timeZone: TZ, condensed: true });
-  const fields = stringLeaves(fixture);
-  assert.ok(fields.length >= 20, `the fixture carries string fields (${fields.length})`);
+  });
+
   const controls = ['\n', '\r', '\x1b', '\u0085', '\u009b'];
-  for (const { path } of fields) {
-    for (const ch of controls) {
-      const dirty = cloneNode(fixture);
-      setAt(dirty, path, `FORGED${ch}FORGED`);
-      const schema = vm.buildViewSchema(dirty);
-      const expanded = vm.renderViewText(schema, { now: NOW, timeZone: TZ });
-      const condensed = vm.renderViewText(schema, { now: NOW, timeZone: TZ, condensed: true });
-      const where = path.join('.');
-      assert.strictEqual(expanded.length, cleanExpanded.length,
-        `the expanded text gained or lost a line for ${where}`);
-      assert.strictEqual(condensed.length, cleanCondensed.length,
-        `the condensed text gained or lost a line for ${where}`);
-      assert.ok(expanded.every((l) => !l.includes(ch)), `the raw control character reached the expanded text at ${where}`);
-      assert.ok(condensed.every((l) => !l.includes(ch)), `the raw control character reached the condensed text at ${where}`);
+  for (const variant of VARIANTS) {
+    const fixture = base(variant.resource);
+    const cleanSchema = vm.buildViewSchema(fixture);
+    const cleanExpanded = vm.renderViewText(cleanSchema, { now: NOW, timeZone: TZ });
+    const cleanCondensed = vm.renderViewText(cleanSchema, { now: NOW, timeZone: TZ, condensed: true });
+    const fields = stringLeaves(fixture);
+    assert.ok(fields.length >= 20, `${variant.name}: the fixture carries string fields (${fields.length})`);
+    for (const { path } of fields) {
+      for (const ch of controls) {
+        const dirty = cloneNode(fixture);
+        setAt(dirty, path, `FORGED${ch}FORGED`);
+        const schema = vm.buildViewSchema(dirty);
+        const expanded = vm.renderViewText(schema, { now: NOW, timeZone: TZ });
+        const condensed = vm.renderViewText(schema, { now: NOW, timeZone: TZ, condensed: true });
+        const where = `${variant.name}: ${path.join('.')}`;
+        assert.strictEqual(expanded.length, cleanExpanded.length,
+          `the expanded text gained or lost a line for ${where}`);
+        assert.strictEqual(condensed.length, cleanCondensed.length,
+          `the condensed text gained or lost a line for ${where}`);
+        assert.ok(expanded.every((l) => !l.includes(ch)), `the raw control character reached the expanded text at ${where}`);
+        assert.ok(condensed.every((l) => !l.includes(ch)), `the raw control character reached the condensed text at ${where}`);
+      }
     }
   }
 }
@@ -719,14 +845,21 @@ function setAt(node, path, value) {
       authStatus: observed('ok'),
       rateLimitStatus: observed('healthy'),
       usageUpdatedAt: observed('2026-10-13T09:45:00Z'),
-      nativeRateLimits: observed({
-        provider: 'claude-code',
-        available: true,
-        fiveHour: { usedPercent: 36, resetsAt: 1790067599749, durationMinutes: 300 },
-      }),
+      nativeRateLimits: {
+        value: {
+          provider: 'claude-code',
+          available: true,
+          fiveHour: { usedPercent: 36, resetsAt: 1790067599749, durationMinutes: 300 },
+        },
+        provenance: 'observed',
+        observedAt: '2026-10-13T09:45:00Z',
+        // A CURRENT deadline: without one the fact's currency is unproven,
+        // so the profile stays unknown (the table above pins both paths).
+        freshUntil: '2099-01-01T00:00:00Z',
+      },
     }],
   };
-  const schema = vm.buildViewSchema(snapshot);
+  const schema = vm.buildViewSchema(snapshot, { now: NOW });
   assert.strictEqual(schema.profiles.length, 1, 'the native profile is carried');
   const profile = schema.profiles[0];
   assert.deepStrictEqual(profile.identity, { host: 'mac', provider: 'claude-code', profileId: 'ambient' });
@@ -741,6 +874,27 @@ function setAt(node, path, value) {
   assert.strictEqual(profile.windows[0].limit, 100);
   assert.deepStrictEqual(profile.reasonCodes, []);
 
+  // A native fact with NO expiry is not fresh until further notice: its
+  // currency is unproven, so the profile keeps its identity and its typed
+  // windows but never claims a state.
+  const unproven = vm.buildViewSchema({
+    routes: [],
+    profiles: [{
+      key: { host: 'mac', provider: 'claude-code', profileId: 'ambient' },
+      nativeRateLimits: {
+        value: { provider: 'claude-code', available: true, fiveHour: { usedPercent: 36 } },
+        provenance: 'observed',
+        observedAt: '2026-10-13T09:45:00Z',
+        freshUntil: null,
+      },
+    }],
+  }, { now: NOW }).profiles[0];
+  assert.strictEqual(unproven.state, 'unknown');
+  assert.strictEqual(unproven.freshness, 'unknown');
+  assert.ok(unproven.reasonCodes.includes('freshness-unproven'));
+  assert.strictEqual(unproven.windows.length, 1, 'the typed windows are kept');
+  assert.strictEqual(unproven.windows[0].remainingRatio, 0.64);
+
   // No native facts: the profile is kept, its state unknown, never promoted.
   const unknownNative = vm.buildViewSchema({
     routes: [],
@@ -748,7 +902,7 @@ function setAt(node, path, value) {
       key: { host: 'mac', provider: 'codex', profileId: 'ambient' },
       nativeRateLimits: unknown('traycer-field-absent'),
     }],
-  });
+  }, { now: NOW });
   assert.strictEqual(unknownNative.profiles.length, 1);
   assert.strictEqual(unknownNative.profiles[0].state, 'unknown');
   assert.strictEqual(unknownNative.profiles[0].freshness, 'unknown');

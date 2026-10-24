@@ -66,7 +66,7 @@ const { validProfile } = require('../lib/cookies/chrome');
 const { buildHelper } = require('../lib/helper-install');
 // Phase 0 (Issue #35): transport-neutral view model — owns the presentation
 // layer's rendering; vl.js only joins its pre-formatted text lines.
-const { buildViewModel, reauthNote, buildViewSchema, buildCollectionBlock, renderViewText, VIEW_SCHEMA_VERSION } = require('../lib/view-model');
+const { buildViewModel, reauthNote, buildViewSchema, buildCollectionBlock, renderViewText, VIEW_SCHEMA_VERSION, escapeControlChars } = require('../lib/view-model');
 // Issue #60: the shared live collector. It is the ONE place a live collection
 // happens — the refresh-worker ownership, the adapter fan-out and the cache
 // publish — so the refresh and the view cannot drift apart. The gate and the
@@ -1884,20 +1884,31 @@ function viewFailureEnvelope(kind) {
 //
 // The rotate hint appears where the inventory printed it (the report's route
 // line carried it for every provider error); the view never carried one.
+//
+// Every interpolated value passes through the #88 control-character escaper
+// (lib/view-model.js#escapeControlChars): a provider error body may carry
+// ESC / C1 / BEL, and those bytes must never reach a terminal raw (B2).
 function failedRouteLines(result, what, withRotate) {
   const lines = [];
   for (const r of (result && result.routes) || []) {
     if (r.outcome !== collector.ROUTE_OUTCOME.FAILED) continue;
-    const error = collector.oneLine(r.error || 'unknown error');
+    const error = diagText(r.error || 'unknown error');
     const entry = result.entries && result.entries[r.id];
     const observedAt = entry && typeof entry.observedAt === 'string' ? entry.observedAt : null;
     const kept = (r.retained === true && observedAt)
-      ? `showing the last observation from ${observedAt}`
+      ? `showing the last observation from ${diagText(observedAt)}`
       : 'no cached observation to fall back to';
-    const rotate = withRotate ? ` (rotate via /view-limits:update ${r.id})` : '';
-    lines.push(`view-limits: ${r.id} ${what} failed (${error}); ${kept}${rotate}`);
+    const rotate = withRotate ? ` (rotate via /view-limits:update ${diagText(r.id)})` : '';
+    lines.push(`view-limits: ${diagText(r.id)} ${what} failed (${error}); ${kept}${rotate}`);
   }
   return lines;
+}
+
+// The diagnostic text boundary: fold whitespace, then escape control
+// characters (B2). Every diagnostic sink — the refresh failure line and the
+// view's stderr notices — uses it.
+function diagText(value) {
+  return escapeControlChars(collector.oneLine(value === null || value === undefined ? '' : String(value)));
 }
 
 // The collection diagnostic. It goes to STDERR: the view's stdout is the
@@ -1912,10 +1923,12 @@ function collectionNotice(result) {
   } else if (result.outcome === collector.OUTCOME.IN_PROGRESS) {
     lines.push('view-limits: collection in progress — another worker is refreshing; showing the last cached status');
   } else if (result.outcome === collector.OUTCOME.FAILED) {
-    const detail = result.error ? ` (${result.error})` : '';
-    lines.push(`view-limits: collection failed — ${result.reason || 'unknown'}${detail}`);
+    const detail = result.error ? ` (${diagText(result.error)})` : '';
+    lines.push(`view-limits: collection failed — ${diagText(result.reason || 'unknown')}${detail}`);
   } else if (result.outcome === collector.OUTCOME.NO_CREDENTIALS) {
     lines.push('view-limits: no credentials configured yet — showing the last cached status');
+  } else if (result.native && result.native.outcome === 'failed') {
+    lines.push(`view-limits: native collection failed — ${diagText(result.native.error || 'unknown error')}`);
   }
   // The failed routes are named, with their errors, on every outcome.
   for (const line of failedRouteLines(result, 'collection', false)) lines.push(line);

@@ -121,6 +121,22 @@ test('a multi-line provider error folds into exactly one line, and no fragment l
   }
 });
 
+test('terminal control characters (ESC, C1, BEL) never reach stdout raw', () => {
+  const dir = scratch();
+  const r = refresh(dir, [], { VL_REFRESH_FAIL_CONTROLS: '1' });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  // The fixture error carries ESC, C1 CSI and BEL.
+  assert.ok(!r.stdout.includes('\u001b'), 'no raw ESC in stdout');
+  assert.ok(!r.stdout.includes('\u009b'), 'no raw C1 CSI in stdout');
+  assert.ok(!r.stdout.includes('\u0007'), 'no raw BEL in stdout');
+  // The escaped forms are present on the single failure line.
+  assert.ok(r.stdout.includes('\\u001b[2J'), 'the ESC is escaped (\\u001b)');
+  assert.ok(r.stdout.includes('\\u009b31m'), 'the C1 CSI is escaped (\\u009b)');
+  assert.ok(r.stdout.includes('\\u0007'), 'BEL is escaped (\\u0007)');
+  const failureLines = r.stdout.split('\n').filter((l) => l.includes('refresh failed'));
+  assert.strictEqual(failureLines.length, 1, 'exactly one failure line');
+});
+
 if (failures) {
   console.error(`\n${failures} refresh failure test(s) failed`);
   process.exit(1);

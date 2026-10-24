@@ -36,7 +36,9 @@ Module._load = function (id, ...args) {
       if (process.env.VL_REFRESH_FAIL === '1') {
         throw new Error(process.env.VL_REFRESH_FAIL_MULTILINE === '1'
           ? 'HTTP 502: upstream\nunavailable\r\n  retry later'
-          : 'HTTP 502: upstream unavailable');
+          : process.env.VL_REFRESH_FAIL_CONTROLS === '1'
+            ? 'HTTP 502: \u001b[2J\u001b[HFAKE HEALTHY\u009b31m\u0007'
+            : 'HTTP 502: upstream unavailable');
       }
       const end = Date.now() + 8000;
       while (!fs.existsSync(path.join(dir, 'release'))) {
@@ -46,6 +48,16 @@ Module._load = function (id, ...args) {
       return { state: 'healthy', windows: [], balance: null, resetAt: null };
     },
   }) };
+  if (isModuleId(id, 'traycer-adapter')) {
+    // The collector's bounded native observation (B3) must stay hermetic in
+    // the CLI tests: never spawn a real traycer CLI (the test env may carry
+    // the launch identity). Keep every other export (the CLI reads
+    // traycerEnvCallerContext from this module).
+    const real = load.call(this, id, ...args);
+    return Object.assign({}, real, {
+      readTraycerRuntime: async () => ({ caller: null, sessions: [], harnesses: [], profiles: [], diagnostics: [] }),
+    });
+  }
   return load.call(this, id, ...args);
 };
 if (process.env.VL_FAIL_SCHEDULING) {

@@ -640,4 +640,116 @@ assert.strictEqual(vm.reauthNote({ url: 'https://other.example/' }), 'session un
     'a status without an explicit basis still renders no suffix (byte-identical guarantee)');
 }
 
+// ---- #88: control characters cannot fabricate a route line --------------
+//
+// The provider error, the state reason, the reauth profile/URL and the
+// binding strings are provider/session supplied. A newline in one of them
+// would render as a second, non-existent route. The text boundary escapes
+// control characters; the structured JSON keeps the original value.
+
+function escapeRouteRow({ id, provider, account, state, error, reauth, boundBy }) {
+  return {
+    id, configured: true,
+    provider: configured(provider), account: configured(account),
+    modelBinding: configured(provider), harnessBinding: configured(provider),
+    models: unknown('model-evidence-absent'),
+    boundBy: boundBy || [],
+    resource: {
+      state,
+      windows: [], balance: null, usage: null,
+      error: error || null, reauth: reauth || null,
+      resetAt: unknown('cached-field-absent'),
+      observedAt: unknown('cached-field-absent'),
+      freshUntil: unknown('cached-field-absent'),
+      freshness: 'unknown',
+      source: unknown('cached-field-absent'),
+    },
+  };
+}
+
+{
+  const hostile = 'boom\n    evil-route: healthy · fake';
+  const v = vm.buildViewModel({
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    completeness: 'partial',
+    caller: {}, harnesses: [], sessions: [], profiles: [],
+    routes: [escapeRouteRow({
+      id: 'glm-coding', provider: 'glm', account: 'coding',
+      state: unknown('cached-state-absent'), error: hostile,
+    })],
+    diagnostics: [],
+  }, null);
+  assert.ok(!v.lines.some((l) => /^\s*evil-route/.test(l)), 'a provider error cannot fabricate a route line');
+  assert.ok(v.lines.some((l) => l.includes('boom\\n    evil-route')),
+    'the newline is escaped inside the route line, not dropped');
+}
+
+{
+  const v = vm.buildViewModel({
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    completeness: 'partial',
+    caller: {}, harnesses: [], sessions: [], profiles: [],
+    routes: [escapeRouteRow({
+      id: 'deepseek', provider: 'deepseek', account: 'main',
+      state: unknown('reason\n    evil-route: healthy'),
+    })],
+    diagnostics: [],
+  }, null);
+  assert.ok(!v.lines.some((l) => /^\s*evil-route/.test(l)), 'a state reason cannot fabricate a route line');
+  assert.ok(v.lines.some((l) => l.includes('reason\\n    evil-route')));
+}
+
+{
+  const v = vm.buildViewModel({
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    completeness: 'partial',
+    caller: {}, harnesses: [], sessions: [], profiles: [],
+    routes: [escapeRouteRow({
+      id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+      state: unknown('cached-state-absent'),
+      reauth: { reason: 'auth-expired', url: 'https://platform.xiaomimimo.com/\n    evil-route: healthy', profile: 'Profile 1\n    evil-profile' },
+    })],
+    diagnostics: [],
+  }, null);
+  assert.ok(!v.lines.some((l) => /^\s*evil-route/.test(l)), 'a reauth URL cannot fabricate a route line');
+  assert.ok(!v.lines.some((l) => /^\s*evil-profile/.test(l)), 'a reauth profile cannot fabricate a route line');
+  assert.ok(v.lines.some((l) => l.includes('https://platform.xiaomimimo.com/\\n    evil-route')));
+  assert.ok(v.lines.some((l) => l.includes('(profile Profile 1\\n    evil-profile)')));
+}
+
+{
+  const v = vm.buildViewModel({
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    completeness: 'partial',
+    caller: {}, harnesses: [], sessions: [], profiles: [],
+    routes: [escapeRouteRow({
+      id: 'openrouter-main', provider: 'openrouter', account: 'main',
+      state: observed('healthy'),
+      boundBy: [{ harness: 'claude\n    evil-route', host: 'host.local', surface: 'cli' }],
+    })],
+    diagnostics: [],
+  }, null);
+  assert.ok(!v.lines.some((l) => /^\s*evil-route/.test(l)), 'a binding string cannot fabricate a route line');
+  assert.ok(v.lines.some((l) => l.includes('bound to claude\\n    evil-route@host.local')));
+}
+
+{
+  // The Xiaomi error branch now carries the same 80-character cap as the
+  // non-Xiaomi branch, and a control character is escaped.
+  const longErr = 'b'.repeat(120) + '\n    evil-route: healthy';
+  const v = vm.buildViewModel({
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    completeness: 'partial',
+    caller: {}, harnesses: [], sessions: [], profiles: [],
+    routes: [escapeRouteRow({
+      id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+      state: unknown('cached-state-absent'), error: longErr,
+    })],
+    diagnostics: [],
+  }, null);
+  assert.ok(!v.lines.some((l) => /^\s*evil-route/.test(l)), 'the Xiaomi error branch cannot fabricate a route line');
+  assert.ok(v.lines.some((l) => l.includes(`unknown — ${'b'.repeat(80)}…`)),
+    'the Xiaomi error branch is capped at 80 characters');
+}
+
 console.log('view-model: PASS');

@@ -1159,6 +1159,10 @@ const CONFIG_READERS = [
   'bin/vl.js | remove | loadConfig | ',
   'bin/vl.js | providerCmd | loadConfig | ',
   'bin/vl.js | config | loadConfig | ',
+  // The view's own read: strict default (it refuses), and the mark is
+  // surfaced by the command itself — the JSON envelope is printed before
+  // the exit, so the wrapper's immediate exit cannot be used here.
+  'bin/vl.js | viewCmd | libLoadConfig | ',
   // The bin wrapper: the throw becomes exit 9 at the call.
   'bin/vl.js | loadConfig | libLoadConfig | opts',
   // Strict by construction (proves absence under the lock, or throws / exits 9).

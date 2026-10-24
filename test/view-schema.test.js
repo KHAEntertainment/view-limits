@@ -426,12 +426,14 @@ const APPROVED_CONDENSED = [
   assert.strictEqual(ineligible.quotaEligibility, 'ineligible');
   assert.ok(ineligible.reasonCodes.includes('fresh-exhausted'));
 
-  // The gate ALLOWS an unknown but current, non-exhausted entry, so the
-  // eligibility follows it: the view does not copy the rule, it reads it.
+  // The gate ALLOWS an unknown but current, non-exhausted entry - it fails
+  // open - but a fail-open allow proves nothing about the quota, so the
+  // eligibility stays unresolved.
   const allowed = vm.buildViewSchema({ routes: [unknownState] }, {
     gate: gateContext({ r: entry('unknown', fresh) }, { r: cfgRoute }, NOW),
   }, { now: NOW }).routes[0];
-  assert.strictEqual(allowed.quotaEligibility, 'eligible');
+  assert.strictEqual(allowed.quotaEligibility, 'unresolved');
+  assert.ok(allowed.reasonCodes.includes('state-unknown'));
 
   // A route whose observation is not current is never eligible - the gate
   // would not act on it either.
@@ -464,6 +466,9 @@ const APPROVED_CONDENSED = [
     { name: 'a malformed observation time', observedAt: 'bad-date', freshUntil: '2026-10-13T09:48:00Z', state: 'healthy' },
     { name: 'an obsolete revision', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:48:00Z', state: 'healthy', configRevision: 'an-older-revision' },
     { name: 'a matching revision', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:48:00Z', state: 'healthy', configRevision: current },
+    { name: 'a fresh unknown state', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:48:00Z', state: 'unknown' },
+    { name: 'a fresh state outside the enum', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:48:00Z', state: 'bogus' },
+    { name: 'a fresh constrained state', observedAt: '2026-10-13T09:45:00Z', freshUntil: '2026-10-13T09:48:00Z', state: 'constrained' },
   ];
   for (const c of CASES) {
     const entry = { routeId: 'r', observedAt: c.observedAt, freshUntil: c.freshUntil, status: { state: c.state } };
@@ -471,9 +476,9 @@ const APPROVED_CONDENSED = [
     // The gate is CALLED, never copied: the expectation is what the gate
     // decides, and the view must match it.
     const decision = decide({ route: cfgRoute, entry, now: NOW, config: { gate: { mode: 'deny' } } });
-    const expected = decision.action === 'deny'
-      ? 'ineligible'
-      : (decision.refresh === true ? 'unresolved' : 'eligible');
+    // The gate is CALLED, never copied. A plain allow is the gate failing
+    // open: it proves nothing about the quota, so only a state the gate
+    // could read as capacity makes the route eligible.
     assert.strictEqual(typeof decision.action, 'string', `the gate decided: ${c.name}`);
     const view = vm.buildViewSchema({
       routes: [route('r', 'minimax', 'token-plan', {
@@ -482,8 +487,19 @@ const APPROVED_CONDENSED = [
         freshUntil: c.freshUntil === null ? unknown('no-cached-observation') : observed(c.freshUntil),
       })],
     }, { gate: gateContext({ r: entry }, { r: cfgRoute }, NOW), now: NOW }).routes[0];
+    const expected = decision.action === 'deny'
+      ? 'ineligible'
+      : (decision.refresh === true
+        ? 'unresolved'
+        : (['healthy', 'constrained'].includes(entry.status.state) && view.freshness === 'fresh'
+          ? 'eligible'
+          : 'unresolved'));
     assert.strictEqual(view.quotaEligibility, expected,
       `the eligibility follows the gate's decision: ${c.name} (gate: ${decision.action}${decision.refresh ? '+refresh' : ''})`);
+    if (view.state === 'unknown') {
+      assert.notStrictEqual(view.quotaEligibility, 'eligible',
+        `an unknown state is never eligible: ${c.name}`);
+    }
   }
 }
 

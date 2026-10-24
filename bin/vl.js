@@ -1965,6 +1965,14 @@ function sessionStart() {
   // Opt-in: an unconfirmed read is reported through the systemMessage below;
   // exit 9 from a hook would surface as a hook error instead.
   const cfg = loadConfig({ display: true });
+  // Every exit below either carries this notice or defers to it: a branch
+  // that acknowledged something else and exited first would leave the user
+  // with reassurance and no word that config.json was not read.
+  const notice = unconfirmedNotice(cfg);
+  const say = (msg) => {
+    process.stdout.write(JSON.stringify({ systemMessage: `view-limits: ${msg}` }));
+    process.exit(0);
+  };
   // Xiaomi counts as configured from config metadata alone — never vault.has.
   const hasCreds = cfg.routes.some((r) => (isXiaomi(r) ? true : vault.has(r.id)));
   // Surface any fresh credential receipt and ack it (session-start already
@@ -1972,38 +1980,34 @@ function sessionStart() {
   const receiptMsg = formatReceipt(receiptFact(dataDir()));
   if (receiptMsg) {
     ackReceipt(dataDir());
-    if (hasCreds) {
-      process.stdout.write(JSON.stringify({ systemMessage: 'view-limits: ' + receiptMsg + '.' }));
-    } else {
-      process.stdout.write(JSON.stringify({
-        systemMessage: 'view-limits: ' + receiptMsg + '. ' +
-          'Run /view-limits to refresh, or /view-limits:setup to add more provider keys.',
-      }));
-    }
-    process.exit(0);
+    // The rotation happened and is reported either way. On an unconfirmed
+    // read the notice replaces the refresh/add-keys guidance, which assumes
+    // the document was read.
+    if (notice) say(`${receiptMsg}. ${notice}`);
+    if (hasCreds) say(`${receiptMsg}.`);
+    say(`${receiptMsg}. Run /view-limits to refresh, or /view-limits:setup to add more provider keys.`);
   }
-  if (hasCreds) process.exit(0);
+  if (hasCreds && !notice) process.exit(0);
+  // The two migration branches below run only when the migration found
+  // config.json absent. A lock-free read of an absent file is marked
+  // inconclusive, and that is the absence the branch already accounts for,
+  // so only a corrupt mark (a file that appeared, unreadable, since) is
+  // added to them.
+  const corrupt = configCorrupt(cfg) ? notice : null;
   // The one-time migration could not run this session. "No credentials
   // configured" would be false on an upgrade whose keys are stored but
   // unreadable, so say what actually happened. systemMessage is shown to the
   // user and never enters the model's context; the text is fixed, with no
   // path, error text or credential material in it.
   if (migration && migration.reason === 'vault-unreadable') {
-    process.stdout.write(JSON.stringify({ systemMessage: `view-limits: ${MIGRATION_VAULT_UNREADABLE}` }));
-    process.exit(0);
+    say(corrupt ? `${MIGRATION_VAULT_UNREADABLE} ${corrupt}` : MIGRATION_VAULT_UNREADABLE);
   }
   // Another process (the async SessionStart refresh) holds the migration
   // lock and may be migrating right now: the state is in flux, so say nothing
   // rather than a nudge that could be wrong. It is re-evaluated next session.
-  if (migration && migration.reason === 'lock-busy') process.exit(0);
-  if (unconfirmedNotice(cfg)) {
-    process.stdout.write(JSON.stringify({ systemMessage: `view-limits: ${unconfirmedNotice(cfg)}` }));
-    process.exit(0);
-  }
-  process.stdout.write(JSON.stringify({
-    systemMessage: 'view-limits: no credentials configured yet. Run /view-limits:setup to add your provider keys.',
-  }));
-  process.exit(0);
+  if (migration && migration.reason === 'lock-busy' && !corrupt) process.exit(0);
+  if (notice) say(notice);
+  say('no credentials configured yet. Run /view-limits:setup to add your provider keys.');
 }
 
 // ---- dispatch ---------------------------------------------------------------

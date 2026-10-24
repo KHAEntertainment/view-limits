@@ -1386,6 +1386,92 @@ test('A: each opt-in site surfaces the CORRUPT notice for a corrupt document —
   for (const r of [rep, ss, gate, rec, warm]) assert.deepStrictEqual(r.j.read(r.j.net), [], 'a provider was called on a corrupt document');
 });
 
+const receipts = require('../lib/receipts');
+const RECEIPT_ACK = /credentials rotated for kimi-code-plan at /;
+const freshReceipt = (dir) => receipts.writeReceipt(dir, { outcome: receipts.OUTCOME_SUBMITTED, routeIds: ['kimi-code-plan'] });
+
+test('A1: a corrupt config.json plus a fresh receipt — session-start reports BOTH the rotation and the corrupt notice', () => {
+  // The reviewer's reproduction: a broken file-vault document, a receipt from
+  // the real writer, the real darwin default (Keychain) restored and refused.
+  const broken = '{ "vault": { "backend": "file" }, "routes": [ ';
+  const dir = scratch();
+  fs.writeFileSync(path.join(dir, 'config.json'), broken);
+  freshReceipt(dir);
+  const keychain = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vl-81-keychain-')), 'journal');
+  const r = run(dir, ['session-start'], journals(), {
+    NODE_OPTIONS: `--require=${preload} --require=${keychainPreload}`, VL_KEYCHAIN_JOURNAL: keychain,
+  });
+  assert.strictEqual(r.status, 0, `the SessionStart hook failed: ${r.stderr}`);
+  const msg = JSON.parse(r.stdout).systemMessage;
+  assert.match(msg, RECEIPT_ACK, 'the rotation was not acknowledged');
+  assert.match(msg, CORRUPT_NOTICE, 'the receipt branch dropped the corrupt notice');
+  assert.doesNotMatch(msg, /Run \/view-limits to refresh/, 'refresh guidance was given for a document that was not read');
+  assert.doesNotMatch(msg, RETRY_NOTICE);
+  assert.strictEqual(r.stderr, '');
+  assert.strictEqual(receipts.formatReceipt(receipts.receiptFact(dir)), null, 'the receipt was not consumed');
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), broken, 'config.json changed');
+  assert.strictEqual(fs.existsSync(keychain) ? fs.readFileSync(keychain, 'utf8') : '', '', 'session-start reached the Keychain');
+  assert.deepStrictEqual(r.j.read(r.j.net), [], 'a provider was called');
+});
+
+// The sweep: every early exit of sessionStart. Each exit either carries the
+// notice or defers to it; none acknowledges something else and leaves the
+// user without it. The vault probe in the migration reads config.json first,
+// so the fault is aimed at sessionStart's OWN read, found by a clean run of
+// an identically prepared dir.
+test('A1 sweep: every early exit of session-start carries a corrupt notice — receipt, vault-unreadable, lock-busy', () => {
+  const lockHeld = (dir, fn) => {
+    const held = lifecycle.acquireMutationLock(dir);
+    assert.ok(held.ok, 'premise: the test holds the lock');
+    try { return fn(); } finally { held.release(); }
+  };
+  const branches = [
+    { name: 'receipt', prepare: () => { const dir = seeded([builtInRoute('kimi-code-plan')]); freshReceipt(dir); return dir; },
+      also: RECEIPT_ACK, around: (dir, fn) => fn() },
+    { name: 'vault-unreadable', skip: IS_ROOT, prepare: () => upgradeWith('kimi-code-plan'),
+      also: /the credential vault could not be read/, around: withLockedSecrets },
+    { name: 'lock-busy', prepare: () => upgradeWith('kimi-code-plan'), also: null, around: lockHeld },
+  ];
+  for (const b of branches) {
+    if (b.skip) { console.log(`    (${b.name} skipped: root ignores mode bits)`); continue; }
+    const probe = b.prepare();
+    const { reads } = b.around(probe, () => corruptRun(probe, ['session-start'], 0));
+    const own = reads.find((s) => s.site === 'sessionStart');
+    assert.ok(own, `premise: ${b.name}: sessionStart reads config.json: ${JSON.stringify(reads)}`);
+    const dir = b.prepare();
+    const { r, steps } = b.around(dir, () => corruptRun(dir, ['session-start'], own.attempt));
+    assert.deepStrictEqual(steps, [{ step: 'corrupt', attempt: own.attempt, name: 'config.json' }], `premise: ${b.name}: only sessionStart's read was broken`);
+    assert.strictEqual(r.status, 0, `${b.name}: ${r.stderr}`);
+    const msg = JSON.parse(r.stdout).systemMessage;
+    assert.match(msg, CORRUPT_NOTICE, `${b.name}: the corrupt notice is missing: ${msg}`);
+    assert.doesNotMatch(msg, RETRY_NOTICE, `${b.name}: the retry notice`);
+    if (b.also) assert.match(msg, b.also, `${b.name}: the branch's own message was dropped: ${msg}`);
+    assert.doesNotMatch(msg, /no credentials configured yet|Run \/view-limits to refresh/, `${b.name}: guidance for a document that was not read`);
+  }
+});
+
+test('A1 sweep: an inconclusive read plus a fresh receipt reports both; the migration branches keep their output for an absent config', () => {
+  const dir = seeded([builtInRoute('kimi-code-plan')]);
+  freshReceipt(dir);
+  const { r, steps } = churnRun(dir, ['session-start'], { at: OWN_READ() });
+  assert.ok(EXHAUSTED(steps), `premise: ${JSON.stringify(steps)}`);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const msg = JSON.parse(r.stdout).systemMessage;
+  assert.match(msg, RECEIPT_ACK, 'the rotation was not acknowledged');
+  assert.match(msg, RETRY_NOTICE, 'the receipt branch dropped the retry notice');
+  assert.doesNotMatch(msg, /Run \/view-limits to refresh/);
+  // There config.json was just found absent, and the inconclusive mark on an
+  // absent file is that same absence: the vault notice stays exact (pinned
+  // below by "session-start reports an unreadable vault…") and lock-busy stays silent.
+  const busy = upgradeWith('kimi-code-plan');
+  const held = lifecycle.acquireMutationLock(busy);
+  assert.ok(held.ok, 'premise: the test holds the lock');
+  let quiet;
+  try { quiet = run(busy, ['session-start']); } finally { held.release(); }
+  assert.strictEqual(quiet.status, 0, quiet.stderr);
+  assert.strictEqual(quiet.stdout, '', 'lock-busy spoke while another process may be migrating');
+});
+
 test('A (second fallback): a Xiaomi writer whose base read finds config.json unparseable refuses — it never publishes from {}', () => {
   // Read 2 is the in-hold base-document read (readUserConfig). Without the
   // refusal the writer started from {} and replaced the whole document.

@@ -77,6 +77,17 @@ function refresh(dir, args = [], extraEnv = {}) {
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
+test('no credentials: refresh output is byte-identical to the pre-#60 message, and no native path runs', () => {
+  const dir = scratch();
+  const expected = 'view-limits: no credentials configured yet.\n\n' +
+    'Run /view-limits:setup to add your provider keys (auto-imports MiniMax\n' +
+    'from ~/.mmx/config.json, then opens a local browser form for the rest).\n';
+  const r = refresh(dir, [], { VL_REFRESH_NO_VAULT: '1' });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  assert.strictEqual(r.stdout, expected, 'the native-only no-credentials message is unchanged');
+  assert.strictEqual(r.stderr, '');
+});
+
 test('a failed fetch keeps the prior observation AND says so on stdout', () => {
   const dir = scratch();
   const r = refresh(dir);

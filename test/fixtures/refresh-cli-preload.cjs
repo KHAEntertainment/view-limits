@@ -25,7 +25,10 @@ cp.spawn = function (...args) {
 process.on('exit', () => log('exit', { command: process.argv[2] }));
 const load = Module._load;
 Module._load = function (id, ...args) {
-  if (isModuleId(id, 'vault')) return { has: () => true, get: () => 'fake-test-key' };
+  if (isModuleId(id, 'vault')) {
+    const noVault = process.env.VL_REFRESH_NO_VAULT === '1';
+    return { has: () => !noVault, get: () => (noVault ? null : 'fake-test-key') };
+  }
   if (isModuleId(id, 'adapters')) return { getAdapter: () => ({
     async fetchStatus() {
       log('provider');

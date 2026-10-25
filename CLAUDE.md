@@ -107,8 +107,9 @@ node bin/vl.js check <routeId>  # live-check one route (JSON)
      In the same PR, bring view-limits' entry in that repo's README up to date
      with the release: its summary line, what it does, the install command and
      the "After install" line. That README lists no current or pinned
-     versions, so there is no version pin to change there. That repo's `verify-catalog` check confirms the
-     tag resolves. Until this merges, users stay on the previous pin.
+     versions, so there is no version pin to change there. That repo's
+     `verify-catalog` check confirms the tag resolves. Until this merges,
+     users stay on the previous pin.
   3. After it merges: `claude plugin marketplace update kha-marketplace`, then
      `claude plugin update view-limits@kha-marketplace` (restart required).
 - **GitHub:** push to `KHAEntertainment` only, never `Clarit-AI` (a different

@@ -7,7 +7,7 @@
 // interpolation and every string concatenation in them.
 //
 // The ALLOWED forms are named explicitly below. A value that reaches a
-// rendered line must be
+// rendered line must be, IN ITS ENTIRETY:
 //   * textCell(...)        - the one sanitizer, at the text boundary, or
 //   * a chained form        - padEnd(n), padStart(n), toUpperCase() or
 //     repeat(n) on either the sanitizer's result or an escape-free string
@@ -15,15 +15,23 @@
 //     ALLOWED_CHAINS: a padEnd fill string, a concat/replace argument, or
 //     any argument carrying a provider field would put that field back into
 //     the cell unescaped),
-//   * a concatenation       - `+=` a template or an allowed expression; a
-//     plain `+` is never allowed, and neither is an operand that itself
-//     contains a `+` (its right operand would escape the sanitizer),
 //   * a numeric formatter   - barFor, formatCount, Math.round, Math.max,
 //                             or a numeric toFixed expression, or
 //   * a fixed-vocabulary lookup - ownLookup, whose result is one of a
-//                             fixed set of labels, or
-//   * a bare local or an element access of one - a value that was already
-//                             sanitized where it was produced.
+//     fixed set of labels.
+//
+// One allowed form AND something else is NOT an allowed form. `textCell('') +
+// route.stateReason` is not a sanitizer with a suffix - it is a
+// concatenation whose right operand was never escaped.
+//
+// So the check PARSES the expression, with one string-, template- and
+// comment-aware tokenizer, and requires that what it parses is exactly one
+// of the forms above, with nothing left over. That matters because the
+// earlier version of this guard matched a PREFIX: the regex that found the
+// call ended at the first `)` it could balance, counting parentheses inside
+// string literals as if they were syntax. So `textCell('(').concat(
+// route.stateReason, ')')` read as ONE call and passed, while the text it
+// produced carried a raw newline.
 //
 // Anything else - `route.provider`, `w.type`, `balance.currency`, a
 // template of a raw field - is a finding: it would put a provider string
@@ -76,13 +84,6 @@ const ALLOWED_CALLEES = new Set([
   'Math.max',      // a numeric formatter
 ]);
 
-// The expression must be EXACTLY one call: the argument list is matched with
-// BALANCED parentheses and the rest must be empty or a method chain, which is
-// captured so every segment of it can be checked against ALLOWED_CHAINS. A
-// greedy pattern would accept `textCell('') + String(x)`, whose right
-// operand escapes the sanitizer.
-const ONE_CALL = /^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\((?:[^()]|\([^()]*\))*\)((?:\.[A-Za-z_$][\w$]*\((?:[^()]|\([^()]*\))*\))*)$/;
-
 // The methods that may be chained, and the argument form each must take.
 //
 // The argument is part of the rule, not a detail of it: a method allow-list
@@ -106,43 +107,258 @@ const ALLOWED_CHAINS = new Map([
   ['repeat', /^(?:[A-Za-z_$][\w$]*|\d+)(?:\s*[+\-*/%]\s*(?:[A-Za-z_$][\w$]*|\d+))*$/],
 ]);
 
-// A string literal may be the receiver of a chain: its output starts from a
-// fixed, escape-free value (a `\n` escape in the literal would put a real
-// newline in it, so backslashes are out), and then only through a method
-// ALLOWED_CHAINS lists, with that method's argument form.
-const LITERAL_CALL = /^'(?:[^'\\]*)'\.([A-Za-z_$][\w$]*)\(((?:[^()]|\([^()]*\))*)\)$/;
-const NUMERIC_CALL = /^\([^()]*\)\.toFixed\(\d\)$/;
+// ---- the tokenizer --------------------------------------------------------
+//
+// One small scanner, aware of the three things a regex cannot see: strings,
+// template literals, and comments. It yields the significant tokens of a
+// region - a string or a template is ONE token, so a parenthesis inside one
+// can never be mistaken for syntax.
+//
+// A token: { type, text, start, end, nlBefore }
+//   type: 'name' | 'number' | 'string' | 'template' | 'regex' | 'punct'
+//   nlBefore: a newline was crossed before this token.
 
-// A numeric literal carries no text, so appending one cannot put a provider
-// field into a cell: `counts[state] += 1;` is a counter, not rendered text.
-const NUMERIC_OPERAND = /^\d+(?:\.\d+)?$/;
+// The operators, longest first, so `===` is one token and not three, and
+// `?.` is not `.` followed by `?`.
+const OPERATORS = [
+  '>>>=', '...', '===', '!==', '**=', '<<=', '>>=', '>>>', '&&=', '||=', '??=',
+  '=>', '==', '!=', '<=', '>=', '&&', '||', '??', '?.', '++', '--', '+=', '-=',
+  '*=', '/=', '%=', '&=', '|=', '^=', '**', '<<', '>>',
+  '+', '-', '*', '/', '%', '=', '<', '>', '!', '&', '|', '^', '~', '?', ':',
+  '(', ')', '[', ']', '{', '}', ',', ';', '.', '@', '#',
+];
 
-// Every segment of a captured chain must be a listed method taking its
-// listed argument form, and the segments must cover the whole suffix.
-function chainAllowed(suffix) {
-  const segment = /\.([A-Za-z_$][\w$]*)\(((?:[^()]|\([^()]*\))*)\)/g;
-  let cursor = 0;
-  let match = segment.exec(suffix);
-  while (match !== null) {
-    if (match.index !== cursor) return false;
-    cursor = segment.lastIndex;
-    const rule = ALLOWED_CHAINS.get(match[1]);
-    if (!rule || !rule.test(match[2].trim())) return false;
-    match = segment.exec(suffix);
+// After one of these a newline does NOT end the statement: the expression
+// continues on the next line.
+const CANNOT_START_A_STATEMENT = new Set([
+  ')', ']', '}', '++', '--', '.', '?.', '?', ':',
+  '&&', '||', '??', '+', '-', '*', '/', '%', '**',
+  '=', '==', '===', '!=', '!==', '<', '>', '<=', '>=',
+  '+=', '-=', '*=', '/=', '%=', '**=', '&&=', '||=', '??=',
+  '&=', '|=', '^=', '<<', '>>', '>>>', '<<=', '>>=', '>>>=',
+  ',', '=>',
+]);
+
+// After one of these the expression is still incomplete - it needs a right
+// operand - so a newline cannot end it either.
+const NEEDS_OPERAND = new Set([
+  '?', ':', '&&', '||', '??', '+', '-', '*', '/', '%', '**',
+  '=', '==', '===', '!=', '!==', '<', '>', '<=', '>=',
+  '+=', '-=', '*=', '/=', '%=', '**=', '&&=', '||=', '??=',
+  '&=', '|=', '^=', '<<', '>>', '>>>', '<<=', '>>=', '>>>=',
+  ',', '.', '?.', '=>', '!',
+]);
+
+// A regex literal starting at the `/`. Returns the index just past it, or
+// -1 if it is not one.
+function skipRegex(source, i) {
+  let j = i + 1;
+  let inClass = false;
+  while (j < source.length) {
+    const c = source[j];
+    if (c === '\\') { j += 2; continue; }
+    if (c === '[') { inClass = true; j += 1; continue; }
+    if (c === ']') { inClass = false; j += 1; continue; }
+    if (c === '\n') return -1;
+    if (c === '/' && !inClass) { j += 1; break; }
+    j += 1;
   }
-  return cursor === suffix.length;
+  while (j < source.length && /[a-z]/i.test(source[j])) j += 1;
+  return j;
 }
 
-function isAllowedExpression(expression) {
-  const literal = LITERAL_CALL.exec(expression);
-  if (literal) {
-    const rule = ALLOWED_CHAINS.get(literal[1]);
-    return !!rule && rule.test(literal[2].trim());
+// A numeric literal starting at `i`.
+function scanNumber(source, i) {
+  let j = i;
+  if (source[j] === '0' && /[xXoObB]/.test(source[j + 1] || '')) {
+    j += 2;
+    while (j < source.length && /[0-9a-fA-F_]/.test(source[j])) j += 1;
+    return j;
   }
-  if (NUMERIC_CALL.test(expression)) return true;
-  const call = ONE_CALL.exec(expression);
-  if (!call || !ALLOWED_CALLEES.has(call[1])) return false;
-  return chainAllowed(call[2]);
+  while (j < source.length && /[0-9_]/.test(source[j])) j += 1;
+  if (source[j] === '.') {
+    j += 1;
+    while (j < source.length && /[0-9_]/.test(source[j])) j += 1;
+  }
+  if (/[eE]/.test(source[j] || '')) {
+    let k = j + 1;
+    if (/[+-]/.test(source[k] || '')) k += 1;
+    if (/[0-9]/.test(source[k] || '')) {
+      j = k;
+      while (j < source.length && /[0-9_]/.test(source[j])) j += 1;
+    }
+  }
+  return j;
+}
+
+// May a `/` here begin a regex literal? Only if the previous token could not
+// have ended an expression - otherwise it is a division.
+function regexAllowed(tokens) {
+  const prev = tokens[tokens.length - 1];
+  if (!prev) return true;
+  if (prev.type === 'name' || prev.type === 'number' || prev.type === 'string'
+    || prev.type === 'template' || prev.type === 'regex') return false;
+  if (prev.type === 'punct' && (prev.text === ')' || prev.text === ']')) return false;
+  return true;
+}
+
+// The significant tokens of `source` between `start` and `end`. Comments and
+// whitespace are dropped; a newline before a token is recorded on it.
+function tokenize(source, start = 0, end = source.length) {
+  const tokens = [];
+  let i = start;
+  let nl = false;
+  while (i < end) {
+    const c = source[i];
+    if (c === '\n') { nl = true; i += 1; continue; }
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\f' || c === '\v') { i += 1; continue; }
+    if (c === '/' && source[i + 1] === '/') { const e = source.indexOf('\n', i); i = e === -1 ? end : e; continue; }
+    if (c === '/' && source[i + 1] === '*') {
+      const e = source.indexOf('*/', i + 2);
+      const stop = e === -1 ? end : e + 2;
+      if (source.slice(i, stop).includes('\n')) nl = true;
+      i = stop;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const e = skipString(source, i);
+      tokens.push({ type: 'string', text: source.slice(i, e), start: i, end: e, nlBefore: nl });
+      nl = false;
+      i = e;
+      continue;
+    }
+    if (c === '`') {
+      const e = skipTemplate(source, i);
+      tokens.push({ type: 'template', text: source.slice(i, e), start: i, end: e, nlBefore: nl });
+      nl = false;
+      i = e;
+      continue;
+    }
+    if (c === '/' && regexAllowed(tokens)) {
+      const e = skipRegex(source, i);
+      if (e !== -1) {
+        tokens.push({ type: 'regex', text: source.slice(i, e), start: i, end: e, nlBefore: nl });
+        nl = false;
+        i = e;
+        continue;
+      }
+    }
+    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(source[i + 1] || ''))) {
+      const e = scanNumber(source, i);
+      tokens.push({ type: 'number', text: source.slice(i, e), start: i, end: e, nlBefore: nl });
+      nl = false;
+      i = e;
+      continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      let e = i + 1;
+      while (e < end && /[\w$]/.test(source[e])) e += 1;
+      tokens.push({ type: 'name', text: source.slice(i, e), start: i, end: e, nlBefore: nl });
+      nl = false;
+      i = e;
+      continue;
+    }
+    let op = c;
+    for (const cand of OPERATORS) {
+      if (source.startsWith(cand, i) && i + cand.length <= end) { op = cand; break; }
+    }
+    tokens.push({ type: 'punct', text: op, start: i, end: i + op.length, nlBefore: nl });
+    nl = false;
+    i += op.length;
+  }
+  return tokens;
+}
+
+// The index of the `)` that closes the `(` at `open`, or -1.
+function matchClose(tokens, open) {
+  let depth = 0;
+  for (let j = open; j < tokens.length; j++) {
+    const t = tokens[j];
+    if (t.type !== 'punct') continue;
+    if (t.text === '(' || t.text === '[' || t.text === '{') depth += 1;
+    else if (t.text === ')' || t.text === ']' || t.text === '}') {
+      depth -= 1;
+      if (depth === 0) return j;
+    }
+  }
+  return -1;
+}
+
+// The chain that may follow a receiver: zero or more segments of
+// '.' name '(' args ')'. Every segment must be a method ALLOWED_CHAINS lists,
+// taking that method's argument form. Returns the index just past the
+// chain, or -1 if a segment is not allowed.
+function matchChain(tokens, i) {
+  let j = i;
+  while (j < tokens.length && tokens[j].type === 'punct' && tokens[j].text === '.') {
+    const name = tokens[j + 1];
+    if (!name || name.type !== 'name') return -1;
+    const open = tokens[j + 2];
+    if (!open || open.type !== 'punct' || open.text !== '(') return -1;
+    const close = matchClose(tokens, j + 2);
+    if (close === -1) return -1;
+    const rule = ALLOWED_CHAINS.get(name.text);
+    if (!rule) return -1;
+    const args = tokens.slice(j + 3, close).map((t) => t.text).join(' ').trim();
+    if (!rule.test(args)) return -1;
+    j = close + 1;
+  }
+  return j;
+}
+
+// Is `tokens` exactly one allowed form? Nothing may be left over: an
+// allowed form AND something else is not an allowed form.
+function isAllowedTokens(tokens) {
+  if (tokens.length === 0) return false;
+  const first = tokens[0];
+
+  // A string literal receiver: 'literal'.method(args). The literal must be
+  // escape-free - a `\n` inside it would put a real newline in the cell.
+  if (first.type === 'string') {
+    if (/\\/.test(first.text)) return false;
+    const end = matchChain(tokens, 1);
+    return end !== -1 && end === tokens.length;
+  }
+
+  // A parenthesized expression followed by .toFixed(n): the numeric
+  // formatter. `toFixed` coerces to a number, so it cannot carry text.
+  if (first.type === 'punct' && first.text === '(') {
+    const close = matchClose(tokens, 0);
+    if (close === -1) return false;
+    const dot = tokens[close + 1];
+    const name = tokens[close + 2];
+    const open = tokens[close + 3];
+    if (!dot || dot.type !== 'punct' || dot.text !== '.') return false;
+    if (!name || name.type !== 'name' || name.text !== 'toFixed') return false;
+    if (!open || open.type !== 'punct' || open.text !== '(') return false;
+    const close2 = matchClose(tokens, close + 3);
+    if (close2 === -1 || close2 !== tokens.length - 1) return false;
+    const digits = tokens.slice(close + 4, close2).map((t) => t.text).join('').trim();
+    return /^\d+$/.test(digits);
+  }
+
+  // A call: name ['.' name] '(' args ')' [ chain ].
+  if (first.type !== 'name') return false;
+  let j = 1;
+  let callee = first.text;
+  if (tokens[j] && tokens[j].type === 'punct' && tokens[j].text === '.') {
+    const prop = tokens[j + 1];
+    if (!prop || prop.type !== 'name') return false;
+    callee = `${first.text}.${prop.text}`;
+    j += 2;
+  }
+  const open = tokens[j];
+  if (!open || open.type !== 'punct' || open.text !== '(') return false;
+  const close = matchClose(tokens, j);
+  if (close === -1) return false;
+  if (!ALLOWED_CALLEES.has(callee)) return false;
+  const end = matchChain(tokens, close + 1);
+  return end !== -1 && end === tokens.length;
+}
+
+// Is this expression exactly one allowed form?
+function isAllowedExpression(expression) {
+  return isAllowedTokens(tokenize(expression));
 }
 
 // Skip a line or block comment starting at `i` (which is the first `/`).
@@ -174,14 +390,20 @@ function skipString(source, i) {
 function readExpression(source, i) {
   let depth = 1;
   let j = i + 1;
+  let prev = '';
   while (j < source.length && depth > 0) {
     const c = source[j];
     if (c === '\\') { j += 2; continue; }
     if (c === '/' && (source[j + 1] === '/' || source[j + 1] === '*')) { j = skipComment(source, j); continue; }
-    if (c === "'" || c === '"') { j = skipString(source, j); continue; }
-    if (c === '`') { j = skipTemplate(source, j); continue; }
+    if (c === "'" || c === '"') { j = skipString(source, j); prev = 'x'; continue; }
+    if (c === '`') { j = skipTemplate(source, j); prev = 'x'; continue; }
+    if (c === '/' && !/[\w$)\]'"]/.test(prev)) {
+      const e = skipRegex(source, j);
+      if (e !== -1) { j = e; prev = 'x'; continue; }
+    }
     if (c === '{') depth += 1;
     else if (c === '}') depth -= 1;
+    if (!/\s/.test(c)) prev = c;
     j += 1;
   }
   return { expression: source.slice(i + 1, j - 1).trim(), end: j };
@@ -235,31 +457,51 @@ function collectInterpolations(source, out = []) {
   return out;
 }
 
-// The expression that follows a `+` / `+=`: up to the end of the statement.
-// A string, a template or a comment inside it is skipped, so a `;` inside
-// one does not end the operand early. A newline ends it only at bracket
-// depth 0 - inside a call's parentheses the operand may still continue on
-// the next line.
-function operandAfter(source, start) {
-  let j = start;
+// The right-hand side of a concatenation: the WHOLE of it must be one
+// allowed form.
+//
+// A numeric literal carries no text, so appending one cannot put a provider
+// field into a cell: `counts[state] += 1;` is a counter, not rendered text.
+function isAllowedOperand(tokens) {
+  if (tokens.length === 0) return false;
+  if (tokens.length === 1 && tokens[0].type === 'number') return true;
+  // A template literal, whole and nothing else - the interpolations inside
+  // it are checked where the template was found.
+  if (tokens.length === 1 && tokens[0].type === 'template') return true;
+  return isAllowedTokens(tokens);
+}
+
+// Does the expression continue across a newline? It does when the next
+// token cannot begin a statement, or when the expression so far still needs
+// a right operand.
+function continuesAfterNewline(prev, next) {
+  if (prev && prev.type === 'punct' && NEEDS_OPERAND.has(prev.text)) return true;
+  if (next.type === 'punct' && CANNOT_START_A_STATEMENT.has(next.text)) return true;
+  return false;
+}
+
+// The tokens of the expression that follows a `+` / `+=`: to the true end
+// of the statement.
+//
+// JavaScript does not end a statement at a newline when the next token
+// cannot begin one (`&&`, `||`, `+`, `.`, ...) or when the expression is
+// still incomplete. So the reader follows the expression, not the line.
+function readRhs(tokens, start) {
   let depth = 0;
-  while (j < source.length) {
-    const c = source[j];
-    if (c === '\n') {
-      if (depth === 0) break;
-      j += 1;
-      continue;
+  let j = start;
+  let prev = null;
+  while (j < tokens.length) {
+    const t = tokens[j];
+    if (t.type === 'punct') {
+      if (t.text === '(' || t.text === '[') { depth += 1; j += 1; prev = t; continue; }
+      if (t.text === ')' || t.text === ']') { depth -= 1; j += 1; prev = t; continue; }
+      if (t.text === ';' && depth === 0) break;
     }
-    if (c === '\\') { j += 2; continue; }
-    if (c === '/' && (source[j + 1] === '/' || source[j + 1] === '*')) break;
-    if (c === "'" || c === '"') { j = skipString(source, j); continue; }
-    if (c === '`') { j = skipTemplate(source, j); continue; }
-    if (c === '(' || c === '[' || c === '{') { depth += 1; j += 1; continue; }
-    if (c === ')' || c === ']' || c === '}') { depth -= 1; j += 1; continue; }
-    if (c === ';' && depth === 0) break;
+    if (depth === 0 && j > start && t.nlBefore && !continuesAfterNewline(prev, t)) break;
+    prev = t;
     j += 1;
   }
-  return source.slice(start, j).trim();
+  return tokens.slice(start, j);
 }
 
 // Every `+` / `+=` inside the function BODY that concatenates rendered text:
@@ -270,28 +512,17 @@ function operandAfter(source, start) {
 // braces ARE the body, not a parent of it: counting from them put every
 // statement inside the function at depth >= 1, so no `+` was ever at depth 0
 // and the check never fired on anything.
-function topLevelConcatenations(source, bodyStart) {
+function topLevelConcatenations(tokens) {
   const out = [];
-  let i = bodyStart;
   let parenDepth = 0;
-  while (i < source.length) {
-    const c = source[i];
-    if (c === '\\') { i += 2; continue; }
-    if (c === '/' && (source[i + 1] === '/' || source[i + 1] === '*')) { i = skipComment(source, i); continue; }
-    if (c === "'" || c === '"') { i = skipString(source, i); continue; }
-    if (c === '`') { i = skipTemplate(source, i); continue; }
-    if (c === '(' || c === '[') { parenDepth += 1; i += 1; continue; }
-    if (c === ')' || c === ']') { parenDepth -= 1; i += 1; continue; }
-    if (c === '{' || c === '}') { i += 1; continue; }
-    if (c === '+' && parenDepth === 0) {
-      // `++` is a counter step, not a concatenation.
-      if (source[i + 1] === '+') { i += 2; continue; }
-      const append = source[i + 1] === '=';
-      out.push({ append, rest: operandAfter(source, i + (append ? 2 : 1)) });
-      i += append ? 2 : 1;
-      continue;
-    }
-    i += 1;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.type !== 'punct') continue;
+    if (t.text === '(' || t.text === '[') { parenDepth += 1; continue; }
+    if (t.text === ')' || t.text === ']') { parenDepth -= 1; continue; }
+    if (parenDepth !== 0) continue;
+    if (t.text !== '+' && t.text !== '+=') continue;
+    out.push({ append: t.text === '+=', tokens: readRhs(tokens, i + 1) });
   }
   return out;
 }
@@ -351,18 +582,11 @@ function findingsIn(source, names = SCANNED) {
         findings.push(`${name}: \${${expression}} is not an allowed form`);
       }
     }
-    for (const { append, rest } of topLevelConcatenations(text, bodyStart)) {
-      // Every operand of a concatenation must itself be an allowed form: a
-      // template literal (whose own interpolations are checked above), an
-      // allowed call, or a numeric literal - which carries no text, so it
-      // cannot put a provider field into a cell. A bare local is not - and
-      // neither is a `+` composite, whose right operand would escape the
-      // sanitizer.
-      const operand = rest.startsWith('`') ? '`a template`' : rest;
-      const ok = append
-        && (rest.startsWith('`') || isAllowedExpression(operand) || NUMERIC_OPERAND.test(operand))
-        && !/\+/.test(operand);
-      if (!ok) {
+    for (const { append, tokens } of topLevelConcatenations(tokenize(text, bodyStart))) {
+      // The WHOLE right-hand side must be one allowed form. A prefix is not
+      // enough: `1 /* c */ && route.stateReason` starts with a safe numeric
+      // literal and still appends a raw provider field.
+      if (!isAllowedOperand(tokens)) {
         findings.push(`${name}: a string concatenation (${append ? '+=' : '+'}) is not an allowed form`);
       }
     }
@@ -409,6 +633,16 @@ const ESCAPES = [
   "textCell('').toLowerCase()",
   "textCell('') + route.stateReason",
   'route.stateReason',
+  // A quoted paren hides the real closing paren of the call: the guard used
+  // to balance parens without seeing the string, so the whole chain was
+  // read as one call and accepted.
+  "textCell('(').concat(route.stateReason, ')')",
+  "textCell('(').padEnd(8, route.stateReason + ')')",
+  "textCell('(') + route.stateReason + (')')",
+  // The expression continues past a comment or a newline, so a prefix that
+  // looks safe is not the whole expression.
+  'textCell("") /* c */ || route.stateReason',
+  'textCell("")\n|| route.stateReason',
 ];
 
 // Forms lib/view-model.js actually uses: they must keep passing, so the
@@ -464,6 +698,13 @@ const CONCAT_ESCAPES = [
   "let value = 'a' + route.stateReason;",
   'value += route.stateReason;',
   "value += 'a' + route.stateReason;",
+  // The right-hand side continues past a comment or a newline: the operand
+  // is not the numeric literal it starts with.
+  'value += 1 /* c */ && route.stateReason;',
+  'value += 1\n&& route.stateReason;',
+  // A template prefix with an unchecked suffix.
+  'value += `safe`.concat(route.stateReason);',
+  'value += `safe` && route.stateReason;',
 ];
 for (const statement of CONCAT_ESCAPES) {
   const found = probeConcatFindings(statement);

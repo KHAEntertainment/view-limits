@@ -354,7 +354,7 @@ function liveRun() {
 }
 
 const TRAYCER_ENV = { TRAYCER_AGENT_ID: SELF_ID, TRAYCER_EPIC_ID: EPIC_ID };
-const CALLER_CTX = { host: 'MacBookPro.localdomain', surface: 'cli', agentId: SELF_ID, epicId: EPIC_ID };
+const CALLER_CTX = { host: 'host.example', surface: 'cli', agentId: SELF_ID, epicId: EPIC_ID };
 
 function liveSnap(dir, extraIo = {}, opts = {}) {
   const fake = liveRun();
@@ -705,7 +705,7 @@ test('cache-only surface is the invocation context; live surface is the authorit
   const cacheOnly = await snap(dir, { callerContext: CALLER_CTX });
   assert.strictEqual(cacheOnly.caller.surface.value, 'cli');
   assert.strictEqual(cacheOnly.caller.surface.source, 'callerContext');
-  assert.strictEqual(cacheOnly.caller.host.value, 'MacBookPro.localdomain');
+  assert.strictEqual(cacheOnly.caller.host.value, 'host.example');
   // Live: the verified caller row's surface is authoritative for the agent —
   // the overlay replaces the invocation-context value with its own source.
   const { promise } = liveSnap(dir);

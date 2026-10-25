@@ -24,7 +24,13 @@ function log(kind, extra = {}) {
 
 global.fetch = () => { throw new Error('network forbidden'); };
 
-const emptyNativeRead = async () => ({ caller: null, sessions: [], harnesses: [], profiles: [], diagnostics: [] });
+const emptyNativeRead = async () => {
+  // F1 regression hook: a REAL delay in the native reader, so the display
+  // entry's one-second lifetime is genuinely exercised against a slow read.
+  const delay = Number(process.env.VL_VIEW_NATIVE_DELAY_MS || 0);
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+  return { caller: null, sessions: [], harnesses: [], profiles: [], diagnostics: [] };
+};
 
 const load = Module._load;
 Module._load = function (id, ...args) {

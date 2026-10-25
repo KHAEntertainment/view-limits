@@ -277,6 +277,36 @@ test('view --json projects a live Xiaomi success as healthy/fresh (R2-2)', () =>
   assert.strictEqual(row.windows[0].type, 'tokens');
 });
 
+test('view --json: a SLOW native read does not expire the live Xiaomi display (F1)', () => {
+  const dir = scratch();
+  writeConfig(dir, [{
+    id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+    match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+  }]);
+  // The native reader is delayed by 1500 ms — longer than the display
+  // entry's one-second lifetime. The display projection must be built when
+  // the status reader runs (after the native await), so the live Xiaomi row
+  // still renders healthy/fresh.
+  const r = vl(dir, ['view', '--json'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_NATIVE_DELAY_MS: '1500' },
+  });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
+  assert.ok(row, 'the Xiaomi route is listed');
+  assert.strictEqual(row.state, 'healthy', 'the live observation renders healthy despite the slow native read');
+  assert.strictEqual(row.freshness, 'fresh', 'the live observation renders fresh despite the slow native read');
+  assert.strictEqual(row.windows[0].remaining, 75);
+  // The GATE cache entry is unchanged: raw, zero-TTL, with the live facts.
+  const published = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
+  const entry = published.routes['xiaomi-token-plan'];
+  assert.ok(entry, 'the cache entry was published');
+  assert.strictEqual(entry.status.state, 'healthy');
+  assert.ok(Date.parse(entry.freshUntil) - Date.parse(entry.observedAt) <= 1000,
+    'the gate cache keeps ttlSeconds 0 (raw entry, display-only projection)');
+});
+
 test('view --json emits exactly ONE envelope when there are no credentials', () => {
   const dir = scratch();
   writeConfig(dir, ROUTES);

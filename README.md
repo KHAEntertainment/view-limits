@@ -748,8 +748,7 @@ configuration never reaches a provider and never writes the cache.
 ## The dashboard daemon (`vl.js dashboard`)
 
 A persistent, loopback-only daemon that keeps the view fresh in the
-background (Issue #61). It is the data service the dashboard page (#62) will
-sit on; today it serves JSON only.
+background (Issue #61), and serves the dashboard page (#62).
 
 ```sh
 vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
@@ -779,8 +778,19 @@ vl.js dashboard stop
   signals a PID taken from a record, and a stale or unverifiable record is
   reported, not trusted. A crashed daemon leaves a stale record that the next
   `start` recovers.
+- **The page: `http://127.0.0.1:<port>/`** (the URL `start` prints). One
+  page with no build step and nothing fetched from outside this machine (the
+  Geist fonts are bundled, SIL OFL 1.1). It polls `/api/status` at the
+  daemon's interval, so it never triggers a provider read, and it renders
+  from the view schema's fields only. Wide windows get a card per route in
+  configuration order under a "needs attention" strip; a narrow pane gets one
+  line per route (tap to expand). The page's **Refresh** asks for a
+  collection now; it carries a refresh-only token, which cannot stop the
+  daemon. `/?view=lan` previews the read-only phone layout on loopback; it is
+  a preview, not the LAN view. The page is a scaffold awaiting the owner's
+  approval (#62).
 - **Loopback only for now.** `--host` accepts `127.0.0.1`, `localhost` or
-  `::1`; the LAN listener (`--host 0.0.0.0`) and the page arrive with #62. The
+  `::1`; the LAN listener (`--host 0.0.0.0`) arrives with #62's hardening. The
   daemon's runtime files (`dashboard.json`, `dashboard.log`, `dashboard-lock/`)
   live in the data directory; `dashboard.json` is private (`0600`) because it
   holds the control secret.

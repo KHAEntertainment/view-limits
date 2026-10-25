@@ -2176,7 +2176,9 @@ async function dashboardCmd(args) {
   }
 
   if (sub === 'start' || sub === '__daemon') {
-    const flags = parseDashboardFlags(rest, ['--port', '--host', '--interval']);
+    // `--threshold` is internal: `start` hands the daemon the gate's threshold
+    // from the config it has already confirmed, so the page colours bars at it.
+    const flags = parseDashboardFlags(rest, sub === '__daemon' ? ['--port', '--host', '--interval', '--threshold'] : ['--port', '--host', '--interval']);
     const port = flags['--port'] === undefined ? 0 : strictInteger(flags['--port']);
     const flagInterval = flags['--interval'] === undefined ? undefined : strictInteger(flags['--interval']);
     const bind = dashboard.validateBind({ host: flags['--host'], port });
@@ -2187,9 +2189,11 @@ async function dashboardCmd(args) {
       const cfg = loadConfig();
       const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
       if (!interval.ok) err(`dashboard start: ${interval.error}`);
+      const t = cfg.gate && cfg.gate.constrainedThreshold;
       const started = await dashboard.startDaemon({
         dir,
-        daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds)],
+        daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds),
+          ...(typeof t === 'number' && t > 0 && t < 1 ? ['--threshold', String(t)] : [])],
       });
       if (started.ok) {
         process.stdout.write(`dashboard: started at ${started.url} (pid ${started.pid}, interval ${started.intervalSeconds}s${interval.source === 'default' ? '' : `, from ${interval.source}`})\n`);
@@ -2221,8 +2225,10 @@ async function dashboardCmd(args) {
       log(`fatal: ${(e && e.message) || e}`);
       process.exit(1);
     });
+    // Absent or malformed, the page keeps its 0.2 default (the gate's own).
+    const threshold = /^0\.\d+$/.test(flags['--threshold'] || '') ? Number(flags['--threshold']) : null;
     const handle = await dashboard.runDaemon({
-      dir, host: bind.host, port: bind.port, intervalSeconds: interval, log,
+      dir, host: bind.host, port: bind.port, intervalSeconds: interval, log, threshold,
       collect: createViewRunner({ vlPath: __filename, cwd: dir }),
       // After the record is published and BEFORE the first collection spawns:
       // answer `start` and close fd 3, so no collection child can inherit it.

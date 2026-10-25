@@ -750,14 +750,18 @@ configuration never reaches a provider and never writes the cache.
 
 ## The dashboard daemon (`vl.js dashboard`)
 
-A persistent, loopback-only daemon that keeps the view fresh in the
-background (Issue #61). It is the data service the dashboard page (#62) will
-sit on; today it serves JSON only.
+A persistent daemon that keeps the view fresh in the background (Issue #61)
+and serves the dashboard page (#62) on loopback, plus an opt-in, read-only
+LAN view for a phone.
 
 ```sh
 vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
 vl.js dashboard status [--json]
 vl.js dashboard stop
+vl.js dashboard lan enable --interface IP [--port N]   # LAN view on (off by default)
+vl.js dashboard lan disable
+vl.js dashboard lan rotate                             # new read token; old links stop working
+vl.js dashboard lan url                                # prints the phone link (the only place the token appears)
 ```
 
 - **One per data directory.** `start` refuses a verified running instance and
@@ -782,17 +786,54 @@ vl.js dashboard stop
   signals a PID taken from a record, and a stale or unverifiable record is
   reported, not trusted. A crashed daemon leaves a stale record that the next
   `start` recovers.
-- **Loopback only for now.** `--host` accepts `127.0.0.1`, `localhost` or
-  `::1`; the LAN listener (`--host 0.0.0.0`) and the page arrive with #62. The
-  daemon's runtime files (`dashboard.json`, `dashboard.log`, `dashboard-lock/`)
-  live in the data directory; `dashboard.json` is private (`0600`) because it
-  holds the control secret.
+- **The page: `http://127.0.0.1:<port>/`** (the URL `start` prints). One
+  page with no build step and nothing fetched from outside this machine (the
+  Geist fonts are bundled, SIL OFL 1.1). It polls `/api/status` at the
+  daemon's interval, so it never triggers a provider read, and it renders
+  from the view schema's fields only. Wide windows get a card per route in
+  configuration order under a "needs attention" strip; a narrow pane gets one
+  line per route (tap to expand). The page's **Refresh** asks for a
+  collection now; it carries a refresh-only token, which cannot stop the
+  daemon. Each built-in provider's card has an icon button to that provider's
+  own dashboard (local view only). `/?view=lan` previews the phone layout on
+  loopback; it is a preview, not the LAN view.
+- **Loopback control listener.** `--host` accepts `127.0.0.1`, `localhost` or
+  `::1` only. The daemon's runtime files (`dashboard.json`, `dashboard.log`,
+  `dashboard-lock/`) live in the data directory; `dashboard.json` is private
+  (`0600`) because it holds the control secret.
+- **LAN view (opt-in, read-only).** Off by default.
+  `lan enable --interface IP` picks the address a phone reaches: a LAN or
+  Tailscale IP of this machine (loopback, wildcard addresses and hostnames
+  are refused). It saves `{"dashboard": {"lan": {"enabled": true, "interface":
+  "IP", "port": N}}}` in `config.json`; without `--port` a free port is picked
+  once and kept, so a bookmark survives restarts. `enable` and `disable` take
+  effect at the next `dashboard start` (the command says so when a daemon is
+  running); `disable` keeps the address, port and token for a later
+  re-enable.
+  - **Read token.** A random token in `dashboard-lan-token` in the data
+    directory (`0600`; never in `config.json`, never logged, never in a
+    process's arguments). `lan url` prints the link that carries it; the
+    phone's page keeps it for that address and removes it from the address
+    bar. `lan rotate` issues a new one and the old link stops working at
+    once, even with the daemon running.
+  - **What the phone sees.** A separate listener on that address only
+    (exact `Host`, `GET` only). The page and its files carry no data; the
+    status needs the token and is **redacted by the daemon** before it is
+    sent: labels, states, usage, balances and resets, but no account,
+    profile, session or host identifiers, no route ids, no login links ("log
+    in again on your Mac"), no provider error text and no buttons.
+  - **Refusals.** A bad `dashboard.lan` value or an address that is not on
+    this machine refuses `start` (exit `1`) and names the fix; a missing,
+    malformed or non-private token refuses with exit `10` ("run `vl.js
+    dashboard lan rotate`"); a LAN port that cannot be bound fails `start`
+    and publishes nothing.
 
 Exit codes: `0` ok; `1` refused or failed (already running, occupied port,
-invalid flag value or config value, stop refused); `2` usage; `3` `status` when
-nothing verified is running; `9` / `10` config.json could not be confirmed /
-could not be read (the same refusal as `view`; no default interval is
-guessed).
+invalid flag value or config value, LAN interface not on this machine, LAN
+bind failure, stop refused); `2` usage; `3` `status` when nothing verified is
+running; `9` / `10` config.json could not be confirmed / could not be read
+(the same refusal as `view`; no default interval is guessed); `10` also for an
+unusable LAN read token.
 
 ## CLI reference
 
@@ -813,6 +854,7 @@ vl.js snapshot --json [--refresh] # diagnostic runtime snapshot
 vl.js view [--condensed] [--json] # the versioned view schema: text or JSON
 vl.js recommend --json            # advisory recommendation (Jev-dormant by default)
 vl.js dashboard start|stop|status # persistent loopback dashboard daemon (Issue #61)
+vl.js dashboard lan enable|disable|rotate|url  # opt-in read-only LAN view (#62)
 ```
 
 ### Exit codes

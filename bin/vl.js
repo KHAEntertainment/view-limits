@@ -2098,7 +2098,8 @@ async function viewCmd(args) {
 // lib/dashboard/view-runner.js) and printing. `__daemon` is the detached
 // process `start` spawns; it is not a user command.
 
-const DASHBOARD_USAGE = 'usage: vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS] | stop | status [--json]';
+const DASHBOARD_USAGE = 'usage: vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS] | stop | status [--json]\n' +
+  '       vl.js dashboard lan enable --interface IP [--port N] | lan disable | lan rotate | lan url';
 
 // Exit codes: 0 ok · 1 failure or refusal · 2 usage · 3 status: not running
 // (stopped, stale or unverified) · 9/10 config refused (shared with view).
@@ -2164,6 +2165,7 @@ async function dashboardCmd(args) {
   const sub = args[0];
   const rest = args.slice(1);
   const dashboard = require('../lib/dashboard/daemon');
+  const lanLib = require('../lib/dashboard/lan');
   const dir = dataDir();
 
   if (sub === 'status') {
@@ -2187,7 +2189,11 @@ async function dashboardCmd(args) {
   }
 
   if (sub === 'start' || sub === '__daemon') {
-    const flags = parseDashboardFlags(rest, ['--port', '--host', '--interval']);
+    // `--threshold` is internal: `start` hands the daemon the gate's threshold
+    // from the config it has already confirmed, so the page colours bars at it.
+    const flags = parseDashboardFlags(rest, sub === '__daemon'
+      ? ['--port', '--host', '--interval', '--threshold', '--lan-address', '--lan-port']
+      : ['--port', '--host', '--interval']);
     const port = flags['--port'] === undefined ? 0 : strictInteger(flags['--port']);
     const flagInterval = flags['--interval'] === undefined ? undefined : strictInteger(flags['--interval']);
     const bind = dashboard.validateBind({ host: flags['--host'], port });
@@ -2198,12 +2204,25 @@ async function dashboardCmd(args) {
       const cfg = loadConfig();
       const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
       if (!interval.ok) err(`dashboard start: ${interval.error}`);
+      // The LAN view (off unless config.dashboard.lan.enabled): a bad value or
+      // an interface not on this machine refuses; a missing or unsafe read
+      // token refuses with exit 10. The token itself never goes into argv.
+      const lanCfg = lanLib.resolveLanConfig(cfg);
+      if (!lanCfg.ok) err(`dashboard start: ${lanCfg.error}`);
+      if (lanCfg.enabled) {
+        const tok = lanLib.readToken(dir);
+        if (!tok.ok) exitLanToken(`dashboard start: ${lanLib.tokenProblem(tok.reason)}`);
+      }
+      const t = cfg.gate && cfg.gate.constrainedThreshold;
       const started = await dashboard.startDaemon({
         dir,
-        daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds)],
+        daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds),
+          ...(typeof t === 'number' && t > 0 && t < 1 ? ['--threshold', String(t)] : []),
+          ...(lanCfg.enabled ? ['--lan-address', lanCfg.address, '--lan-port', String(lanCfg.port)] : [])],
       });
       if (started.ok) {
         process.stdout.write(`dashboard: started at ${started.url} (pid ${started.pid}, interval ${started.intervalSeconds}s${interval.source === 'default' ? '' : `, from ${interval.source}`})\n`);
+        if (started.lan) process.stdout.write(`dashboard: LAN view (read-only) on http://${lanLib.hostFor(started.lan.address, started.lan.port)}/ — \`vl.js dashboard lan url\` prints the phone link\n`);
         return;
       }
       if (started.reason === 'already-running' || started.reason === 'held') {
@@ -2216,6 +2235,8 @@ async function dashboardCmd(args) {
         'bind-failed': `could not listen on ${bind.host}:${bind.port}${started.code ? ` (${started.code})` : ''}; nothing was published`,
         'no-identity': 'the process start time could not be read (is `ps` available?), so the daemon would be unverifiable after a crash',
         'ready-timeout': 'the daemon did not report ready in time (see dashboard.log in the data directory)',
+        'lan-bind-failed': `could not listen on the LAN interface${lanCfg.enabled ? ` ${lanLib.hostFor(lanCfg.address, lanCfg.port)}` : ''}${started.code ? ` (${started.code})` : ''}; nothing was published — run \`vl.js dashboard lan disable\`, or pick another port with \`vl.js dashboard lan enable --interface <ip> --port N\``,
+        'lan-token-unreadable': lanLib.tokenProblem('unreadable'),
       };
       err(`dashboard start: ${reasons[started.reason] || `${started.reason}${started.error ? ` (${started.error})` : ''}`}`);
     }
@@ -2232,8 +2253,21 @@ async function dashboardCmd(args) {
       log(`fatal: ${(e && e.message) || e}`);
       process.exit(1);
     });
+    // Absent or malformed, the page keeps its 0.2 default (the gate's own).
+    const threshold = /^0\.\d+$/.test(flags['--threshold'] || '') ? Number(flags['--threshold']) : null;
+    // `start` validated the LAN interface and the token; the daemon re-reads
+    // the token file itself (never argv) whenever it changes.
+    let lan = null;
+    if (flags['--lan-address'] !== undefined) {
+      const lanPort = strictInteger(flags['--lan-port'] || '');
+      if (lanLib.addressProblem(flags['--lan-address']) || !(lanPort >= lanLib.PORT_MIN && lanPort <= lanLib.PORT_MAX)) {
+        ready({ ok: false, reason: 'invalid-lan', error: 'invalid LAN address or port' });
+        process.exit(1);
+      }
+      lan = { address: lanLib.canonicalAddress(flags['--lan-address']), port: lanPort, currentToken: lanLib.createTokenReader(dir) };
+    }
     const handle = await dashboard.runDaemon({
-      dir, host: bind.host, port: bind.port, intervalSeconds: interval, log,
+      dir, host: bind.host, port: bind.port, intervalSeconds: interval, log, threshold, lan,
       collect: createViewRunner({ vlPath: __filename, cwd: dir }),
       // After the record is published and BEFORE the first collection spawns:
       // answer `start` and close fd 3, so no collection child can inherit it.
@@ -2244,7 +2278,7 @@ async function dashboardCmd(args) {
           log(`fatal: ${(e && e.message) || e}`);
           h.shutdown('fatal').finally(() => process.exit(1));
         });
-        ready({ ok: true, url: h.url, instanceId: h.instanceId, intervalSeconds: h.intervalSeconds });
+        ready({ ok: true, url: h.url, instanceId: h.instanceId, intervalSeconds: h.intervalSeconds, lan: h.lan });
       },
     });
     if (!handle.ok) {
@@ -2255,7 +2289,145 @@ async function dashboardCmd(args) {
     process.exit(0);
   }
 
+  if (sub === 'lan') { await dashboardLanCmd(dir, rest, dashboard); return; }
+
   dashboardUsage(sub ? `unknown dashboard command ${JSON.stringify(sub)}.` : 'a dashboard command is required.');
+}
+
+// A read token that cannot be trusted refuses like an unreadable config (10).
+function exitLanToken(msg) {
+  log(msg);
+  process.exit(10);
+}
+
+// Read-modify-write config.json's dashboard.lan under the provider mutation
+// lock. `mutate(lanSection|undefined, doc)` returns the new section, or
+// undefined to write nothing. → what `mutate` returned. A broken document is
+// never rewritten: it refuses with exit 9 / 10.
+function writeLanConfig(mutate) {
+  const lock = lifecycle.acquireMutationLock(dataDir());
+  if (!lock.ok) err('dashboard lan: another provider or config change holds the lock; rerun in a moment.');
+  let outcome;
+  try {
+    const read = readUserConfigStrict();
+    if (!read.ok) outcome = { refuse: read.reason };
+    else {
+      const doc = read.doc;
+      if (doc.dashboard !== undefined && (doc.dashboard === null || typeof doc.dashboard !== 'object' || Array.isArray(doc.dashboard))) {
+        outcome = { error: 'config.json "dashboard" must be an object; fix it by hand, then rerun.' };
+      } else {
+        const section = doc.dashboard ? doc.dashboard.lan : undefined;
+        const next = mutate(section, doc);
+        if (next !== undefined) {
+          doc.dashboard = Object.assign({}, doc.dashboard || {}, { lan: next });
+          saveConfig(doc);
+        }
+        outcome = { value: next };
+      }
+    }
+  } catch (e) {
+    outcome = { error: e && e.lanRefusal ? e.lanRefusal : e && e.code === 'CONFIG_MIGRATION_PENDING'
+      ? 'config.json does not exist yet; run /view-limits:setup to add a provider first.'
+      : `config.json could not be written (${(e && e.code) || 'write-failed'}).` };
+  } finally {
+    lock.release();
+  }
+  if (outcome.refuse === 'inconclusive') exitInconclusive();
+  if (outcome.refuse) exitCorrupt();
+  if (outcome.error) err(`dashboard lan: ${outcome.error}`);
+  return outcome.value;
+}
+
+async function dashboardLanCmd(dir, args, dashboard) {
+  const lanLib = require('../lib/dashboard/lan');
+  const action = args[0];
+  const rest = args.slice(1);
+  const running = async () => (await dashboard.statusDaemon(dir)).state === 'running';
+
+  if (action === 'enable') {
+    const flags = parseDashboardFlags(rest, ['--interface', '--port']);
+    const address = lanLib.canonicalAddress(flags['--interface']);
+    if (address === undefined) dashboardUsage('lan enable needs --interface <ip> (a LAN or Tailscale address of this machine).');
+    const flagPort = flags['--port'] === undefined ? undefined : strictInteger(flags['--port']);
+    if (Number.isNaN(flagPort)) dashboardUsage(`--port must be a whole number; got ${JSON.stringify(flags['--port'])}.`);
+    const here = lanLib.localAddresses();
+    const choices = here.length ? `this machine's addresses: ${here.join(', ')}` : 'this machine has no LAN or Tailscale address right now';
+    const problem = lanLib.addressProblem(address);
+    if (problem) err(`dashboard lan enable: ${address} ${problem}; pick one of ${choices}.`);
+    if (!here.some((a) => lanLib.canonicalAddress(a) === address)) err(`dashboard lan enable: ${address} is not an address on this machine right now; pick one of ${choices}.`);
+    if (flagPort !== undefined && (flagPort < lanLib.PORT_MIN || flagPort > lanLib.PORT_MAX)) err(`dashboard lan enable: --port must be from ${lanLib.PORT_MIN} to ${lanLib.PORT_MAX}; got ${flagPort}.`);
+
+    const tok = lanLib.readToken(dir);
+    if (!tok.ok && tok.reason !== 'absent') exitLanToken(`dashboard lan enable: ${lanLib.tokenProblem(tok.reason)}`);
+
+    // The port is chosen once and then kept, so a bookmark survives restarts:
+    // --port, else the port already in config, else a free one picked now.
+    let free = null;
+    if (flagPort === undefined) {
+      free = await lanLib.pickFreePort(address);
+      if (!free.ok) err(`dashboard lan enable: could not find a free port on ${address} (${free.error}); give one with --port N.`);
+    }
+    const written = writeLanConfig((section) => {
+      const prev = section && typeof section === 'object' ? section.port : undefined;
+      const keep = Number.isInteger(prev) && prev >= lanLib.PORT_MIN && prev <= lanLib.PORT_MAX ? prev : undefined;
+      return { enabled: true, interface: address, port: flagPort !== undefined ? flagPort : (keep !== undefined ? keep : free.port) };
+    });
+    const port = written.port;
+    if (!tok.ok) {
+      const wrote = lanLib.writeToken(dir);
+      if (!wrote.ok) err(`dashboard lan enable: the LAN read token could not be written (${wrote.error}); the LAN view stays unusable until \`vl.js dashboard lan rotate\` succeeds.`);
+    }
+    process.stdout.write(`dashboard: LAN view enabled on http://${lanLib.hostFor(address, port)}/ (read-only, redacted). \`vl.js dashboard lan url\` prints the phone link.\n`);
+    process.stdout.write(await running()
+      ? 'dashboard: takes effect at the next start: the running daemon is not serving it yet. Run `vl.js dashboard stop`, then `vl.js dashboard start`.\n'
+      : 'dashboard: it starts with the daemon: `vl.js dashboard start`.\n');
+    return;
+  }
+
+  if (action === 'disable') {
+    if (rest.length) dashboardUsage('lan disable takes no options.');
+    // The interface, port and token are kept, so enabling again restores the
+    // same phone link. An absent section is a no-op; a present but invalid
+    // one is refused and left as it is, never rewritten (fail loudly). The
+    // check is the document's, not this machine's: an interface that is gone
+    // can still be disabled.
+    const next = writeLanConfig((section, doc) => {
+      if (section === undefined) return undefined;
+      const check = lanLib.resolveLanConfig(doc, { interfaces: null });
+      if (!check.ok) throw Object.assign(new Error('invalid dashboard.lan'), { lanRefusal: check.error });
+      return Object.assign({}, section, { enabled: false });
+    });
+    if (next === undefined) { process.stdout.write('dashboard: the LAN view is already off.\n'); return; }
+    process.stdout.write('dashboard: LAN view disabled. The same phone link works again if you re-enable it; `vl.js dashboard lan rotate` replaces it.\n');
+    process.stdout.write(await running()
+      ? 'dashboard: takes effect at the next start: the running daemon keeps serving the LAN view until you run `vl.js dashboard stop` (then `vl.js dashboard start` for the loopback page alone).\n'
+      : 'dashboard: nothing is serving it now.\n');
+    return;
+  }
+
+  if (action === 'rotate') {
+    if (rest.length) dashboardUsage('lan rotate takes no options.');
+    const wrote = lanLib.writeToken(dir);
+    if (!wrote.ok) err(`dashboard lan rotate: the new read token could not be written (${wrote.error}); the previous link still works.`);
+    process.stdout.write('dashboard: LAN read token rotated. Every phone link issued before now stopped working (at once, if the daemon is running). `vl.js dashboard lan url` prints the new link.\n');
+    return;
+  }
+
+  if (action === 'url') {
+    if (rest.length) dashboardUsage('lan url takes no options.');
+    const cfg = loadConfig();
+    const lanCfg = lanLib.resolveLanConfig(cfg);
+    if (!lanCfg.ok) err(`dashboard lan url: ${lanCfg.error}`);
+    if (!lanCfg.enabled) err('dashboard lan url: the LAN view is off; run `vl.js dashboard lan enable --interface <ip>` first.');
+    const tok = lanLib.readToken(dir);
+    if (!tok.ok) exitLanToken(`dashboard lan url: ${lanLib.tokenProblem(tok.reason)}`);
+    // The ONE place the token is printed.
+    process.stdout.write(`${lanLib.lanUrl(lanCfg.address, lanCfg.port, tok.token)}\n`);
+    log('anyone on your network with this link can read the dashboard (read-only, no identifiers); `vl.js dashboard lan rotate` revokes it.');
+    return;
+  }
+
+  dashboardUsage(action ? `unknown lan command ${JSON.stringify(action)}.` : 'a lan command is required (enable, disable, rotate or url).');
 }
 
 // After losing the ownership lock the winner may not have published yet.

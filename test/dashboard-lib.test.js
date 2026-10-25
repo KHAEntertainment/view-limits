@@ -294,9 +294,9 @@ test('control POSTs refuse a foreign Origin, a bad content type and an oversized
   });
 });
 
-test('unknown paths 404 (the page is #62\'s) and wrong methods 405', async () => {
+test('unknown paths 404 and wrong methods 405 (the page itself: test/dashboard-page.test.js)', async () => {
   await withServer(async (port) => {
-    assert.strictEqual((await raw(port, { pathname: '/' })).status, 404);
+    assert.strictEqual((await raw(port, { pathname: '/index.html' })).status, 404);
     assert.strictEqual((await raw(port, { pathname: '/api/nope' })).status, 404);
     assert.strictEqual((await raw(port, { method: 'POST', pathname: '/api/status', body: '' })).status, 405);
     assert.strictEqual((await raw(port, { method: 'GET', pathname: '/api/refresh' })).status, 405);

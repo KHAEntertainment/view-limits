@@ -24,10 +24,11 @@
 //      native read needs the real HOME, so the ~/.view-limits fallback is
 //      covered by forbidding it instead of relocating it.
 //
-//   2. The runner snapshots the inherited dirs (paths + sizes + mtimes)
-//      before and after the run and fails the run if anything changed under
-//      them. This is the guard OF RECORD: it catches a write no matter how it
-//      got there, including one that never went through dataDir().
+//   2. The runner snapshots the inherited dirs before and after the run and
+//      fails the run if anything changed under them. The snapshot is METADATA
+//      ONLY — path, size, mtime, ctime and inode, never file contents. This is
+//      the guard OF RECORD: it catches a write no matter how it got there,
+//      including one that never went through dataDir().
 //
 // A third layer lives outside this file: when test/fixtures/data-dir-guard.cjs
 // sits next to the runner, it is installed into every child via NODE_OPTIONS
@@ -102,10 +103,27 @@ function installPreload(env, testDir) {
   return { ...env, NODE_OPTIONS: env.NODE_OPTIONS ? `${env.NODE_OPTIONS} ${flag}` : flag };
 }
 
-// A fingerprint of a directory tree: relative path -> type, size and mtime.
+// A fingerprint of a directory tree: relative path -> type and metadata.
 // Used to prove the inherited dirs were not touched during the run.
+//
+// Metadata only, never contents: readdirSync + statSync. The fields are
+// chosen so a rewrite cannot hide:
+//   - file: size, mtimeMs, ctimeMs, ino. ctime cannot be set by userland
+//     (utime does not touch it), so a same-size rewrite with the mtime
+//     restored still moves ctimeMs; ino catches a replaced file.
+//   - dir:  mtimeMs. A directory's mtime moves when an entry is added or
+//     removed under it, which is what catches a file created and deleted
+//     again inside the run. The ROOT dir is snapshotted too (key '.'), so a
+//     create+delete in the watched dir itself is caught.
+function statOf(p) {
+  try { return fs.statSync(p); } catch { return null; }
+}
+
 function snapshotTree(dir) {
   const snap = new Map();
+  const root = path.resolve(dir);
+  const rootStat = statOf(root);
+  if (rootStat) snap.set('.', { type: 'dir', mtimeMs: rootStat.mtimeMs });
   const walk = (current, rel) => {
     let entries;
     try { entries = fs.readdirSync(current, { withFileTypes: true }); }
@@ -114,16 +132,22 @@ function snapshotTree(dir) {
       const abs = path.join(current, entry.name);
       const relPath = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
-        snap.set(relPath, { type: 'dir' });
+        const st = statOf(abs);
+        snap.set(relPath, { type: 'dir', mtimeMs: st ? st.mtimeMs : null });
         walk(abs, relPath);
         continue;
       }
-      let st = null;
-      try { st = fs.statSync(abs); } catch { /* raced away */ }
-      snap.set(relPath, { type: 'file', size: st ? st.size : null, mtimeMs: st ? st.mtimeMs : null });
+      const st = statOf(abs);
+      snap.set(relPath, {
+        type: 'file',
+        size: st ? st.size : null,
+        mtimeMs: st ? st.mtimeMs : null,
+        ctimeMs: st ? st.ctimeMs : null,
+        ino: st ? st.ino : null,
+      });
     }
   };
-  walk(path.resolve(dir), '');
+  walk(root, '');
   return snap;
 }
 
@@ -134,7 +158,11 @@ function diffSnapshots(before, after) {
     if (!after.has(p)) { changes.push({ path: p, change: 'removed' }); continue; }
     const b = after.get(p);
     if (a.type !== b.type) { changes.push({ path: p, change: 'type-changed' }); continue; }
-    if (a.type === 'file' && (a.size !== b.size || a.mtimeMs !== b.mtimeMs)) {
+    if (a.type === 'file') {
+      if (a.size !== b.size || a.mtimeMs !== b.mtimeMs || a.ctimeMs !== b.ctimeMs || a.ino !== b.ino) {
+        changes.push({ path: p, change: 'modified' });
+      }
+    } else if (a.mtimeMs !== b.mtimeMs) {
       changes.push({ path: p, change: 'modified' });
     }
   }
@@ -167,6 +195,24 @@ function main() {
   const childEnv = installPreload(buildChildEnv(process.env, scratch, forbidden), testDir);
   console.log(`scratch CLAUDE_PLUGIN_DATA: ${childEnv.CLAUDE_PLUGIN_DATA}`);
 
+  // The scratch tree goes away whether the run passed, failed or was
+  // interrupted. A SIGINT/SIGTERM handler does the same and exits non-zero:
+  // an interrupted run never reaches the backstop, so it must not report
+  // success. (SIGKILL cannot be caught — a scratch dir can survive that.)
+  let scratchRemoved = false;
+  const removeScratch = () => {
+    if (scratchRemoved) return;
+    scratchRemoved = true;
+    try { fs.rmSync(scratch, { recursive: true, force: true }); }
+    catch { /* best effort — a leftover temp dir must not fail the suite */ }
+  };
+  const onSignal = (signal) => {
+    removeScratch();
+    process.exit(signal === 'SIGINT' ? 130 : 143);
+  };
+  process.on('SIGINT', () => onSignal('SIGINT'));
+  process.on('SIGTERM', () => onSignal('SIGTERM'));
+
   let failed = 0;
   try {
     for (const f of files) {
@@ -186,9 +232,7 @@ function main() {
       if (r.status !== 0) failed += 1;
     }
   } finally {
-    // The scratch tree goes away whether the run passed or failed.
-    try { fs.rmSync(scratch, { recursive: true, force: true }); }
-    catch { /* best effort — a leftover temp dir must not fail the suite */ }
+    removeScratch();
   }
 
   // [#95] Guard of record: nothing under the inherited dirs may have changed.
@@ -198,7 +242,12 @@ function main() {
   }
   if (changes.length) {
     console.error('\n[#95] the inherited data dir changed during the run — failing:');
-    for (const c of changes) console.error(`  ${c.change}: ${c.dir}/${c.path}`);
+    for (const c of changes) {
+      console.error(`  ${c.change}: ${c.path === '.' ? c.dir : `${c.dir}/${c.path}`}`);
+    }
+    console.error('  The inherited dir can belong to another live process (e.g. another');
+    console.error("  plugin's data dir). If that process wrote here, re-run with an");
+    console.error('  explicit CLAUDE_PLUGIN_DATA pointing at a scratch dir.');
     failed += 1;
   }
 

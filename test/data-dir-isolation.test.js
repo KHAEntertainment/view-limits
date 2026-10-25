@@ -7,9 +7,10 @@
 // see the PR):
 //
 //   1. The runner hands every child an explicit env: CLAUDE_PLUGIN_DATA is a
-//      fresh per-run scratch dir, HOME is a scratch home, and the forbidden
-//      set (the dirs the runner inherited) travels in VL_FORBIDDEN_DATA_DIRS.
-//      The scratch tree is removed when the run ends, failure or not.
+//      fresh per-run scratch dir and the forbidden set (the dirs the runner
+//      inherited) travels in VL_FORBIDDEN_DATA_DIRS. HOME is inherited
+//      unchanged — the Traycer native read needs the real HOME. The scratch
+//      tree is removed when the run ends, failure or not.
 //
 //   2. test/fixtures/data-dir-guard.cjs is installed into every child via
 //      NODE_OPTIONS and makes dataDir() throw when it resolves to a forbidden
@@ -115,19 +116,21 @@ test('installPreload adds the read guard and keeps an existing NODE_OPTIONS', ()
 });
 
 test('installPreload leaves NODE_OPTIONS alone when the preload is not next to the runner', () => {
-  const env = runner.installPreload({ NODE_OPTIONS: '--require=/other.cjs' }, tmpdir('vl-no-fixtures-'));
-  assert.strictEqual(env.NODE_OPTIONS, '--require=/other.cjs');
+  const dir = tmpdir('vl-no-fixtures-');
+  try {
+    const env = runner.installPreload({ NODE_OPTIONS: '--require=/other.cjs' }, dir);
+    assert.strictEqual(env.NODE_OPTIONS, '--require=/other.cjs');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 console.log('\nrunner — the scratch tree is removed when the run ends');
-
-test('the runner removes the scratch tree in a finally, so a failed run cleans up too', () => {
-  const src = fs.readFileSync(path.join(__dirname, 'run.js'), 'utf8');
-  assert.match(src, /finally\s*\{[\s\S]*?fs\.rmSync\(scratch/,
-    'the scratch tree must be removed from a finally block (failure or not)');
-  assert.match(src, /fs\.mkdtempSync\(path\.join\(os\.tmpdir\(\), SCRATCH_PREFIX\)\)/,
-    'the scratch tree must be a fresh mkdtemp per run');
-});
+// The scratch cleanup is covered end-to-end by test/run-isolation.test.js
+// ("the scratch dir is gone after a failing test"), which spawns the runner.
+// A source-regex check used to stand in for it here, and a review mutation
+// probe showed it survives commenting the cleanup out — the regex matched the
+// text inside the comment. The behavioural check replaced it.
 
 console.log('\nwrite backstop — the snapshot diff sees every change');
 
@@ -143,14 +146,55 @@ test('snapshotTree + diffSnapshots report added, removed and modified entries', 
     fs.writeFileSync(path.join(dir, 'extra.json'), '{}');
     fs.rmSync(path.join(dir, 'status.json'));
     const changes = runner.diffSnapshots(before, runner.snapshotTree(dir));
-    const kinds = changes.map((c) => `${c.change}:${c.path}`).sort();
-    assert.deepStrictEqual(kinds, ['added:extra.json', 'removed:status.json'],
-      `the diff must report the added and removed entries, got ${JSON.stringify(kinds)}`);
+    const kinds = changes.map((c) => `${c.change}:${c.path}`);
+    assert.ok(kinds.includes('added:extra.json'),
+      `the added entry must be reported, got ${JSON.stringify(kinds)}`);
+    assert.ok(kinds.includes('removed:status.json'),
+      `the removed entry must be reported, got ${JSON.stringify(kinds)}`);
+    assert.ok(kinds.includes('modified:.'),
+      `the root dir mtime must be reported too, got ${JSON.stringify(kinds)}`);
 
     fs.writeFileSync(path.join(dir, 'status.json'), '{"a":1}');
     const modified = runner.diffSnapshots(before, runner.snapshotTree(dir));
     assert.ok(modified.some((c) => c.change === 'modified' && c.path === 'status.json'),
       `a rewritten file must be reported as modified, got ${JSON.stringify(modified)}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a same-size rewrite with the mtime restored is still caught (ctime)', () => {
+  const dir = tmpdir('vl-snap-');
+  try {
+    const file = path.join(dir, 'status.json');
+    fs.writeFileSync(file, '{"a":1}');
+    const before = runner.snapshotTree(dir);
+    const st = fs.statSync(file);
+    fs.writeFileSync(file, '{"a":2}'); // same size, different bytes
+    fs.utimesSync(file, st.atimeMs / 1000, st.mtimeMs / 1000); // restore the mtime
+    const after = fs.statSync(file);
+    assert.strictEqual(after.size, st.size, 'the rewrite must be the same size');
+    assert.ok(Math.abs(after.mtimeMs - st.mtimeMs) < 0.001,
+      `the mtime must be restored, got ${after.mtimeMs} vs ${st.mtimeMs}`);
+    const changes = runner.diffSnapshots(before, runner.snapshotTree(dir));
+    assert.ok(changes.some((c) => c.path === 'status.json'),
+      `a same-size, mtime-restored rewrite must still be caught, got ${JSON.stringify(changes)}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a file created and deleted inside the run is caught (root dir mtime)', () => {
+  const dir = tmpdir('vl-snap-');
+  try {
+    fs.writeFileSync(path.join(dir, 'status.json'), '{"a":1}');
+    const before = runner.snapshotTree(dir);
+    const tmp = path.join(dir, 'refresh.lock');
+    fs.writeFileSync(tmp, 'x');
+    fs.rmSync(tmp); // the lock file's normal lifecycle
+    const changes = runner.diffSnapshots(before, runner.snapshotTree(dir));
+    assert.ok(changes.some((c) => c.path === '.' && c.change === 'modified'),
+      `the root dir mtime must catch the create+delete, got ${JSON.stringify(changes)}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

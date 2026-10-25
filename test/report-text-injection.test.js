@@ -26,9 +26,15 @@
 const assert = require('assert');
 const vm = require('../lib/view-model');
 
-// The control characters the issue names: a newline, a carriage return, ESC,
-// ENQ and the CSI introducer.
-const CONTROLS = ['\n', '\r', '\x1b', '\x05', '\x1b['];
+// The control characters: a newline, a carriage return, ESC, ENQ and the CSI
+// introducer, plus DEL (U+007F), NEL (U+0085) and the C1 CSI (U+009B). The
+// last three are the ones a JSON-stringify escape leaves raw.
+const CONTROLS = ['\n', '\r', '\x1b', '\x05', '\x1b[', '\x7f', '\u0085', '\u009b'];
+
+// Every control character that may not reach the rendered text: the C0
+// range, DEL and the C1 range (U+0080-U+009F).
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
+
 const UPDATED_AT = '2026-10-13T09:46:00Z';
 
 // A fact, as lib/runtime-snapshot.js emits it.
@@ -58,6 +64,43 @@ function setAt(node, path, value) {
   let cur = node;
   for (let i = 0; i < path.length - 1; i += 1) cur = cur[path[i]];
   cur[path[path.length - 1]] = value;
+}
+
+// Every numeric leaf of the fixture, by path. A number is provider-supplied
+// too — it is a measurement — so a hostile string in a numeric slot must not
+// reach the text either.
+function numberLeaves(node, path = [], out = []) {
+  if (typeof node === 'number') { out.push({ path }); return out; }
+  if (Array.isArray(node)) { node.forEach((v, i) => numberLeaves(v, path.concat(i), out)); return out; }
+  if (node && typeof node === 'object') {
+    for (const [k, v] of Object.entries(node)) numberLeaves(v, path.concat(k), out);
+  }
+  return out;
+}
+
+// The object KEYS that reach the text: the harness default names. Every
+// other key in the fixture is structural (a fact's `value`, a route's `id`),
+// and renaming one of those changes the snapshot's SHAPE rather than its
+// content — the sweep would then measure a different build, not the same
+// build with a hostile value.
+function defaultsKeyLeaves(fixture) {
+  const out = [];
+  for (const [hi, h] of (fixture.harnesses || []).entries()) {
+    const defaults = h && h.defaults;
+    if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) continue;
+    for (const key of Object.keys(defaults)) out.push({ path: ['harnesses', hi, 'defaults', key] });
+  }
+  return out;
+}
+
+// RENAME an object's key: the parent is navigated to, the value is moved to
+// the new key and the old key is removed. Assigning an existing key would
+// overwrite its VALUE instead — the key itself has to be replaced.
+function setKeyAt(node, path, value) {
+  const parent = path.slice(0, -1).reduce((cur, p) => cur[p], node);
+  const key = path[path.length - 1];
+  parent[value] = parent[key];
+  delete parent[key];
 }
 
 // The caller facts - every one of them reaches the requester / models /
@@ -268,21 +311,43 @@ let totalLeaves = 0;
 // over every string leaf of the fixture: many leaves of a fact (its
 // provenance, its source) never reach a line, so a floor over all of them
 // would keep the test green even if a renderer stopped rendering leaves
-// altogether. The floors sit just under the counts the fixtures reach today
-// (65 and 45), so a renderer that drops leaves trips the assert.
-const MIN_REACHED = { 'a populated runtime pool': 60, 'an empty runtime pool': 40 };
+// altogether. The floors sit just under the counts the fixtures reach today,
+// so a renderer that drops leaves trips the assert.
+const MIN_REACHED = { 'a populated runtime pool': 75, 'an empty runtime pool': 54 };
+
+// Every build the sweep produces must satisfy the same properties: the
+// report keeps its line count, no raw control character reaches it, and no
+// rendered line gains a physical line.
+function assertCleanReport(model, clean, cleanText, where) {
+  const text = model.lines.join('\n');
+  assert.strictEqual(model.lines.length, clean.lines.length,
+    `${where}: the report gained or lost a line`);
+  assert.strictEqual(text.split('\n').length, cleanText.split('\n').length,
+    `${where}: the report gained or lost a line`);
+  assert.ok(model.lines.every((l) => !CONTROL_RE.test(l)),
+    `${where}: a raw control character reached the report`);
+  for (const line of renderedLines(model)) {
+    assert.ok(!CONTROL_RE.test(line),
+      `${where}: a raw control character reached a rendered line`);
+    assert.strictEqual(line.split('\n').length, 1,
+      `${where}: a rendered line carries a newline`);
+  }
+  return text;
+}
 
 for (const variant of VARIANTS) {
   const leaves = stringLeaves(variant.fixture);
-  totalLeaves += leaves.length;
-  assert.ok(leaves.length >= 60,
-    `${variant.name}: the fixture carries enough string fields to be meaningful (${leaves.length})`);
+  const numbers = numberLeaves(variant.fixture);
+  const keys = defaultsKeyLeaves(variant.fixture);
+  totalLeaves += leaves.length + numbers.length + keys.length;
 
   const clean = vm.buildViewModel(cloneNode(variant.fixture), UPDATED_AT);
   const cleanText = clean.lines.join('\n');
   assert.ok(clean.lines.length > 0, `${variant.name}: the renderer produced text to check`);
   assert.strictEqual(cleanText.split('\n').length, clean.lines.length,
     `${variant.name}: the clean report holds no forged line`);
+  assert.ok(clean.lines.every((l) => !CONTROL_RE.test(l)),
+    `${variant.name}: the clean report carries no control character`);
 
   // The four renderers are driven by buildViewModel: each of their lines is
   // one line of the report.
@@ -290,39 +355,48 @@ for (const variant of VARIANTS) {
     assert.ok(cleanText.includes(line),
       `${variant.name}: a rendered line is missing from the report: ${line}`);
     assert.strictEqual(line.split('\n').length, 1,
-      `${variant.name}: a rendered line carries a newline: ${line}`);
+      `${variant.name}: a rendered line carries a newline`);
   }
+
+  // The hostile values: every string leaf, every numeric leaf (a number is
+  // provider-supplied too — it is replaced by a hostile string, not by
+  // another number), every key that reaches the text, and the updatedAt
+  // argument the report is stamped with.
+  const hostile = [
+    ...leaves.map((leaf) => ({ ...leaf, kind: 'value' })),
+    ...numbers.map((leaf) => ({ ...leaf, kind: 'number' })),
+    ...keys.map((leaf) => ({ ...leaf, kind: 'key' })),
+  ];
 
   const reaching = new Set();
 
-  for (const { path } of leaves) {
+  for (const leaf of hostile) {
     for (const ch of CONTROLS) {
       const dirtyFixture = cloneNode(variant.fixture);
-      setAt(dirtyFixture, path, `FORGED${ch}FORGED`);
+      const marker = `FORGED${ch}FORGED`;
+      if (leaf.kind === 'key') setKeyAt(dirtyFixture, leaf.path, marker);
+      else setAt(dirtyFixture, leaf.path, marker);
       const dirty = vm.buildViewModel(dirtyFixture, UPDATED_AT);
-      const dirtyText = dirty.lines.join('\n');
-      const where = `${variant.name}: ${path.join('.')}`;
-      if (dirtyText !== cleanText) reaching.add(path.join('.'));
-      assert.strictEqual(dirty.lines.length, clean.lines.length,
-        `${where}: the report gained or lost a line`);
-      assert.strictEqual(dirtyText.split('\n').length, cleanText.split('\n').length,
-        `${where}: the report gained or lost a line`);
-      assert.ok(dirty.lines.every((l) => !l.includes(ch)),
-        `${where}: the raw control character reached the report`);
-      for (const line of renderedLines(dirty)) {
-        assert.ok(!line.includes(ch),
-          `${where}: the raw control character reached a rendered line`);
-        assert.strictEqual(line.split('\n').length, 1,
-          `${where}: a rendered line carries a newline`);
-      }
+      const where = `${variant.name}: ${leaf.kind} ${leaf.path.join('.')}`;
+      const dirtyText = assertCleanReport(dirty, clean, cleanText, where);
+      if (dirtyText !== cleanText) reaching.add(`${leaf.kind}:${leaf.path.join('.')}`);
     }
+  }
+
+  // The cache timestamp the report is stamped with is an argument, not a
+  // leaf of the snapshot: it reaches the last line of the report.
+  for (const ch of CONTROLS) {
+    const dirty = vm.buildViewModel(cloneNode(variant.fixture), `FORGED${ch}FORGED`);
+    const where = `${variant.name}: updatedAt`;
+    const dirtyText = assertCleanReport(dirty, clean, cleanText, where);
+    if (dirtyText !== cleanText) reaching.add('updatedAt');
   }
 
   // The sweep must not become vacuous: the leaves that DO reach the text
   // must be many enough to cover every renderer.
   assert.ok(reaching.size >= MIN_REACHED[variant.name],
     `${variant.name}: too few leaves reach the rendered text (${reaching.size}, floor ${MIN_REACHED[variant.name]})`);
-  leafCounts.push(`${variant.name}: ${leaves.length} leaves, ${reaching.size} reach the text`);
+  leafCounts.push(`${variant.name}: ${leaves.length} strings + ${numbers.length} numbers + ${keys.length} keys, ${reaching.size} reach the text`);
 }
 
 // ---- the hostile value is ESCAPED, not dropped ------------------------------
@@ -347,7 +421,9 @@ for (const variant of VARIANTS) {
     ['routes', 0, 'id'],
     ['routes', 0, 'resource', 'balance', 'currency'],
     ['routes', 0, 'resource', 'balance', 'limit', 'period'],
+    ['routes', 0, 'resource', 'periodEnd', 'value'],
     ['routes', 2, 'resource', 'windows', 0, 'type'],
+    ['routes', 2, 'resource', 'windows', 1, 'limit'],
     ['routes', 0, 'models', 'value', 0],
     ['routes', 4, 'resource', 'error'],
   ];
@@ -365,9 +441,29 @@ for (const variant of VARIANTS) {
     assert.strictEqual(text.split('\n').length, cleanCount,
       `${where}: the escaped value forged a line`);
   }
+
+  // The object KEY that reaches the text (the harness default name).
+  {
+    const fixture = cloneNode(VARIANTS[0].fixture);
+    setKeyAt(fixture, ['harnesses', 0, 'defaults', 'model'], marker);
+    const text = vm.buildViewModel(fixture, UPDATED_AT).lines.join('\n');
+    assert.ok(text.includes(escaped),
+      'harnesses.0.defaults.model: the escaped value is missing from the report');
+    assert.ok(!text.includes(marker),
+      'harnesses.0.defaults.model: the raw value reached the report');
+  }
+
+  // The updatedAt argument the report is stamped with.
+  {
+    const text = vm.buildViewModel(cloneNode(VARIANTS[0].fixture), marker).lines.join('\n');
+    assert.ok(text.includes(escaped),
+      'updatedAt: the escaped value is missing from the report');
+    assert.ok(!text.includes(marker),
+      'updatedAt: the raw value reached the report');
+  }
 }
 
-console.log(`report-text-injection: PASS (${VARIANTS.length} variants, ${totalLeaves} string leaves [${leafCounts.join(', ')}], ${CONTROLS.length} controls)`);
+console.log(`report-text-injection: PASS (${VARIANTS.length} variants, ${totalLeaves} leaves [${leafCounts.join(', ')}], ${CONTROLS.length} controls)`);
 
 // The fixtures are exported so the byte-identical proof can render the SAME
 // snapshot through the pre-fix and the post-fix view model and compare the

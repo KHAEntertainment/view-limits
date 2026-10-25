@@ -217,7 +217,16 @@ test('barLevel: 0% exhausted, under the threshold constrained, otherwise healthy
 });
 
 test('dashboardUrlFor: a fixed table for built-in providers; custom and recipe routes get none', () => {
-  assert.strictEqual(L.dashboardUrlFor({ provider: 'xiaomi', recipe: null }), 'https://platform.xiaomimimo.com/');
+  // The owner-verified table, pinned exactly.
+  assert.deepStrictEqual({ ...L.PROVIDER_DASHBOARDS }, {
+    xiaomi: 'https://platform.xiaomimimo.com/console/plan-manage',
+    minimax: 'https://platform.minimax.io/console/usage',
+    kimi: 'https://www.kimi.ai/code/console',
+    openrouter: 'https://openrouter.ai/settings/credits',
+    deepseek: 'https://platform.deepseek.com/usage',
+    glm: 'https://z.ai/manage-apikey/coding-plan/personal/usage',
+  });
+  assert.strictEqual(L.dashboardUrlFor({ provider: 'xiaomi', recipe: null }), 'https://platform.xiaomimimo.com/console/plan-manage');
   for (const p of ['minimax', 'kimi', 'openrouter', 'deepseek', 'glm']) {
     const url = L.dashboardUrlFor({ provider: p, recipe: null });
     assert.ok(url && L.safeHttpsUrl(url) === url, p);
@@ -310,7 +319,7 @@ test('each bar is coloured by its own window (M2-A); the route state stays on th
 test('local cards: a Dashboard button for built-in providers only, opened safely', () => {
   const links = (r) => findAll(R.routeCard(r, ctx()), (n) => n.tag === 'a' && hasClass(n, 'dash'));
   const [kimi] = links(route({ provider: 'kimi' }));
-  assert.strictEqual(kimi.attrs.href, 'https://www.kimi.com/code');
+  assert.strictEqual(kimi.attrs.href, 'https://www.kimi.ai/code/console');
   assert.strictEqual(kimi.attrs.target, '_blank');
   assert.strictEqual(kimi.attrs.rel, 'noopener noreferrer');
   assert.strictEqual(links(route({ provider: 'my-proxy', recipe: 'openai-compatible' })).length, 0);
@@ -429,7 +438,7 @@ test('hostile labels, reasons and URLs render as text; no markup, no script link
     'the rejected reauth URL is not rendered as a link');
   // The hostile provider id resolves to no dashboard; Xiaomi's fixed one does.
   const hrefs = elements.filter((e) => e.tag === 'a').map((e) => e.attrs.href);
-  assert.deepStrictEqual(hrefs, ['https://platform.xiaomimimo.com/']);
+  assert.deepStrictEqual(hrefs, ['https://platform.xiaomimimo.com/console/plan-manage']);
   // The unknown reason code is dropped, the known one is shown.
   assert.ok(root.textContent.includes('stale observation'));
 });

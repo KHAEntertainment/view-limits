@@ -1163,6 +1163,10 @@ const CONFIG_READERS = [
   // config.json refuses (exit 9 / 10) before any daemon is spawned, so the
   // interval is never read from built-in defaults.
   'bin/vl.js | dashboardCmd | loadConfig | ',
+  // Issue #62 LAN view: `lan url` reads the confirmed config; enable/disable
+  // read-modify-write dashboard.lan under the mutation lock.
+  'bin/vl.js | dashboardLanCmd | loadConfig | ',
+  'bin/vl.js | writeLanConfig | readUserConfigStrict | ',
   // The view's own read: strict default (it refuses), and the mark is
   // surfaced by the command itself — the JSON envelope is printed before
   // the exit, so the wrapper's immediate exit cannot be used here.

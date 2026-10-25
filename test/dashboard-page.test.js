@@ -332,7 +332,7 @@ test('LAN preview: no controls, no links, no identifiers, every route in order',
     route({ id: 'k', label: 'Kimi', provider: 'kimi', accountId: 'acct-secret', error: 'raw provider error text' }),
     route({ id: 'c', label: 'my-proxy', provider: 'my-proxy', recipe: 'openai-compatible' }),
   ], [{ identity: { host: 'host-name-q', provider: 'anthropic', profileId: 'profile-id-q' }, harness: 'claude', state: 'healthy', windows: [], reasonCodes: [] }]);
-  const tree = R.renderPage(doc, ctx({ mode: 'lan' }));
+  const tree = R.renderPage(doc, ctx({ mode: 'lan', preview: true }));
   const text = textOf(tree);
   assert.strictEqual(findAll(tree, (n) => n.tag === 'a').length, 0, 'no links on the LAN view');
   assert.strictEqual(findAll(tree, (n) => n.tag === 'button').length, 0, 'no controls on the LAN view');

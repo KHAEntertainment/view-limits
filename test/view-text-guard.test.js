@@ -201,67 +201,76 @@ function topLevelConcatenations(source) {
 // parameter list, which may carry braces of its own (a destructuring
 // parameter or a default value) - taking the first `{` after the name would
 // stop at those and scan nothing.
-function functionSource(name) {
-  const start = SOURCE.search(new RegExp(`^function ${name}\\(`, 'm'));
-  assert.notStrictEqual(start, -1, `${name} must exist in lib/view-model.js`);
+function functionSource(source, name) {
+  const start = source.search(new RegExp(`^function ${name}\\(`, 'm'));
+  assert.notStrictEqual(start, -1, `${name} must exist in the scanned source`);
   let p = start;
-  while (p < SOURCE.length && SOURCE[p] !== '(') p += 1;
+  while (p < source.length && source[p] !== '(') p += 1;
   let parenDepth = 1;
   p += 1;
-  while (p < SOURCE.length && parenDepth > 0) {
-    const c = SOURCE[p];
+  while (p < source.length && parenDepth > 0) {
+    const c = source[p];
     if (c === '\\') { p += 2; continue; }
-    if (c === "'" || c === '"') { p = skipString(SOURCE, p); continue; }
-    if (c === '`') { p = skipTemplate(SOURCE, p); continue; }
+    if (c === "'" || c === '"') { p = skipString(source, p); continue; }
+    if (c === '`') { p = skipTemplate(source, p); continue; }
     if (c === '(') parenDepth += 1;
     else if (c === ')') parenDepth -= 1;
     p += 1;
   }
-  const open = SOURCE.indexOf('{', p);
+  const open = source.indexOf('{', p);
   let depth = 0;
   let i = open;
-  while (i < SOURCE.length) {
-    const c = SOURCE[i];
+  while (i < source.length) {
+    const c = source[i];
     if (c === '\\') { i += 2; continue; }
-    if (c === '/' && (SOURCE[i + 1] === '/' || SOURCE[i + 1] === '*')) { i = skipComment(SOURCE, i); continue; }
-    if (c === "'" || c === '"') { i = skipString(SOURCE, i); continue; }
-    if (c === '`') { i = skipTemplate(SOURCE, i); continue; }
+    if (c === '/' && (source[i + 1] === '/' || source[i + 1] === '*')) { i = skipComment(source, i); continue; }
+    if (c === "'" || c === '"') { i = skipString(source, i); continue; }
+    if (c === '`') { i = skipTemplate(source, i); continue; }
     if (c === '{') depth += 1;
     else if (c === '}') {
       depth -= 1;
-      if (depth === 0) return SOURCE.slice(start, i + 1);
+      if (depth === 0) return source.slice(start, i + 1);
     }
     i += 1;
   }
   throw new Error(`${name}: unbalanced braces`);
 }
 
-const findings = [];
-
-for (const name of SCANNED) {
-  const source = functionSource(name);
-  for (const expression of collectInterpolations(source)) {
-    if (!expression) continue;
-    if (!isAllowedExpression(expression)) {
-      findings.push(`${name}: \${${expression}} is not an allowed form`);
+// Every finding in `source`'s copy of the scanned renderers. Takes the source
+// so the same checker can be run against the real file and against in-memory
+// probes (Issue #92).
+function findingsIn(source, names = SCANNED) {
+  const findings = [];
+  for (const name of names) {
+    const body = functionSource(source, name);
+    for (const expression of collectInterpolations(body)) {
+      if (!expression) continue;
+      if (!isAllowedExpression(expression)) {
+        findings.push(`${name}: \${${expression}} is not an allowed form`);
+      }
+    }
+    for (const { append, rest } of topLevelConcatenations(body)) {
+      // Every operand of a concatenation must itself be an allowed form: a
+      // template literal (whose own interpolations are checked above), an
+      // allowed call, or a fixed literal. A bare local is not - and neither is
+      // a `+` composite, whose right operand would escape the sanitizer.
+      const operand = rest.startsWith('`') ? '`a template`' : rest;
+      const ok = append
+        && (rest.startsWith('`') || isAllowedExpression(operand))
+        && !/\+/.test(operand);
+      if (!ok) {
+        findings.push(`${name}: a string concatenation (${append ? '+=' : '+'}) is not an allowed form`);
+      }
     }
   }
-  for (const { append, rest } of topLevelConcatenations(source)) {
-    // Every operand of a concatenation must itself be an allowed form: a
-    // template literal (whose own interpolations are checked above), an
-    // allowed call, or a fixed literal. A bare local is not - and neither is
-    // a `+` composite, whose right operand would escape the sanitizer.
-    const operand = rest.startsWith('`') ? '`a template`' : rest;
-    const ok = append
-      && (rest.startsWith('`') || isAllowedExpression(operand))
-      && !/\+/.test(operand);
-    if (!ok) {
-      findings.push(`${name}: a string concatenation (${append ? '+=' : '+'}) is not an allowed form`);
-    }
-  }
+  return findings;
 }
+
+const findings = findingsIn(SOURCE);
 
 assert.deepStrictEqual(findings, [],
   `the view text renderers interpolate a provider field directly:\n  ${findings.join('\n  ')}`);
 
 console.log('view-text-guard: PASS');
+
+module.exports = { findingsIn, isAllowedExpression };

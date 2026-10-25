@@ -141,10 +141,10 @@ function fakePreload(dataDir) {
     const Module = require('module');
     const load = Module._load;
     Module._load = function (id, ...args) {
-      if (id.endsWith('/lib/vault')) return {
+      if (typeof id === 'string' && (id.endsWith('/lib/vault') || id === './vault')) return {
         has: () => true, get: () => 'fake-test-key',
         remove: () => true, set: () => true, assertWritable: () => {} };
-      if (id.endsWith('/lib/adapters')) return {
+      if (typeof id === 'string' && (id.endsWith('/lib/adapters') || id === './adapters')) return {
         getAdapter: () => ({ async fetchStatus() {
           return { state: 'healthy', windows: [], balance: null, resetAt: null }; } }),
         ADAPTERS: {} };
@@ -198,10 +198,11 @@ test('Claude, Codex and OpenCode surfaces all resolve to the identical bin/vl.js
   assert.strictEqual(new Set(exes).size, 1, `surfaces named different binaries: ${exes}`);
 
   // Each surface gets the ONE subcommand it is documented to dispatch, and
-  // nothing else — a harness may not grow private arguments.
-  assert.deepStrictEqual(claude, ['refresh'], 'Claude dispatches exactly `refresh`');
-  assert.deepStrictEqual(codex, ['status'], 'Codex dispatches exactly `status`');
-  assert.deepStrictEqual(opencode, ['refresh'], 'OpenCode dispatches exactly `refresh`');
+  // nothing else — a harness may not grow private arguments. Since #60 every
+  // user surface resolves the SAME live view.
+  assert.deepStrictEqual(claude, ['view'], 'Claude dispatches exactly `view`');
+  assert.deepStrictEqual(codex, ['view'], 'Codex dispatches exactly `view`');
+  assert.deepStrictEqual(opencode, ['view'], 'OpenCode dispatches exactly `view`');
 });
 
 test('the harness surfaces resolve their own checkout outside a git repo (no Claude vars needed)', () => {
@@ -322,11 +323,11 @@ test('the cache-only observation every surface shares reaches no provider and no
     const Module = require('module');
     const load = Module._load;
     Module._load = function (id, ...a) {
-      if (typeof id === 'string' && id.endsWith('/lib/vault')) {
+      if (typeof id === 'string' && (id.endsWith('/lib/vault') || id === './vault')) {
         return { has: () => true, get: () => 'fake-test-key',
                  remove: () => true, set: () => true, assertWritable: () => {} };
       }
-      if (typeof id === 'string' && id.endsWith('/lib/adapters')) {
+      if (typeof id === 'string' && (id.endsWith('/lib/adapters') || id === './adapters')) {
         return { ...load.call(this, id, ...a), getAdapter: blocked('provider.getAdapter') };
       }
       return load.call(this, id, ...a);

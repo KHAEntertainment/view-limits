@@ -379,7 +379,12 @@ async function until(predicate, deadlineMs = 5000) {
     assert.strictEqual(out.status, 0, out.stderr);
     assert.match(out.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/);
     assert.ok(!out.stdout.includes(String(OLD_COUNTS)));
-    assert.ok(!out.stdout.includes('(stale)'));
+    // The live Xiaomi row renders fresh; B1 means the sibling without a
+    // credential (kimi) KEEPS its prior entry, so its aged observation may
+    // legitimately show stale.
+    const xiaomiLine = out.stdout.split('\n').find((l) => l.includes('xiaomi-token-plan:'));
+    assert.ok(xiaomiLine && !xiaomiLine.includes('(stale)'), 'the live Xiaomi row is fresh');
+    assert.match(out.stdout, /kimi-code-plan: healthy · weekly 74%/, 'the kimi sibling keeps its prior entry');
     assert.strictEqual(fetches(ctx).length, 2);
     const entry = readStatus(ctx).routes[XIOMI_ID];
     assert.strictEqual(entry.status.windows[0].remaining, FRESH_COUNTS);

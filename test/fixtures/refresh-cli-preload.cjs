@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 const cp = require('child_process');
+const { isModuleId } = require('./module-id.cjs');
 const dir = process.env.CLAUDE_PLUGIN_DATA;
 function log(kind, extra = {}) {
   fs.appendFileSync(path.join(dir, 'events'), JSON.stringify({ kind, pid: process.pid, ...extra }) + '\n');
@@ -24,10 +25,24 @@ cp.spawn = function (...args) {
 process.on('exit', () => log('exit', { command: process.argv[2] }));
 const load = Module._load;
 Module._load = function (id, ...args) {
-  if (id.endsWith('/lib/vault')) return { has: () => true, get: () => 'fake-test-key' };
-  if (id.endsWith('/lib/adapters')) return { getAdapter: () => ({
+  if (isModuleId(id, 'vault')) {
+    const noVault = process.env.VL_REFRESH_NO_VAULT === '1';
+    return { has: () => !noVault, get: () => (noVault ? null : 'fake-test-key') };
+  }
+  if (isModuleId(id, 'adapters')) return { getAdapter: () => ({
     async fetchStatus() {
       log('provider');
+      // VL_REFRESH_FAIL=1 makes the provider throw, so a test can drive the
+      // failed-fetch path (the route keeps its prior observation and the
+      // refresh says so). VL_REFRESH_FAIL_MULTILINE=1 makes the error
+      // multi-line, so the one-line sanitization is testable.
+      if (process.env.VL_REFRESH_FAIL === '1') {
+        throw new Error(process.env.VL_REFRESH_FAIL_MULTILINE === '1'
+          ? 'HTTP 502: upstream\nunavailable\r\n  retry later'
+          : process.env.VL_REFRESH_FAIL_CONTROLS === '1'
+            ? 'HTTP 502: \u001b[2J\u001b[HFAKE HEALTHY\u009b31m\u0007'
+            : 'HTTP 502: upstream unavailable');
+      }
       const end = Date.now() + 8000;
       while (!fs.existsSync(path.join(dir, 'release'))) {
         if (Date.now() > end) throw new Error('test provider release timeout');
@@ -36,6 +51,16 @@ Module._load = function (id, ...args) {
       return { state: 'healthy', windows: [], balance: null, resetAt: null };
     },
   }) };
+  if (isModuleId(id, 'traycer-adapter')) {
+    // The collector's bounded native observation (B3) must stay hermetic in
+    // the CLI tests: never spawn a real traycer CLI (the test env may carry
+    // the launch identity). Keep every other export (the CLI reads
+    // traycerEnvCallerContext from this module).
+    const real = load.call(this, id, ...args);
+    return Object.assign({}, real, {
+      readTraycerRuntime: async () => ({ caller: null, sessions: [], harnesses: [], profiles: [], diagnostics: [] }),
+    });
+  }
   return load.call(this, id, ...args);
 };
 if (process.env.VL_FAIL_SCHEDULING) {

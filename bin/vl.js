@@ -33,14 +33,13 @@ const { spawn } = require('child_process');
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt } = require('../lib/config');
 const {
-  readCache, writeCache, isFresh, recoveryBoundedFreshUntil,
-  tryScheduleRefresh, acquireWorker, releaseWorker, spawnRefresh,
+  readCache, writeCache, isFresh,
+  tryScheduleRefresh, spawnRefresh,
 } = require('../lib/cache');
 const { resolveRoute, dispatchContext } = require('../lib/routes');
 const { decide, summarize } = require('../lib/gate');
 const vault = require('../lib/vault');
 const { getAdapter, ADAPTERS } = require('../lib/adapters');
-const { validateMonitor } = require('../lib/monitor-schema');
 // Issue #56: a recipe that authenticates through its own approved CLI (the
 // Bailian CLI owns its console credential) stores no secret under route.id, so
 // it declares `capabilities.vaultCredential === false`. This predicate reads
@@ -67,7 +66,16 @@ const { validProfile } = require('../lib/cookies/chrome');
 const { buildHelper } = require('../lib/helper-install');
 // Phase 0 (Issue #35): transport-neutral view model — owns the presentation
 // layer's rendering; vl.js only joins its pre-formatted text lines.
-const { buildViewModel, reauthNote, buildViewSchema, renderViewText, VIEW_SCHEMA_VERSION } = require('../lib/view-model');
+const { buildViewModel, reauthNote, buildViewSchema, buildCollectionBlock, renderViewText, VIEW_SCHEMA_VERSION, escapeControlChars } = require('../lib/view-model');
+// Issue #60: the shared live collector. It is the ONE place a live collection
+// happens — the refresh-worker ownership, the adapter fan-out and the cache
+// publish — so the refresh and the view cannot drift apart. The gate and the
+// snapshot never call it: they stay cache-only and fail-open.
+const collector = require('../lib/collector');
+// The route-eligibility predicates live with the collector: one definition,
+// one truth. (lib/collector.js owns them so the collection and the report
+// agree on what "configured" means.)
+const { isConfiguredRoute, isCustomMonitored } = collector;
 
 const PLUGIN_ROOT = process.env.CLAUDE_PLUGIN_ROOT || path.resolve(__dirname, '..');
 const XIAOMI_ROUTE_ID = xiaomiSession.XIAOMI_ROUTE_ID;
@@ -121,25 +129,9 @@ function xiaomiCacheFilter(cfg) {
   };
 }
 
-// Run the live Xiaomi session ONCE per operation (F4: one Chrome read + at
-// most one usage/detail pair for the whole report/refresh, no matter how
-// many Xiaomi route aliases are configured) and project that single status
-// to every Xiaomi route. The session never throws by contract; a defensive
-// catch still yields a classified unknown so a report can never fall back to
-// cached counts.
-async function xiaomiLiveStatuses(cfg, sessionCtx = {}) {
-  const statusById = {};
-  const routes = cfg.routes.filter(isXiaomi);
-  if (!routes.length) return statusById;
-  let status;
-  try {
-    status = await xiaomiSession.fetchStatus(cfg, routes[0], sessionCtx);
-  } catch {
-    status = xiaomiSession.errorStatus(xiaomiSession.DEFAULT_ERROR);
-  }
-  for (const route of routes) statusById[route.id] = status;
-  return statusById;
-}
+// The live Xiaomi session ONCE per operation lives in lib/collector.js
+// (Issue #60): it is the ONE live collection path, and it returns the status
+// map plus whether the session itself failed.
 
 // Display entries for live Xiaomi statuses. These render as fresh because
 // this process just observed them; the cache file itself keeps ttlSeconds 0
@@ -169,22 +161,23 @@ function xiaomiLiveEntries(cfg, statusById) {
 // JSON — including under refresh-lock contention. Applies even when no status
 // cache exists yet (first-run) or the cache is corrupt: a live Xiaomi
 // observation must render either way.
-function overlayReader(cfg, liveEntries) {
+function overlayDoc(cfg, liveEntries, raw) {
   const isXiaomiEntry = xiaomiCacheFilter(cfg);
-  return (dir) => {
-    const raw = defaultReadStatus(dir);
-    const doc = raw.doc && typeof raw.doc === 'object' && !Array.isArray(raw.doc) && raw.doc.routes
-      && typeof raw.doc.routes === 'object' && !Array.isArray(raw.doc.routes)
-      ? raw.doc
-      : { updatedAt: null, routes: {} };
-    const routes = {};
-    for (const [id, entry] of Object.entries(doc.routes)) {
-      if (isXiaomiEntry(id, entry)) continue;
-      routes[id] = entry;
-    }
-    Object.assign(routes, liveEntries || {});
-    return { ...raw, doc: { ...doc, routes } };
-  };
+  const doc = raw && raw.doc && typeof raw.doc === 'object' && !Array.isArray(raw.doc) && raw.doc.routes
+    && typeof raw.doc.routes === 'object' && !Array.isArray(raw.doc.routes)
+    ? raw.doc
+    : { updatedAt: null, routes: {} };
+  const routes = {};
+  for (const [id, entry] of Object.entries(doc.routes)) {
+    if (isXiaomiEntry(id, entry)) continue;
+    routes[id] = entry;
+  }
+  Object.assign(routes, liveEntries || {});
+  return { ...raw, doc: { ...doc, routes } };
+}
+
+function overlayReader(cfg, liveEntries) {
+  return (dir) => overlayDoc(cfg, liveEntries, defaultReadStatus(dir));
 }
 
 function readStdin() {
@@ -252,23 +245,8 @@ async function gate() {
 // A custom route: a non-null route.monitor that passes schema validation.
 // Invalid monitors still resolve (to a stable unknown) via check, but are not
 // worth a refresh slot.
-function isCustomMonitored(route) {
-  if (!route || route.monitor == null) return false;
-  return validateMonitor(route).ok;
-}
-
-// A route takes part when it has a credential under its id, OR when its recipe
-// declares that it authenticates through its own CLI (or documents no quota
-// source at all) and holds none for us — keyed on the capability flag, never
-// on a recipe id.
-function isConfiguredRoute(route) {
-  return !routeNeedsVaultCredential(route) || vault.has(route.id);
-}
-
-// #57: a route whose recipe documents no quota source (stepfun-plan) resolves
-// to capability { monitorable:false, reason:'unmonitored:<recipe>' }. Such a
-// route needs no vault credential and is refreshed/reported as unmonitored —
-// never silently dropped and never promoted to a capacity state.
+// (Issue #60: isCustomMonitored and isConfiguredRoute now live in
+// lib/collector.js, next to the collection that uses them.)
 function isUnmonitored(route, cfg) {
   try {
     const a = getAdapter(route.provider, route, cfg);
@@ -299,19 +277,9 @@ function unmonitoredBlock(cfg) {
   return lines.join('\n');
 }
 
-function entryFor(route, status, source) {
-  const ttl = route.ttlSeconds != null ? route.ttlSeconds : 180;
-  const now = Date.now();
-  const observedAt = new Date(now).toISOString();
-  // Custom (route.monitor) routes: a deny-eligible exhaustion expires by its
-  // known recovery, not only by TTL (Issue #55). Built-ins keep TTL-only.
-  const freshUntil = new Date(recoveryBoundedFreshUntil(route, status, now + ttl * 1000)).toISOString();
-  return { routeId: route.id, observedAt, freshUntil, source, status };
-}
-
-function unknownStatus(detail) {
-  return { state: 'unknown', windows: [], balance: null, resetAt: null, detail };
-}
+// The cache entry builder (entryFor) and the classified unknown status
+// (unknownStatus) live in lib/collector.js (Issue #60): the collector builds
+// the entries, so it owns their shape.
 
 async function refresh(quiet, fromSessionStart = false) {
   // A manual refresh refuses an unconfirmed read (the default): it is not "no
@@ -320,17 +288,16 @@ async function refresh(quiet, fromSessionStart = false) {
   // and the `session-start` hook reports the notice instead.
   const cfg = loadConfig(fromSessionStart ? { sessionWarmup: true } : undefined);
   if (fromSessionStart && (configInconclusive(cfg) || configCorrupt(cfg) || !cfg.refreshOnSessionStart)) return;
-  // Xiaomi eligibility is config-only (route presence) — no vault read.
-  // Custom routes (Issue #55) carry their source on a valid route.monitor
-  // rather than in cfg.providers; they still need a vault credential keyed
-  // to route.id, and are otherwise skipped as unmonitored (not an error).
-  // #57: a route whose recipe documents no quota source is also configured
-  // by presence alone — routeNeedsVaultCredential returns false for it now
-  // that stepfun-plan declares vaultCredential:false.
-  const configured = cfg.routes.filter((r) => (isXiaomi(r)
-    ? true
-    : (cfg.providers[r.provider] || isCustomMonitored(r)) && isConfiguredRoute(r)));
-  if (!configured.length) {
+
+  // Issue #60: the collection lives in lib/collector.js — the shared
+  // refresh-worker ownership, the adapter fan-out and the cache publish.
+  // This function is the thin caller: it decides what to PRINT. Its stdout,
+  // stderr and exit codes are unchanged for the same inputs; the ONE
+  // intended difference is a failed route, which now keeps its prior data
+  // (and its age) instead of being overwritten with an unknown status.
+  const result = await collector.collect({ cfg });
+
+  if (result.outcome === collector.OUTCOME.NO_CREDENTIALS) {
     if (!quiet) process.stdout.write(noCredentialMessage());
     return;
   }
@@ -339,11 +306,7 @@ async function refresh(quiet, fromSessionStart = false) {
   // and the gate-spawned refresh child all converge on this lock. Only one
   // worker performs provider calls; the loser prints the cached state plus
   // an in-progress indication and exits without calling any provider.
-  const ownerToken = crypto.randomBytes(16).toString('hex');
-  const acq = await acquireWorker({
-    ownerToken,
-  });
-  if (!acq.acquired) {
+  if (result.outcome === collector.OUTCOME.IN_PROGRESS) {
     if (!quiet) {
       const cache = readCache();
       // Contention: Xiaomi shows pending — never the cached counts.
@@ -356,61 +319,51 @@ async function refresh(quiet, fromSessionStart = false) {
         io: { readStatus: overlayReader(cfg, xiaomiLiveEntries(cfg, pendingById)) },
       });
       process.stdout.write(renderInventory(snap, cache.updatedAt) + '\n');
+      process.stdout.write('view-limits: refresh already in progress. Showing last cached status.\n');
+    }
+    return;
+  }
+
+  if (!result.published) {
+    // The worker lock could not be taken, or the publish failed. Nothing was
+    // published: show the last cached status and say why. A publish failure
+    // keeps today's failure mode — the refresh rejects and the CLI exits
+    // nonzero.
+    if (result.reason === collector.REASON.PUBLISH_FAILED) throw new Error(result.error);
+    if (!quiet) {
+      const cache = readCache();
+      const pendingById = {};
+      for (const route of cfg.routes) {
+        if (isXiaomi(route)) pendingById[route.id] = xiaomiSession.pendingStatus();
+      }
+      const snap = await getRuntimeSnapshot({
+        callerContext: cliCallerContext(),
+        io: { readStatus: overlayReader(cfg, xiaomiLiveEntries(cfg, pendingById)) },
+      });
+      process.stdout.write(renderInventory(snap, cache.updatedAt) + '\n');
       process.stdout.write(
-        `view-limits: ${acq.error ? 'refresh unavailable (' + acq.error + ')' : 'refresh already in progress'}. ` +
-        `Showing last cached status.\n`,
+        `view-limits: refresh unavailable (${result.error || result.reason}). Showing last cached status.\n`,
       );
     }
     return;
   }
 
-  try {
-    const threshold = cfg.gate.constrainedThreshold;
-    const statuses = {};
-    // F4: exactly ONE Xiaomi session call for the whole refresh — one Chrome
-    // read + at most one usage/detail pair, projected to every Xiaomi alias.
-    // Other providers keep independent parallel fetches.
-    const xiaomiPromise = xiaomiLiveStatuses(cfg, { threshold });
-    await Promise.all([
-      xiaomiPromise,
-      ...configured.filter((route) => !isXiaomi(route)).map(async (route) => {
-        try {
-          // Credential-free recipes (vaultCredential:false) never read the
-          // vault — the adapter receives null instead of triggering a
-          // keychain/security lookup for a secret that cannot exist.
-          const routeToken = routeNeedsVaultCredential(route) ? vault.get(route.id) : null;
-          statuses[route.id] = await getAdapter(route.provider, route, cfg)
-            .fetchStatus(cfg.providers[route.provider], routeToken, { threshold });
-        } catch (e) {
-          statuses[route.id] = unknownStatus({ error: e.message });
-        }
-      }),
-    ]);
-    Object.assign(statuses, await xiaomiPromise);
-
-    const cacheEntries = {};
-    for (const route of configured) cacheEntries[route.id] = entryFor(route, statuses[route.id], route.provider);
-    // Issue #58: pass the routes so each entry carries its `configRevision`.
-    // This is the production WRITER that #54 left unwired — without it the
-    // field is never published and `lib/gate.js`'s obsolete-config guard has
-    // nothing to read, so a cached exhaustion could outlive an edit to the
-    // route it describes.
-    const doc = writeCache(cacheEntries, { routes: configured });
-    if (!quiet) {
-      // Render the just-observed Xiaomi state; the cache keeps ttlSeconds 0
-      // for the gate, display freshness marks this process's observation.
-      const snap = await getRuntimeSnapshot({
-        callerContext: cliCallerContext(),
-        io: { readStatus: overlayReader(cfg, xiaomiLiveEntries(cfg, statuses)) },
-      });
-      process.stdout.write(renderInventory(snap, doc.updatedAt) + '\n');
-      // #57: unmonitored routes are refreshed locally (no request) and get an
-      // explicit note; they are never silently dropped.
-      const ub = unmonitoredBlock(cfg);
-      if (ub) process.stdout.write(ub + '\n');
-    }
-  } finally {
-    releaseWorker(acq);
+  if (!quiet) {
+    // Render the just-observed Xiaomi state; the cache keeps ttlSeconds 0
+    // for the gate, display freshness marks this process's observation.
+    const snap = await getRuntimeSnapshot({
+      callerContext: cliCallerContext(),
+      io: { readStatus: overlayReader(cfg, xiaomiLiveEntries(cfg, result.statuses)) },
+    });
+    process.stdout.write(renderInventory(snap, (result.cache && result.cache.updatedAt) || null) + '\n');
+    // #57: unmonitored routes are refreshed locally (no request) and get an
+    // explicit note; they are never silently dropped.
+    const ub = unmonitoredBlock(cfg);
+    if (ub) process.stdout.write(ub + '\n');
+    // A failed route keeps its prior observation — so the output must still
+    // say that the fetch failed. On stdout, where the inventory printed the
+    // error before, and never under --quiet.
+    for (const line of failedRouteLines(result, 'refresh', true)) process.stdout.write(line + '\n');
   }
 }
 
@@ -485,7 +438,7 @@ async function reportCmd(args) {
   // usage/detail pair for the whole operation (F4), projected to every
   // Xiaomi alias. Every recognizable cached Xiaomi row — configured,
   // canonical, orphaned — is stripped from this render (F1).
-  const statusById = await xiaomiLiveStatuses(cfg, { threshold: cfg.gate.constrainedThreshold });
+  const { statusById } = await collector.xiaomiLiveStatuses(cfg, { threshold: cfg.gate.constrainedThreshold });
   const liveEntries = xiaomiLiveEntries(cfg, statusById);
   if (args.includes('--json')) {
     const isXiaomiEntry = xiaomiCacheFilter(cfg);
@@ -1911,7 +1864,79 @@ function viewFailureEnvelope(kind) {
     status: kind === 'config-absent' ? 'not-configured' : 'failed',
     reasonCodes,
     routes: [],
+    // Issue #60: every envelope carries a collection block. The collection
+    // never ran here — the configuration was refused before it could — so
+    // the block says exactly that.
+    collection: buildCollectionBlock({
+      outcome: kind === 'config-absent' ? 'no-credentials' : 'not-run',
+      published: false,
+      reason: reasonCodes[0],
+      routes: [],
+    }),
   };
+}
+
+// One line per FAILED route.
+//
+// A failed route keeps its prior observation — that is the point — but an old
+// fact is never a SILENT substitute for a failure: the output has to say that
+// the fetch failed, which route it was and what the error was.
+//
+// The rotate hint appears where the inventory printed it (the report's route
+// line carried it for every provider error); the view never carried one.
+//
+// Every interpolated value passes through the #88 control-character escaper
+// (lib/view-model.js#escapeControlChars): a provider error body may carry
+// ESC / C1 / BEL, and those bytes must never reach a terminal raw (B2).
+function failedRouteLines(result, what, withRotate) {
+  const lines = [];
+  for (const r of (result && result.routes) || []) {
+    if (r.outcome !== collector.ROUTE_OUTCOME.FAILED) continue;
+    const error = diagText(r.error || 'unknown error');
+    const entry = result.entries && result.entries[r.id];
+    const observedAt = entry && typeof entry.observedAt === 'string' ? entry.observedAt : null;
+    const kept = (r.retained === true && observedAt)
+      ? `showing the last observation from ${diagText(observedAt)}`
+      : 'no cached observation to fall back to';
+    const rotate = withRotate ? ` (rotate via /view-limits:update ${diagText(r.id)})` : '';
+    lines.push(`view-limits: ${diagText(r.id)} ${what} failed (${error}); ${kept}${rotate}`);
+  }
+  return lines;
+}
+
+// The diagnostic text boundary: fold whitespace, then escape control
+// characters (B2). Every diagnostic sink — the refresh failure line and the
+// view's stderr notices — uses it.
+function diagText(value) {
+  return escapeControlChars(collector.oneLine(value === null || value === undefined ? '' : String(value)));
+}
+
+// The collection diagnostic. It goes to STDERR: the view's stdout is the
+// approved text layout (or the one JSON envelope) and nothing else, so a
+// machine consumer never has to parse a human line.
+function collectionNotice(result) {
+  if (!result) return null;
+  const lines = [];
+  if (result.outcome === collector.OUTCOME.PARTIAL) {
+    const failed = (result.routes || []).filter((r) => r.outcome === collector.ROUTE_OUTCOME.FAILED);
+    lines.push(`view-limits: collection partial — ${failed.length} route(s) failed`);
+  } else if (result.outcome === collector.OUTCOME.IN_PROGRESS) {
+    lines.push('view-limits: collection in progress — another worker is refreshing; showing the last cached status');
+  } else if (result.outcome === collector.OUTCOME.FAILED) {
+    const detail = result.error ? ` (${diagText(result.error)})` : '';
+    lines.push(`view-limits: collection failed — ${diagText(result.reason || 'unknown')}${detail}`);
+  } else if (result.outcome === collector.OUTCOME.NO_CREDENTIALS) {
+    lines.push('view-limits: no credentials configured yet — showing the last cached status');
+  }
+  // A native failure is disclosed beside any external outcome that is not
+  // itself a collection failure (round-2 R2-1), with the diagnostic codes.
+  if (result.native && result.native.outcome === 'failed' && result.outcome !== collector.OUTCOME.FAILED) {
+    const codes = (result.native.codes || []).join(', ');
+    lines.push(`view-limits: native collection failed — ${diagText(codes || result.native.error || 'unknown error')}`);
+  }
+  // The failed routes are named, with their errors, on every outcome.
+  for (const line of failedRouteLines(result, 'collection', false)) lines.push(line);
+  return lines.length ? lines.join('\n') : null;
 }
 
 function viewFailure(kind, asJson) {
@@ -1929,7 +1954,9 @@ async function viewCmd(args) {
   const condensed = args.includes('--condensed');
 
   // The confirmed reader: a document it could not confirm REFUSES instead of
-  // falling back to the built-in defaults (#81).
+  // falling back to the built-in defaults (#81). The refusal happens BEFORE
+  // the collector: a refused configuration never reaches a provider and
+  // never writes the cache.
   let cfg;
   try {
     cfg = libLoadConfig();
@@ -1946,8 +1973,46 @@ async function viewCmd(args) {
     return;
   }
 
-  // The cache is read once and used for BOTH the snapshot and the gate's own
-  // freshness decision, so the two can never describe different data.
+  // Issue #60: the view runs the SHARED full-view collection
+  // (`collectView`) — the external collection under the worker lock, then
+  // the bounded NATIVE observation outside it — and renders what the
+  // collection published, or what it kept. The gate and the snapshot stay
+  // cache-only (round-2 R2-3).
+  //
+  // The native snapshot is assembled with the display-only Xiaomi overlay
+  // (round-2 R2-2): the just-observed Xiaomi statuses are projected so a
+  // successful live collection renders healthy/fresh, while the gate keeps
+  // reading the raw zero-TTL cache.
+  const result = await collector.collectView({
+    cfg,
+    io: {
+      callerContext: cliCallerContext(),
+      readConfig: () => ({ cfg, corrupt: false, inconclusive: false }),
+      // `external` is the whole external result. On the two lock outcomes the
+      // collection observed nothing, so the Xiaomi rows would vanish from the
+      // overlay; they show pending instead (CR4), like refresh's contention
+      // path. Every other missing status stays missing. Built lazily, when
+      // the status reader runs (F1).
+      readStatusFor: (external) => {
+        const lockHeld = external.outcome === collector.OUTCOME.IN_PROGRESS
+          || (external.outcome === collector.OUTCOME.FAILED
+            && external.reason === collector.REASON.LOCK_UNAVAILABLE);
+        let statuses = external.statuses;
+        if (lockHeld) {
+          statuses = {};
+          for (const route of cfg.routes) {
+            if (isXiaomi(route)) statuses[route.id] = xiaomiSession.pendingStatus();
+          }
+        }
+        return overlayReader(cfg, xiaomiLiveEntries(cfg, statuses));
+      },
+    },
+  });
+
+  // The cache is read AFTER the collection, so the view describes what was
+  // published (or what was kept). It is read once and used for BOTH the
+  // snapshot and the gate's own freshness decision, so the two can never
+  // describe different data.
   const statusDoc = defaultReadStatus(dataDir());
   const doc = statusDoc && statusDoc.doc && typeof statusDoc.doc === 'object' ? statusDoc.doc : null;
   const cacheRoutes = doc && doc.routes && typeof doc.routes === 'object' && !Array.isArray(doc.routes)
@@ -1964,11 +2029,14 @@ async function viewCmd(args) {
     if (r.monitor && typeof r.monitor.recipe === 'string') recipeOf[r.id] = r.monitor.recipe;
   }
 
-  const snap = await getRuntimeSnapshot({
+  // The snapshot the collector ran is the one the view renders. If the
+  // native observation itself threw (defensive — the snapshot service
+  // degrades by contract), fall back to the cache-only snapshot so the view
+  // still renders.
+  const snap = result.snapshot || await getRuntimeSnapshot({
     callerContext: cliCallerContext(),
     io: {
       readConfig: () => ({ cfg, corrupt: false, inconclusive: false }),
-      readStatus: () => statusDoc,
     },
   });
   const schema = buildViewSchema(snap, {
@@ -1979,13 +2047,28 @@ async function viewCmd(args) {
     threshold: (cfg.gate && typeof cfg.gate.constrainedThreshold === 'number')
       ? cfg.gate.constrainedThreshold : 0.2,
     now: Date.now(),
+    collection: buildCollectionBlock({
+      outcome: result.outcome,
+      published: result.published === true,
+      reason: result.reason,
+      error: result.error,
+      routes: result.routes,
+      native: result.native,
+    }),
   });
+
+  const notice = collectionNotice(result);
+  if (notice) process.stderr.write(`${notice}\n`);
 
   if (asJson) {
     process.stdout.write(JSON.stringify(schema, null, 2) + '\n');
-    return;
+  } else {
+    process.stdout.write(renderViewText(schema, { condensed }).join('\n') + '\n');
   }
-  process.stdout.write(renderViewText(schema, { condensed }).join('\n') + '\n');
+  // A collection that FAILED — the lock errored, the publish failed, or
+  // every attempted route failed — prints the envelope AND exits nonzero.
+  // The envelope is always valid; the data behind it is not current.
+  if (result.outcome === collector.OUTCOME.FAILED) process.exitCode = 1;
 }
 
 // ---- recommend ---------------------------------------------------------------

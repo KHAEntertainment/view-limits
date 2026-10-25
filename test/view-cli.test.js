@@ -75,8 +75,23 @@ function vl(dir, args, opts = {}) {
     env.NODE_OPTIONS = `--require ${GUARD}`;
     if (opts.log) env.REVIEW_LOG = opts.log;
   }
+  if (opts.preload) {
+    env.NODE_OPTIONS = `--require ${opts.preload}`;
+  }
+  if (opts.env) Object.assign(env, opts.env);
   const r = spawnSync(process.execPath, [VL, ...args], { env, encoding: 'utf8' });
   return { status: r.status, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+// Hold the shared refresh-worker lock, so the next collector finds another
+// owner. The record names THIS process (which is alive), so the lock's
+// recovery pass keeps it and the contender yields.
+function holdWorkerLock(dir) {
+  const workers = path.join(dir, 'refresh-workers');
+  fs.mkdirSync(workers, { recursive: true });
+  const file = path.join(workers, `${process.pid}-${'a'.repeat(32)}.json`);
+  fs.writeFileSync(file, JSON.stringify({ pid: process.pid, owner: 'test-holder', number: 1 }));
+  return () => { try { fs.unlinkSync(file); } catch { /* already gone */ } };
 }
 
 // ---- the happy path ---------------------------------------------------------
@@ -222,18 +237,235 @@ test('a configuration that exists but cannot be confirmed is exit 9', () => {
   assert.deepStrictEqual(doc.reasonCodes, ['config-inconclusive']);
 });
 
+// ---- the live collection (Issue #60) ---------------------------------------
+//
+// The view is a LIVE surface now: it runs the shared collector with a bounded
+// wait and then renders what the collection published — or what it kept. The
+// gate and the snapshot stay cache-only.
+
+const PRELOAD = path.join(PLUGIN_ROOT, 'test', 'fixtures', 'view-cli-preload.cjs');
+
+test('view --json emits exactly ONE envelope for a successful collection', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout); // exactly one JSON document
+  assert.strictEqual(doc.schemaVersion, 1);
+  assert.strictEqual(doc.collection.outcome, 'completed');
+  assert.strictEqual(doc.collection.published, true);
+  const minimax = doc.routes.find((x) => x.id === 'minimax-token-plan');
+  assert.strictEqual(minimax.collection.outcome, 'completed');
+  assert.strictEqual(minimax.state, 'healthy');
+  assert.strictEqual(minimax.freshness, 'fresh');
+});
+
+test('view --json projects a live Xiaomi success as healthy/fresh (R2-2)', () => {
+  const dir = scratch();
+  writeConfig(dir, [{
+    id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+    match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+  }]);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
+  assert.ok(row, 'the Xiaomi route is listed');
+  assert.strictEqual(row.state, 'healthy', 'the live observation renders healthy');
+  assert.strictEqual(row.freshness, 'fresh', 'the live observation renders fresh');
+  assert.strictEqual(row.windows[0].remaining, 75);
+  assert.strictEqual(row.windows[0].type, 'tokens');
+});
+
+test('view --json: a SLOW native read does not expire the live Xiaomi display (F1)', () => {
+  const dir = scratch();
+  writeConfig(dir, [{
+    id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+    match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+  }]);
+  // The native reader is delayed by 1500 ms — longer than the display
+  // entry's one-second lifetime. The display projection must be built when
+  // the status reader runs (after the native await), so the live Xiaomi row
+  // still renders healthy/fresh.
+  const r = vl(dir, ['view', '--json'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_NATIVE_DELAY_MS: '1500' },
+  });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
+  assert.ok(row, 'the Xiaomi route is listed');
+  assert.strictEqual(row.state, 'healthy', 'the live observation renders healthy despite the slow native read');
+  assert.strictEqual(row.freshness, 'fresh', 'the live observation renders fresh despite the slow native read');
+  assert.strictEqual(row.windows[0].remaining, 75);
+  // The GATE cache entry is unchanged: raw, zero-TTL, with the live facts.
+  const published = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
+  const entry = published.routes['xiaomi-token-plan'];
+  assert.ok(entry, 'the cache entry was published');
+  assert.strictEqual(entry.status.state, 'healthy');
+  assert.ok(Date.parse(entry.freshUntil) - Date.parse(entry.observedAt) <= 1000,
+    'the gate cache keeps ttlSeconds 0 (raw entry, display-only projection)');
+});
+
+// CR4 — a busy collector (another worker owns the lock) observes nothing, so
+// the overlay would strip the cached Xiaomi entry and add nothing back. The
+// row must be projected as pending instead, like refresh's contention path.
+// The two lock outcomes the busy view handles: another worker owns the lock
+// (in-progress), and the lock storage itself is unusable (lock-unavailable —
+// here the workers directory is a regular file).
+const LOCK_OUTCOMES = [
+  {
+    name: 'in-progress',
+    hold: (dir) => holdWorkerLock(dir),
+    outcome: 'in-progress', routeOutcome: 'pending', status: 0,
+  },
+  {
+    name: 'lock-unavailable',
+    hold: (dir) => { fs.writeFileSync(path.join(dir, 'refresh-workers'), 'not a directory'); return () => {}; },
+    outcome: 'failed', routeOutcome: 'failed', status: 1,
+  },
+];
+
+for (const lock of LOCK_OUTCOMES) {
+  test(`view --json: a busy collector (${lock.name}) keeps the Xiaomi row, pending and never eligible (CR4)`, () => {
+    const dir = scratch();
+    writeConfig(dir, [{
+      id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+      match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+    }, ROUTES[0]]);
+    // A cached entry the GATE reads as healthy and fresh: left alone, the raw
+    // entry would make the row eligible beside its pending, unknown display.
+    writeCache(dir, {
+      'xiaomi-token-plan': freshEntry('xiaomi-token-plan', {
+        state: 'healthy', windows: [{ type: 'tokens', remaining: 90, limit: 100 }],
+      }),
+    });
+    const release = lock.hold(dir);
+    try {
+      const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+      assert.strictEqual(r.status, lock.status, `exit ${lock.status} (stderr: ${r.stderr})`);
+      const doc = JSON.parse(r.stdout);
+      assert.strictEqual(doc.collection.outcome, lock.outcome);
+      const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
+      assert.ok(row, 'the Xiaomi row is present — never dropped on a busy collector');
+      assert.strictEqual(row.collection.outcome, lock.routeOutcome);
+      assert.strictEqual(row.state, 'unknown', 'pending renders unknown');
+      assert.match(row.error, /refresh in progress/, 'the row is the pending projection');
+      assert.strictEqual(row.freshness, 'fresh', 'the pending display is current, not a stale cached entry');
+      assert.strictEqual(row.source, 'xiaomi');
+      assert.notStrictEqual(row.state, 'healthy', 'pending is never healthy');
+      assert.deepStrictEqual(row.windows, [], 'the cached counts do not leak through');
+      assert.strictEqual(row.quotaEligibility, 'unresolved', 'unknown is never eligible');
+      assert.ok(row.reasonCodes.includes('state-unknown'));
+    } finally {
+      release();
+    }
+  });
+}
+
+test('view --json: a busy collector over a fresh EXHAUSTED Xiaomi entry stays ineligible (the deny wins)', () => {
+  const dir = scratch();
+  writeConfig(dir, [{
+    id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+    match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+  }, ROUTES[0]]);
+  const at = new Date().toISOString();
+  const later = new Date(Date.now() + 3600 * 1000).toISOString();
+  writeCache(dir, {
+    'xiaomi-token-plan': {
+      routeId: 'xiaomi-token-plan', observedAt: at, freshUntil: later, source: 'xiaomi',
+      status: { state: 'exhausted', windows: [{ type: 'tokens', remaining: 0, limit: 100 }] },
+    },
+  });
+  const release = holdWorkerLock(dir);
+  try {
+    const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+    assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+    const row = JSON.parse(r.stdout).routes.find((x) => x.id === 'xiaomi-token-plan');
+    assert.strictEqual(row.state, 'unknown', 'the display is still the pending projection');
+    assert.strictEqual(row.quotaEligibility, 'ineligible', 'the gate would deny a fresh exhausted entry; the view is never looser');
+  } finally {
+    release();
+  }
+});
+
+test('view --json emits exactly ONE envelope when there are no credentials', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD, env: { VL_VIEW_NO_VAULT: '1' } });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.collection.outcome, 'no-credentials');
+  assert.strictEqual(doc.collection.published, false);
+  assert.strictEqual(doc.routes.length, 2, 'the configured routes are still listed');
+});
+
+test('view --json emits exactly ONE envelope when another worker owns the collector', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  writeCache(dir, {
+    'minimax-token-plan': freshEntry('minimax-token-plan', { state: 'healthy', windows: [] }),
+  });
+  const release = holdWorkerLock(dir);
+  try {
+    const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+    assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+    const doc = JSON.parse(r.stdout);
+    assert.strictEqual(doc.collection.outcome, 'in-progress');
+    assert.strictEqual(doc.collection.published, false);
+    const minimax = doc.routes.find((x) => x.id === 'minimax-token-plan');
+    assert.strictEqual(minimax.collection.outcome, 'pending');
+    assert.ok(minimax.reasonCodes.includes('collection-pending'));
+    assert.match(r.stderr, /collection in progress/);
+  } finally {
+    release();
+  }
+});
+
+test('view --json emits exactly ONE envelope for a partial failure, and the failed route keeps its age', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  writeCache(dir, {
+    'minimax-token-plan': freshEntry('minimax-token-plan', {
+      state: 'healthy', windows: [{ type: 'weekly', remaining: 5, limit: 10 }],
+    }),
+  });
+  const r = vl(dir, ['view', '--json'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_FAIL: 'minimax-token-plan' },
+  });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.collection.outcome, 'partial');
+  const minimax = doc.routes.find((x) => x.id === 'minimax-token-plan');
+  assert.strictEqual(minimax.collection.outcome, 'failed');
+  assert.match(minimax.collection.error, /synthetic provider failure/);
+  assert.ok(minimax.reasonCodes.includes('collection-failed'));
+  // The prior fact is still the fact, with its own age.
+  assert.strictEqual(minimax.observedAt, '2026-10-13T09:45:00Z');
+  assert.strictEqual(minimax.state, 'healthy');
+  // The successful sibling published independently.
+  const deepseek = doc.routes.find((x) => x.id === 'deepseek-direct');
+  assert.strictEqual(deepseek.collection.outcome, 'completed');
+  assert.match(r.stderr, /collection partial/);
+  assert.match(r.stderr, /minimax-token-plan/, 'the notice names the failed route');
+  assert.match(r.stderr, /synthetic provider failure/, 'the notice names the error');
+  // The cache kept the failed route's prior entry verbatim.
+  const published = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
+  assert.strictEqual(published.routes['minimax-token-plan'].observedAt, '2026-10-13T09:45:00Z');
+});
+
 // ---- the cache-only guarantee -----------------------------------------------
 
-test('view performs no network access and no subprocess', () => {
+test('the gate and the snapshot stay cache-only: no network, no subprocess', () => {
   const dir = scratch();
   const log = path.join(dir, 'review.log');
   writeConfig(dir, ROUTES);
   writeCache(dir, {
     'minimax-token-plan': freshEntry('minimax-token-plan', { state: 'healthy', windows: [{ type: 'weekly', remaining: 5, limit: 10 }] }),
   });
-  const r = vl(dir, ['view'], { guard: true, log });
-  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
-  assert.ok(r.stdout.includes('MiniMax'));
+  const snap = vl(dir, ['snapshot', '--json'], { guard: true, log });
+  assert.strictEqual(snap.status, 0, `exit 0 (stderr: ${snap.stderr})`);
   const attempts = fs.existsSync(log)
     ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
     : [];
@@ -296,7 +528,7 @@ test('a native profile is carried in the JSON envelope', () => {
       },
     }],
   }, null, 2));
-  const r = vl(dir, ['view', '--json']);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.profiles.length, 1, 'the native profile is carried');
@@ -336,7 +568,7 @@ test('a native fact with no expiry is never promoted to healthy', () => {
       },
     }],
   }, null, 2));
-  const r = vl(dir, ['view', '--json']);
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.profiles.length, 1);

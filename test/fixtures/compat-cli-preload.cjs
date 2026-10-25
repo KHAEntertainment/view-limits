@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const Module = require('module');
 const cp = require('child_process');
+const { isModuleId } = require('./module-id.cjs');
 
 const dir = process.env.CLAUDE_PLUGIN_DATA;
 const TOKEN = 'sk-CANARY-cli-token-5be1';
@@ -41,6 +42,6 @@ global.fetch = async (url, init = {}) => {
 const ids = new Set((process.env.VL_VAULT_IDS || '').split(',').filter(Boolean));
 const load = Module._load;
 Module._load = function (id, ...args) {
-  if (id.endsWith('/lib/vault')) return { has: (rid) => ids.has(rid), get: (rid) => (ids.has(rid) ? TOKEN : null) };
+  if (isModuleId(id, 'vault')) return { has: (rid) => ids.has(rid), get: (rid) => (ids.has(rid) ? TOKEN : null) };
   return load.call(this, id, ...args);
 };

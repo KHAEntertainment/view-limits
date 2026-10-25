@@ -13,6 +13,7 @@ const path = require('path');
 const Module = require('module');
 const cp = require('child_process');
 const { EventEmitter } = require('events');
+const { isModuleId } = require('./module-id.cjs');
 
 const dir = process.env.CLAUDE_PLUGIN_DATA;
 const CANARY = 'sk-sp-CANARY-bailian-3c81';
@@ -119,7 +120,7 @@ const ids = new Set((process.env.VL_VAULT_IDS || '').split(',').filter(Boolean))
 const load = Module._load;
 Module._load = function (id, ...args) {
   if (id === 'child_process') return Object.assign({}, cp, { spawn: fakeSpawn });
-  if (id.endsWith('/lib/vault')) {
+  if (isModuleId(id, 'vault')) {
     return { has: (rid) => ids.has(rid), get: (rid) => (ids.has(rid) ? CANARY : null), remove: () => false };
   }
   return load.call(this, id, ...args);

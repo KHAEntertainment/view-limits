@@ -20,6 +20,7 @@
 //     deterministically.
 
 const fs = require('fs');
+const { isModuleId } = require('./fixtures/module-id.cjs');
 
 function log(kind, detail) {
   if (process.env.REVIEW_LOG) {
@@ -78,10 +79,10 @@ const Module = require('module');
 const origLoad = Module._load;
 Module._load = function (id, parent, isMain) {
   const m = origLoad.apply(this, arguments);
-  if (typeof id === 'string' && id.endsWith('/lib/adapters')) {
+  if (isModuleId(id, 'adapters')) {
     return { ...m, getAdapter: blocked('provider') };
   }
-  if (typeof id === 'string' && id.endsWith('/lib/vault')) {
+  if (isModuleId(id, 'vault')) {
     return { ...m, has: blocked('vault.has'), get: blocked('vault.get') };
   }
   return m;

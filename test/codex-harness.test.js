@@ -51,7 +51,7 @@ const CLI_INVOCATION_PLAIN = /^node "([\s\S]+)\/bin\/vl\.js"((?: [A-Za-z0-9._:-]
 const ALLOWED_ARGV = {
   gate: ['gate'],
   refresh: ['refresh', '--quiet', '--session-start'],
-  status: ['status'],
+  view: ['view'],
 };
 
 // Shaping / processing tools that must never appear in a Codex surface file.
@@ -228,8 +228,8 @@ try {
   assert.strictEqual(skillMatch[1], ROOT_EXPR, 'skill: unexpected root resolution');
   assert.deepStrictEqual(
     skillMatch[2].trim().split(/\s+/),
-    ALLOWED_ARGV.status,
-    'skill: the status surface wires to `vl.js status`',
+    ALLOWED_ARGV.view,
+    'skill: the status surface wires to `vl.js view`',
   );
   assert.doesNotMatch(skill.split(ROOT_EXPR).join('ROOT'), FORMAT_TOOL_RE, 'skill: no text-processing tools');
   assert.doesNotMatch(skill, /^\|/m, 'skill: no markdown table — the CLI renders the table');

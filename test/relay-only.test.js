@@ -76,9 +76,11 @@ const PROSE_TOOL_RE = /\b(?:sed|awk|jq|grep|perl|printf|xargs|base64|column)\b/i
 const PROSE_PIPE_RE =
   /\b(?:pipe|pipes|piped|piping|redirect|redirects|redirected|redirecting)\b/i;
 
-// [QA-Low] Every exec line in the command shim must be the live refresh.
-const REFRESH_EXEC_RE =
-  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" refresh(?: 2>&1)?$/;
+// [QA-Low] Every exec line in the command shim must be the live view: the
+// `view` command runs the shared collector, so it is a LIVE surface — a
+// second "extra" exec line must not smuggle in a second rendering path.
+const VIEW_EXEC_RE =
+  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" view(?: 2>&1)?$/;
 
 const failures = [];
 function check(cond, msg) {
@@ -160,15 +162,15 @@ for (const rel of shims) {
   check(!prosePipe,
     `${rel}: piping/redirect instruction in shim prose (relay the CLI output untransformed): ${prosePipe ? prosePipe[0] : ''}`);
 
-  // [AC2] /view-limits stays a live refresh: EVERY exec line in the command
-  // shim must run `vl.js refresh` — a second "extra" exec line must not
-  // smuggle in a cache-only display path such as `vl.js report`.
+  // [AC2] /view-limits stays a live surface: EVERY exec line in the command
+  // shim must run `vl.js view` — a second "extra" exec line must not
+  // smuggle in a different display path such as `vl.js report`.
   if (rel === 'commands/view-limits.md') {
     for (const line of execLines) {
       const m = line.match(/^!`(.+)`$/);
       if (!m) continue; // malformed form already failed above
-      check(REFRESH_EXEC_RE.test(m[1]),
-        `${rel}: every exec must remain a live refresh — expected \`vl.js refresh\`, found: ${m[1]}`);
+      check(VIEW_EXEC_RE.test(m[1]),
+        `${rel}: every exec must remain the live view — expected \`vl.js view\`, found: ${m[1]}`);
     }
   }
 }

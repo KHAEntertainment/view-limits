@@ -583,10 +583,19 @@ function findingsIn(source, names = SCANNED) {
       }
     }
     for (const { append, tokens } of topLevelConcatenations(tokenize(text, bodyStart))) {
-      // The WHOLE right-hand side must be one allowed form. A prefix is not
-      // enough: `1 /* c */ && route.stateReason` starts with a safe numeric
-      // literal and still appends a raw provider field.
-      if (!isAllowedOperand(tokens)) {
+      // A plain binary `+` is never allowed, and an `+=` must have a
+      // right-hand side that is ONE allowed form.
+      //
+      // The `append` requirement is not incidental: this check only ever
+      // looks at the RIGHT-HAND side, so a plain `+` would leave its LEFT
+      // operand unchecked - `route.stateReason + ''` would pass with a raw
+      // provider field on the left. Requiring `+=` closes that: a `+=` has
+      // no left operand to smuggle a field through.
+      //
+      // And the whole right-hand side must be one allowed form. A prefix is
+      // not enough: `1 /* c */ && route.stateReason` starts with a safe
+      // numeric literal and still appends a raw provider field.
+      if (!append || !isAllowedOperand(tokens)) {
         findings.push(`${name}: a string concatenation (${append ? '+=' : '+'}) is not an allowed form`);
       }
     }
@@ -705,6 +714,11 @@ const CONCAT_ESCAPES = [
   // A template prefix with an unchecked suffix.
   'value += `safe`.concat(route.stateReason);',
   'value += `safe` && route.stateReason;',
+  // A plain binary `+` is never allowed: the check only looks at the
+  // right-hand side, so a raw provider field on the LEFT would slip through.
+  "const line = route.stateReason + '';",
+  "route.stateReason + textCell('')",
+  'route.stateReason + `|`',
 ];
 for (const statement of CONCAT_ESCAPES) {
   const found = probeConcatFindings(statement);

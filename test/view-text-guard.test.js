@@ -42,6 +42,22 @@
 // injects a control character into EVERY string field of the fixture and
 // asserts both layouts keep their line count and never show the raw
 // character. This guard catches the common mistake at the source level.
+//
+// KNOWN LIMITS (#101)
+//
+// The every-leaf behavioural test in test/view-schema.test.js is the proof
+// of record: it drives the real renderers. This guard reads SOURCE TEXT, so
+// it has lexical limits the behavioural test does not:
+//
+//   * R2-A1 - a regex literal desyncs collectInterpolations, functionSource
+//     and tokenize: each scans the source with its own idea of where a
+//     literal ends, so a regex can make them disagree.
+//   * R2-A2 - a `/*` inside template text is read as a comment, so the
+//     template is cut short at that marker.
+//   * R2-Q1 - a `+=` inside a callback passed as a call argument is not
+//     scanned: the concatenation scan looks at the call's own arguments.
+//
+// Filed as #101. The decision on them belongs to that issue.
 
 const assert = require('assert');
 const fs = require('fs');

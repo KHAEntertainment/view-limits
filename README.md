@@ -370,6 +370,9 @@ so view-limits never reads it and never conflates the two numbers.
   StepFun rather than guessing.
 - `vl.js report` prints the explicit line:
   `    <routeId>: unmonitored — no documented quota source`.
+  A route id that carries a control character (only a hand-edited
+  `config.json` can produce one) is escaped in that line, so it can never
+  forge a route row.
   The gate stays fail-open: an unmonitored route never denies.
 
 ## Experimental: Xiaomi Token Plan (Chrome cookie fallback)

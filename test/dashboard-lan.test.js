@@ -19,7 +19,9 @@ const { spawnSync } = require('child_process');
 const lan = require('../lib/dashboard/lan');
 const { redactForLan } = require('../lib/dashboard/lan-redact');
 const { createLanServer } = require('../lib/dashboard/lan-server');
-const { CSP } = require('../lib/dashboard/page');
+const { CSP, ASSETS, refreshTokenFor } = require('../lib/dashboard/page');
+const daemonLib = require('../lib/dashboard/daemon');
+const records = require('../lib/dashboard/record');
 const { buildViewSchema } = require('../lib/view-model');
 const { scratch, vl, record, dirs, started, note, cleanup, alive, until, sleep } = require('./helpers/dashboard-harness');
 
@@ -345,6 +347,40 @@ test('read-only, exact Host, fixed routes', async () => {
       assert.strictEqual((await get(port, { pathname: '/api/lan/status', host, headers: { 'X-VL-Read': token } })).status, 403, host);
     }
   });
+});
+
+test('the refresh token (C-002 amendment) is on the loopback page only: never on the LAN page, its assets or /api/lan/status', async () => {
+  // The real daemon, both listeners from ONE identity. The LAN listener is
+  // bound on loopback here (no real LAN address); only its Host differs.
+  const dir = tmpDir();
+  lan.writeToken(dir);
+  const lanPort = await new Promise((r) => { const sv = net.createServer(); sv.listen(0, '127.0.0.1', () => { const p = sv.address().port; sv.close(() => r(p)); }); });
+  const collect = async () => ({ ok: true, envelope: { schemaVersion: 1, generatedAt: new Date().toISOString(), status: 'ok', routes: [],
+    collection: { outcome: 'completed', published: true, reason: null, error: null, routes: [], native: null } } });
+  const h = await daemonLib.runDaemon({ dir, host: '127.0.0.1', port: 0, intervalSeconds: 30, collect,
+    lan: { address: '127.0.0.1', port: lanPort, currentToken: lan.createTokenReader(dir) } });
+  assert.ok(h.ok, JSON.stringify(h));
+  try {
+    const { nonce } = records.readRecord(dir).record;
+    const refresh = refreshTokenFor(nonce);
+    // Not vacuous: the loopback page does carry it.
+    const local = await get(h.port, { pathname: '/' });
+    assert.strictEqual(local.status, 200);
+    assert.ok(local.text.includes(refresh), 'the loopback page carries the refresh token');
+    const read = lan.readToken(dir).token;
+    const lanGets = [
+      ['/', {}], ...Object.keys(ASSETS).map((name) => [`/assets/${name}`, {}]),
+      ['/api/lan/status', { 'X-VL-Read': read }], ['/api/lan/status', {}], ['/api/lan/status', { 'X-VL-Read': 'b'.repeat(64) }],
+    ];
+    const seen = new Set();
+    for (const [pathname, headers] of lanGets) {
+      const res = await get(lanPort, { pathname, headers });
+      seen.add(res.status);
+      for (const [name, value] of [['refresh token', refresh], ['nonce', nonce]]) assert.ok(!res.text.includes(value), `${pathname} ${JSON.stringify(headers)}: ${name}`);
+      if (pathname === '/') assert.ok(!res.text.includes('vl-refresh-token'), 'no refresh meta on the LAN page');
+    }
+    assert.deepStrictEqual([...seen].sort(), [200, 401], 'both the 200 and the 401 bodies were checked');
+  } finally { await h.shutdown('test'); }
 });
 
 // ---- the page's token handling (the real browser script in a sandbox) ----------------

@@ -18,6 +18,9 @@
 //   vl.js config                      show effective config (secrets masked).
 //   vl.js snapshot --json [--refresh] normalized runtime snapshot; --refresh
 //                                     adds bounded Traycer CLI live reads.
+//   vl.js dashboard start|stop|status  the persistent dashboard daemon (#61): one
+//                                     per data dir, loopback-only, interval
+//                                     collection, GET /api/status.
 //   vl.js recommend --json [--task J]  advisory harness/model/route/profile
 //           [--policy J]               recommendation over configured routes;
 //                                     deterministic + zero-I/O (Jev dormant).
@@ -31,7 +34,8 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
-  BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt } = require('../lib/config');
+  BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt,
+  resolveDashboardInterval } = require('../lib/config');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, spawnRefresh,
@@ -2071,6 +2075,179 @@ async function viewCmd(args) {
   if (result.outcome === collector.OUTCOME.FAILED) process.exitCode = 1;
 }
 
+// ---- dashboard (Issue #61) ---------------------------------------------------
+//
+//   vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
+//   vl.js dashboard stop
+//   vl.js dashboard status [--json]
+//
+// The persistent dashboard daemon, one per data directory (lib/dashboard/).
+// This is the Claude-free wrapper: flag parsing, the confirmed config read,
+// the daemon's collection (`vl.js view --json` as a bounded subprocess — see
+// lib/dashboard/view-runner.js) and printing. `__daemon` is the detached
+// process `start` spawns; it is not a user command.
+
+const DASHBOARD_USAGE = 'usage: vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS] | stop | status [--json]';
+
+// Exit codes: 0 ok · 1 failure or refusal · 2 usage · 3 status: not running
+// (stopped, stale or unverified) · 9/10 config refused (shared with view).
+const DASHBOARD_EXIT_USAGE = 2;
+const DASHBOARD_EXIT_NOT_RUNNING = 3;
+
+function dashboardUsage(msg) {
+  process.stderr.write(`view-limits: ${msg}\n${DASHBOARD_USAGE}\n`);
+  process.exit(DASHBOARD_EXIT_USAGE);
+}
+
+// `--flag value` and `--flag=value`; unknown, repeated or valueless flags are usage errors.
+function parseDashboardFlags(args, allowed) {
+  const out = {};
+  for (let i = 0; i < args.length; i += 1) {
+    const eq = args[i].indexOf('=');
+    const name = eq === -1 ? args[i] : args[i].slice(0, eq);
+    if (!allowed.includes(name)) dashboardUsage(`unknown option ${JSON.stringify(args[i])}.`);
+    if (Object.prototype.hasOwnProperty.call(out, name)) dashboardUsage(`${name} was given twice.`);
+    let value = eq === -1 ? args[i + 1] : args[i].slice(eq + 1);
+    if (eq === -1) i += 1;
+    if (value === undefined || value === '') dashboardUsage(`${name} needs a value.`);
+    out[name] = value;
+  }
+  return out;
+}
+
+// A whole decimal number or nothing: "30s", "1e2", "0x10" and " 5" are not numbers here.
+function strictInteger(text) {
+  return /^\d{1,9}$/.test(text) ? Number(text) : NaN;
+}
+
+function printDashboardStatus(info, asJson) {
+  if (asJson) {
+    // Never the record's nonce: the status shape is built from named fields.
+    process.stdout.write(`${JSON.stringify(info, null, 2)}\n`);
+    return;
+  }
+  const lines = [];
+  if (info.state === 'running') {
+    lines.push(`dashboard: running at ${info.url} (pid ${info.pid}, up ${info.uptimeSeconds}s, interval ${info.intervalSeconds}s)`);
+    const c = info.collection;
+    if (!c || !c.lastAttempt) {
+      lines.push('collection: pending — no result yet');
+    } else {
+      const a = c.lastAttempt;
+      const age = c.observationAgeSeconds === null ? 'no successful observation yet' : `last good observation ${c.observationAgeSeconds}s ago`;
+      lines.push(`collection: last attempt ${a.finishedAt} → ${a.outcome}${a.reason ? ` (${a.reason})` : ''}${a.error ? `: ${a.error}` : ''}; ${age}${c.stale ? ' — STALE' : ''}`);
+    }
+  } else if (info.state === 'stopped') {
+    lines.push('dashboard: not running');
+  } else if (info.state === 'stale') {
+    lines.push(`dashboard: not running — a stale record names pid ${info.pid} at ${info.url} (${info.reason}); \`dashboard start\` recovers it`);
+  } else if (info.state === 'unverified') {
+    lines.push(`dashboard: UNVERIFIED — a record names pid ${info.pid} at ${info.url} but its identity could not be established (${info.reason}); it was not trusted and nothing was signalled`);
+  } else {
+    lines.push('dashboard: dashboard.json is unreadable — not running as far as can be verified; `dashboard start` replaces it once it holds the ownership lock');
+  }
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+async function dashboardCmd(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  const dashboard = require('../lib/dashboard/daemon');
+  const dir = dataDir();
+
+  if (sub === 'status') {
+    const flags = rest.length ? parseDashboardFlags(rest.map((a) => (a === '--json' ? '--json=1' : a)), ['--json']) : {};
+    const info = await dashboard.statusDaemon(dir);
+    printDashboardStatus(info, flags['--json'] !== undefined);
+    if (info.state !== 'running') process.exitCode = DASHBOARD_EXIT_NOT_RUNNING;
+    return;
+  }
+
+  if (sub === 'stop') {
+    if (rest.length) dashboardUsage('stop takes no options.');
+    const res = await dashboard.stopDaemon(dir);
+    if (res.ok) { process.stdout.write('dashboard: stopped\n'); return; }
+    if (res.reason === 'not-running') {
+      const why = res.state === 'stopped' ? 'it is not running' : `no verified instance (${res.state}${res.detail ? `: ${res.detail}` : ''}); nothing was signalled`;
+      err(`dashboard stop: ${why}`);
+    }
+    if (res.reason === 'stop-timeout') err('dashboard stop: the daemon accepted the request but did not exit in time; nothing was signalled');
+    err(`dashboard stop: refused (${res.reason}${res.status ? ` ${res.status}` : ''})`);
+  }
+
+  if (sub === 'start' || sub === '__daemon') {
+    const flags = parseDashboardFlags(rest, ['--port', '--host', '--interval']);
+    const port = flags['--port'] === undefined ? 0 : strictInteger(flags['--port']);
+    const flagInterval = flags['--interval'] === undefined ? undefined : strictInteger(flags['--interval']);
+    const bind = dashboard.validateBind({ host: flags['--host'], port });
+    if (!bind.ok) err(`dashboard ${sub === 'start' ? 'start' : 'daemon'}: ${bind.error}`);
+    if (sub === 'start') {
+      // The confirmed config read: a configuration that cannot be proven
+      // refuses (exit 9 / 10) instead of starting a daemon on guessed defaults.
+      const cfg = loadConfig();
+      const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
+      if (!interval.ok) err(`dashboard start: ${interval.error}`);
+      const started = await dashboard.startDaemon({
+        dir,
+        daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds)],
+      });
+      if (started.ok) {
+        process.stdout.write(`dashboard: started at ${started.url} (pid ${started.pid}, interval ${started.intervalSeconds}s${interval.source === 'default' ? '' : `, from ${interval.source}`})\n`);
+        return;
+      }
+      if (started.reason === 'already-running' || started.reason === 'held') {
+        const info = started.info || await waitForDashboard(dashboard, dir);
+        if (info && info.state === 'running') err(`dashboard start: already running at ${info.url} (pid ${info.pid})`);
+        err('dashboard start: another start is in progress or holds the ownership lock; run `dashboard status`');
+      }
+      const reasons = {
+        unverified: 'a record names an instance that could not be verified; nothing was signalled — run `dashboard status`',
+        'bind-failed': `could not listen on ${bind.host}:${bind.port}${started.code ? ` (${started.code})` : ''}; nothing was published`,
+        'no-identity': 'the process start time could not be read (is `ps` available?), so the daemon would be unverifiable after a crash',
+        'ready-timeout': 'the daemon did not report ready in time (see dashboard.log in the data directory)',
+      };
+      err(`dashboard start: ${reasons[started.reason] || `${started.reason}${started.error ? ` (${started.error})` : ''}`}`);
+    }
+
+    // __daemon: the detached process. It reports through fd 3 (the ready
+    // channel) and logs to stderr, which `start` pointed at dashboard.log.
+    const interval = strictInteger(flags['--interval']);
+    const ready = (payload) => {
+      try { fs.writeSync(3, `${JSON.stringify(payload)}\n`); fs.closeSync(3); } catch { /* run without a ready channel */ }
+    };
+    const log = (line) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
+    const { createViewRunner } = require('../lib/dashboard/view-runner');
+    const handle = await dashboard.runDaemon({
+      dir, host: bind.host, port: bind.port, intervalSeconds: interval, log,
+      collect: createViewRunner({ vlPath: __filename, cwd: dir }),
+    });
+    if (!handle.ok) {
+      ready({ ok: false, reason: handle.reason, code: handle.code || null, error: handle.error || null });
+      process.exit(1);
+    }
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => { handle.shutdown(signal); });
+    process.on('uncaughtException', (e) => {
+      log(`fatal: ${(e && e.message) || e}`);
+      handle.shutdown('fatal').finally(() => process.exit(1));
+    });
+    ready({ ok: true, url: handle.url, instanceId: handle.instanceId, intervalSeconds: handle.intervalSeconds });
+    await handle.stopped;
+    process.exit(0);
+  }
+
+  dashboardUsage(sub ? `unknown dashboard command ${JSON.stringify(sub)}.` : 'a dashboard command is required.');
+}
+
+// After losing the ownership lock the winner may not have published yet.
+async function waitForDashboard(dashboard, dir) {
+  const end = Date.now() + 5000;
+  for (;;) {
+    const info = await dashboard.statusDaemon(dir);
+    if (info.state === 'running' || Date.now() >= end) return info;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 // ---- recommend ---------------------------------------------------------------
 //
 // Advisory recommendation over the cache-only snapshot. One configured route
@@ -2383,7 +2560,8 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     case 'snapshot': return snapshot(args);
     case 'view': return viewCmd(args);
     case 'recommend': return recommendCmd(args);
+    case 'dashboard': return dashboardCmd(args);
     default:
-      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
   }
 })();

@@ -307,6 +307,39 @@ test('view --json: a SLOW native read does not expire the live Xiaomi display (F
     'the gate cache keeps ttlSeconds 0 (raw entry, display-only projection)');
 });
 
+// CR4 — a busy collector (another worker owns the lock) observes nothing, so
+// the overlay would strip the cached Xiaomi entry and add nothing back. The
+// row must be projected as pending instead, like refresh's contention path.
+test('view --json: a busy collector keeps the Xiaomi row, pending and never healthy (CR4)', () => {
+  const dir = scratch();
+  writeConfig(dir, [{
+    id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+    match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+  }, ROUTES[0]]);
+  writeCache(dir, {
+    'xiaomi-token-plan': freshEntry('xiaomi-token-plan', {
+      state: 'healthy', windows: [{ type: 'tokens', remaining: 90, limit: 100 }],
+    }),
+  });
+  const release = holdWorkerLock(dir);
+  try {
+    const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+    assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+    const doc = JSON.parse(r.stdout);
+    assert.strictEqual(doc.collection.outcome, 'in-progress');
+    const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
+    assert.ok(row, 'the Xiaomi row is present — never dropped on a busy collector');
+    assert.strictEqual(row.state, 'unknown', 'pending renders unknown');
+    assert.match(row.error, /refresh in progress/, 'the row is the pending projection');
+    assert.strictEqual(row.freshness, 'fresh', 'the pending display is current, not a stale cached entry');
+    assert.strictEqual(row.source, 'xiaomi');
+    assert.notStrictEqual(row.state, 'healthy', 'pending is never healthy');
+    assert.deepStrictEqual(row.windows, [], 'the cached counts do not leak through');
+  } finally {
+    release();
+  }
+});
+
 test('view --json emits exactly ONE envelope when there are no credentials', () => {
   const dir = scratch();
   writeConfig(dir, ROUTES);

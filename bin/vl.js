@@ -1988,7 +1988,24 @@ async function viewCmd(args) {
     io: {
       callerContext: cliCallerContext(),
       readConfig: () => ({ cfg, corrupt: false, inconclusive: false }),
-      readStatusFor: (statuses) => overlayReader(cfg, xiaomiLiveEntries(cfg, statuses)),
+      // `external` is the whole external result. On the two lock outcomes the
+      // collection observed nothing, so the Xiaomi rows would vanish from the
+      // overlay; they show pending instead (CR4), like refresh's contention
+      // path. Every other missing status stays missing. Built lazily, when
+      // the status reader runs (F1).
+      readStatusFor: (external) => {
+        const lockHeld = external.outcome === collector.OUTCOME.IN_PROGRESS
+          || (external.outcome === collector.OUTCOME.FAILED
+            && external.reason === collector.REASON.LOCK_UNAVAILABLE);
+        let statuses = external.statuses;
+        if (lockHeld) {
+          statuses = {};
+          for (const route of cfg.routes) {
+            if (isXiaomi(route)) statuses[route.id] = xiaomiSession.pendingStatus();
+          }
+        }
+        return overlayReader(cfg, xiaomiLiveEntries(cfg, statuses));
+      },
     },
   });
 

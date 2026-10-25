@@ -15,3 +15,10 @@ node_modules/
 # stays committable.
 /.pi/github-workflows/env.json
 
+# Maintainer-only agent tooling and planning docs (Issue #109): kept locally,
+# untracked so clones of this public repo don't carry them.
+/PROJECT_CONTEXT.md
+/.opencode/
+/.agents/
+/CLAUDE.local.md
+

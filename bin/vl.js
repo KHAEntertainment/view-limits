@@ -265,9 +265,20 @@ function isUnmonitored(route, cfg) {
 function unmonitoredBlock(cfg) {
   // Returns '' or newline-joined lines with NO leading/trailing newline —
   // callers own the separator (renderInventory has no trailing newline).
+  //
+  // #104: a route id comes from the owner's own config.json, so a control
+  // character in it can only come from a hand-edited config — but it reaches
+  // stdout raw here, where a newline splits the line and the remainder reads
+  // as an extra route row to the agent that parses this text. Both ids go
+  // through escapeControlChars, the sanitizer the CLI already uses for
+  // stdout text. NOT diagText: diagText is escapeControlChars(oneLine(...)),
+  // and oneLine collapses whitespace runs and trims, so it would rewrite an
+  // id that carries an ordinary space ("a  b" -> "a b"). escapeControlChars
+  // leaves every non-control character untouched, so an ordinary id renders
+  // byte-identically, and it covers the whole control class (C0 + DEL + C1).
   const lines = cfg.routes
     .filter((r) => !isXiaomi(r) && isCustomMonitored(r) && isUnmonitored(r, cfg))
-    .map((r) => `    ${r.id}: unmonitored — no documented quota source`);
+    .map((r) => `    ${escapeControlChars(r.id)}: unmonitored — no documented quota source`);
   // #58: a route the user explicitly chose to keep after a probe found nothing
   // to monitor. Its recipe may well be monitorable in principle, so it is NOT
   // covered by the capability filter above — without this line it would render
@@ -276,7 +287,7 @@ function unmonitoredBlock(cfg) {
     .filter((r) => !isXiaomi(r) && r && r.retention === lifecycle.RETENTION.KEEP && !isUnmonitored(r, cfg))
     .map((r) => r.id));
   for (const id of kept) {
-    lines.push(`    ${id}: unmonitored — kept by explicit choice (no usable quota signal at setup)`);
+    lines.push(`    ${escapeControlChars(id)}: unmonitored — kept by explicit choice (no usable quota signal at setup)`);
   }
   return lines.join('\n');
 }

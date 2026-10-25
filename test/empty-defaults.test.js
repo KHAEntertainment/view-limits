@@ -1159,6 +1159,10 @@ const CONFIG_READERS = [
   'bin/vl.js | remove | loadConfig | ',
   'bin/vl.js | providerCmd | loadConfig | ',
   'bin/vl.js | config | loadConfig | ',
+  // `dashboard start` (#61): strict default — an unconfirmed or corrupt
+  // config.json refuses (exit 9 / 10) before any daemon is spawned, so the
+  // interval is never read from built-in defaults.
+  'bin/vl.js | dashboardCmd | loadConfig | ',
   // The view's own read: strict default (it refuses), and the mark is
   // surfaced by the command itself — the JSON envelope is printed before
   // the exit, so the wrapper's immediate exit cannot be used here.

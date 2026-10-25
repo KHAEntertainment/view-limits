@@ -744,6 +744,52 @@ has not resolved — `view` refuses with exit `8` and the hint that names the
 action, because a rerun cannot fix an absent document. A refused
 configuration never reaches a provider and never writes the cache.
 
+## The dashboard daemon (`vl.js dashboard`)
+
+A persistent, loopback-only daemon that keeps the view fresh in the
+background (Issue #61). It is the data service the dashboard page (#62) will
+sit on; today it serves JSON only.
+
+```sh
+vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
+vl.js dashboard status [--json]
+vl.js dashboard stop
+```
+
+- **One per data directory.** `start` refuses a verified running instance and
+  returns once the daemon is listening, printing its URL. The listener binds
+  port `0` (a free port) unless `--port` is given; the bound port is recorded.
+  An occupied `--port` is a clean error and publishes nothing.
+- **Collection.** On start, then every `--interval` seconds (default 30; flag >
+  `config.json` `{"dashboard": {"intervalSeconds": N}}` > 30; allowed 15–3600). Each
+  collection is the same `vl.js view --json` run, so it uses the shared
+  collector and refresh-worker ownership and writes `status.json` exactly as a
+  manual run does. A slow tick is skipped, never overlapped; failures keep the
+  successful routes and never renew an old observation. The PreToolUse gate
+  stays cache-only and fail-open: a running daemon only keeps `status.json`
+  fresh, so the gate inherits it.
+- **`GET http://127.0.0.1:<port>/api/status`** returns the latest view with
+  `status` (`pending` before the first result, `ok`, `stale`, `unavailable`),
+  the last attempt and its outcome, and the observation age. Polling it never
+  triggers a provider read.
+- **`status`** confirms the instance over loopback and by process identity
+  before reporting (URL, uptime, last attempt, age). **`stop`** asks the
+  verified instance to shut itself down with a per-instance secret; it never
+  signals a PID taken from a record, and a stale or unverifiable record is
+  reported, not trusted. A crashed daemon leaves a stale record that the next
+  `start` recovers.
+- **Loopback only for now.** `--host` accepts `127.0.0.1`, `localhost` or
+  `::1`; the LAN listener (`--host 0.0.0.0`) and the page arrive with #62. The
+  daemon's runtime files (`dashboard.json`, `dashboard.log`, `dashboard-lock/`)
+  live in the data directory; `dashboard.json` is private (`0600`) because it
+  holds the control secret.
+
+Exit codes: `0` ok; `1` refused or failed (already running, occupied port,
+invalid flag value or config value, stop refused); `2` usage; `3` `status` when
+nothing verified is running; `9` / `10` config.json could not be confirmed /
+could not be read (the same refusal as `view`; no default interval is
+guessed).
+
 ## CLI reference
 
 ```sh
@@ -762,6 +808,7 @@ vl.js config                      # effective config (secrets masked)
 vl.js snapshot --json [--refresh] # diagnostic runtime snapshot
 vl.js view [--condensed] [--json] # the versioned view schema: text or JSON
 vl.js recommend --json            # advisory recommendation (Jev-dormant by default)
+vl.js dashboard start|stop|status # persistent loopback dashboard daemon (Issue #61)
 ```
 
 ### Exit codes
@@ -774,6 +821,7 @@ vl.js recommend --json            # advisory recommendation (Jev-dormant by defa
 | `check <routeId>` | `0` (one JSON `NormalizedStatus` on stdout) | `1` on unknown route, missing credential, or classified adapter error (one-line `view-limits: check <id> failed: …` on stderr; never a stack trace); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr |
 | `snapshot --json` | `0` (one pretty JSON envelope on stdout) | `1` when `--json` is missing or any other flag is passed |
 | `view [--condensed] [--json]` | `0` (the text layout, or one always-valid JSON envelope on stdout) | `1` on an unknown flag (usage on stderr); `8` config.json has never been published (the one-time vault→routes migration has not resolved — a rerun cannot fix it): `No configuration yet: run /view-limits:setup to add a provider, or start a new session to finish first-run setup` on stderr; `9` config.json could not be confirmed (another process was replacing it, or it exists but could not be read): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr. `--json` still prints exactly one valid envelope (`routes: []`, the status and the reason code) in every refusing case |
+| `dashboard start\|stop\|status` | `0` (`status`: running and verified) | `1` refused or failed; `2` usage; `3` `status` with nothing verified running; `9` / `10` config.json refused, as for `view` — see [the dashboard daemon](#the-dashboard-daemon-vljs-dashboard) |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |
 | `setup` / `update` / `remove` | `0` | `1` on bad args, credential-storage failure, or a stored credential whose route row was not added; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr |
 | `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found; `8` migration pending ([how config.json is assembled](#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr — see [the lifecycle section](#adding-updating-and-removing-a-custom-provider) |
@@ -812,6 +860,9 @@ node test/step-plan.test.js        # stepfun-plan unmonitored classification, CL
 node test/provider-lifecycle.test.js     # lifecycle service: ordering, retention gate, recovery (Issue #58)
 node test/provider-lifecycle-cli.test.js # add/update/remove through the real CLI, no native logout (Issue #58)
 node test/config-revision.test.js        # configRevision writer + gate reader, depth-2 secret rejection (Issue #58)
+node test/dashboard-lib.test.js          # daemon lock, record, listener, scheduler, view runner (Issue #61)
+node test/dashboard-cli.test.js          # real daemons: concurrent start, stale/PID reuse, crash, stop, gate warmth (Issue #61)
+node test/dashboard-tick.test.js         # interval collection end to end (Issue #61)
 ```
 
 ## Version

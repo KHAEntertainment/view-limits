@@ -310,33 +310,80 @@ test('view --json: a SLOW native read does not expire the live Xiaomi display (F
 // CR4 — a busy collector (another worker owns the lock) observes nothing, so
 // the overlay would strip the cached Xiaomi entry and add nothing back. The
 // row must be projected as pending instead, like refresh's contention path.
-test('view --json: a busy collector keeps the Xiaomi row, pending and never healthy (CR4)', () => {
+// The two lock outcomes the busy view handles: another worker owns the lock
+// (in-progress), and the lock storage itself is unusable (lock-unavailable —
+// here the workers directory is a regular file).
+const LOCK_OUTCOMES = [
+  {
+    name: 'in-progress',
+    hold: (dir) => holdWorkerLock(dir),
+    outcome: 'in-progress', routeOutcome: 'pending', status: 0,
+  },
+  {
+    name: 'lock-unavailable',
+    hold: (dir) => { fs.writeFileSync(path.join(dir, 'refresh-workers'), 'not a directory'); return () => {}; },
+    outcome: 'failed', routeOutcome: 'failed', status: 1,
+  },
+];
+
+for (const lock of LOCK_OUTCOMES) {
+  test(`view --json: a busy collector (${lock.name}) keeps the Xiaomi row, pending and never eligible (CR4)`, () => {
+    const dir = scratch();
+    writeConfig(dir, [{
+      id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
+      match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
+    }, ROUTES[0]]);
+    // A cached entry the GATE reads as healthy and fresh: left alone, the raw
+    // entry would make the row eligible beside its pending, unknown display.
+    writeCache(dir, {
+      'xiaomi-token-plan': freshEntry('xiaomi-token-plan', {
+        state: 'healthy', windows: [{ type: 'tokens', remaining: 90, limit: 100 }],
+      }),
+    });
+    const release = lock.hold(dir);
+    try {
+      const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
+      assert.strictEqual(r.status, lock.status, `exit ${lock.status} (stderr: ${r.stderr})`);
+      const doc = JSON.parse(r.stdout);
+      assert.strictEqual(doc.collection.outcome, lock.outcome);
+      const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
+      assert.ok(row, 'the Xiaomi row is present — never dropped on a busy collector');
+      assert.strictEqual(row.collection.outcome, lock.routeOutcome);
+      assert.strictEqual(row.state, 'unknown', 'pending renders unknown');
+      assert.match(row.error, /refresh in progress/, 'the row is the pending projection');
+      assert.strictEqual(row.freshness, 'fresh', 'the pending display is current, not a stale cached entry');
+      assert.strictEqual(row.source, 'xiaomi');
+      assert.notStrictEqual(row.state, 'healthy', 'pending is never healthy');
+      assert.deepStrictEqual(row.windows, [], 'the cached counts do not leak through');
+      assert.strictEqual(row.quotaEligibility, 'unresolved', 'unknown is never eligible');
+      assert.ok(row.reasonCodes.includes('state-unknown'));
+    } finally {
+      release();
+    }
+  });
+}
+
+test('view --json: a busy collector over a fresh EXHAUSTED Xiaomi entry stays ineligible (the deny wins)', () => {
   const dir = scratch();
   writeConfig(dir, [{
     id: 'xiaomi-token-plan', provider: 'xiaomi', account: 'token-plan',
     match: { model: 'mimo' }, ttlSeconds: 0, credentialSource: 'chrome-cookies',
   }, ROUTES[0]]);
+  const at = new Date().toISOString();
+  const later = new Date(Date.now() + 3600 * 1000).toISOString();
   writeCache(dir, {
-    'xiaomi-token-plan': freshEntry('xiaomi-token-plan', {
-      state: 'healthy', windows: [{ type: 'tokens', remaining: 90, limit: 100 }],
-    }),
+    'xiaomi-token-plan': {
+      routeId: 'xiaomi-token-plan', observedAt: at, freshUntil: later, source: 'xiaomi',
+      status: { state: 'exhausted', windows: [{ type: 'tokens', remaining: 0, limit: 100 }] },
+    },
   });
   const release = holdWorkerLock(dir);
   try {
     const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
     assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
-    const doc = JSON.parse(r.stdout);
-    assert.strictEqual(doc.collection.outcome, 'in-progress');
-    const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
-    assert.ok(row, 'the Xiaomi row is present — never dropped on a busy collector');
-    assert.strictEqual(row.collection.outcome, 'pending', 'the route-level collection outcome is pending, not skipped');
-    assert.ok(row.reasonCodes.includes('collection-pending'));
-    assert.strictEqual(row.state, 'unknown', 'pending renders unknown');
-    assert.match(row.error, /refresh in progress/, 'the row is the pending projection');
-    assert.strictEqual(row.freshness, 'fresh', 'the pending display is current, not a stale cached entry');
-    assert.strictEqual(row.source, 'xiaomi');
-    assert.notStrictEqual(row.state, 'healthy', 'pending is never healthy');
-    assert.deepStrictEqual(row.windows, [], 'the cached counts do not leak through');
+    const row = JSON.parse(r.stdout).routes.find((x) => x.id === 'xiaomi-token-plan');
+    assert.strictEqual(row.state, 'unknown', 'the display is still the pending projection');
+    assert.strictEqual(row.quotaEligibility, 'ineligible', 'the gate would deny a fresh exhausted entry; the view is never looser');
   } finally {
     release();
   }

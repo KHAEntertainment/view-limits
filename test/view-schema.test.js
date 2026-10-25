@@ -448,6 +448,35 @@ const APPROVED_CONDENSED = [
   assert.strictEqual(notFresh.state, 'unknown');
 }
 
+// ---- unknown is never eligible: the DISPLAYED state counts too --------------
+
+{
+  // The busy view shows a pending Xiaomi projection (displayed state unknown)
+  // beside the raw entry the gate still reads as healthy and fresh.
+  const cfgRoute = { id: 'r', provider: 'minimax', account: 'token-plan' };
+  const entry = (state) => ({ routeId: 'r', freshUntil: '2099-01-01T00:00:00Z', status: { state } });
+  const build = (displayed, rawState) => vm.buildViewSchema({
+    routes: [route('r', 'minimax', 'token-plan', { state: observed(displayed) })],
+  }, { gate: gateContext({ r: entry(rawState) }, { r: cfgRoute }, NOW) }, { now: NOW }).routes[0];
+
+  const pending = build('unknown', 'healthy');
+  assert.strictEqual(pending.state, 'unknown');
+  assert.strictEqual(pending.freshness, 'fresh');
+  assert.strictEqual(pending.quotaEligibility, 'unresolved',
+    'a row that displays no known capacity is never eligible, whatever the raw entry says');
+  assert.ok(pending.reasonCodes.includes('state-unknown'));
+
+  // The deny wins: the gate's refusal is never loosened by what is displayed.
+  const denied = build('unknown', 'exhausted');
+  assert.strictEqual(denied.quotaEligibility, 'ineligible');
+  assert.ok(denied.reasonCodes.includes('fresh-exhausted'));
+
+  // And a displayed healthy/constrained row over a healthy raw entry is
+  // still eligible.
+  assert.strictEqual(build('healthy', 'healthy').quotaEligibility, 'eligible');
+  assert.strictEqual(build('constrained', 'constrained').quotaEligibility, 'eligible');
+}
+
 // ---- the route eligibility IS the gate's decision ------------------------
 
 {

@@ -103,10 +103,13 @@ node bin/vl.js check <routeId>  # live-check one route (JSON)
      never reuse a version; if the workflow fails because the tag exists, bump
      again.
   2. Open a PR in `KHAEntertainment/marketplace` setting the `view-limits`
-     entry's `source.ref` in `.claude-plugin/marketplace.json` to the new tag,
-     and update its row in the README pinning table. That repo's
-     `verify-catalog` check confirms the tag resolves. Until this merges, users
-     stay on the previous pin.
+     entry's `source.ref` in `.claude-plugin/marketplace.json` to the new tag.
+     In the same PR, bring view-limits' entry in that repo's README up to date
+     with the release: its summary line, what it does, the install command and
+     the "After install" line. That README lists no current or pinned
+     versions, so there is no version pin to change there. That repo's
+     `verify-catalog` check confirms the tag resolves. Until this merges,
+     users stay on the previous pin.
   3. After it merges: `claude plugin marketplace update kha-marketplace`, then
      `claude plugin update view-limits@kha-marketplace` (restart required).
 - **GitHub:** push to `KHAEntertainment` only, never `Clarit-AI` (a different

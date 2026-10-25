@@ -357,6 +357,65 @@ test('narrow local pane: one line per route, expanding shows the card content', 
   assert.strictEqual(findAll(open, (n) => hasClass(n, 'dash')).length, 0, 'the pane carries no dashboard buttons');
 });
 
+test('Q9: the dashboard button is an icon with a "Dashboard" tooltip and a full accessible name', () => {
+  const card = R.routeCard(route({ provider: 'kimi', label: 'Kimi' }), ctx());
+  const [btn] = findAll(card, (n) => n.tag === 'a' && hasClass(n, 'icon-btn'));
+  assert.ok(btn, 'icon button rendered');
+  assert.strictEqual(btn.attrs['aria-label'], 'Open Kimi dashboard');
+  assert.strictEqual(btn.attrs.title, undefined, 'no native title tooltip');
+  assert.strictEqual(btn.attrs.target, '_blank');
+  assert.strictEqual(btn.attrs.rel, 'noopener noreferrer');
+  assert.strictEqual(btn.attrs['data-key'], 'dash:r', 'focus survives a poll re-render');
+  assert.strictEqual(findAll(btn, (n) => hasClass(n, 'ext-icon')).length, 1);
+  const tips = findAll(btn, (n) => hasClass(n, 'tip'));
+  assert.strictEqual(tips.length, 1);
+  assert.strictEqual(textOf(tips[0]), 'Dashboard');
+  assert.strictEqual(textOf(btn), 'Dashboard', 'the only visible text is the tooltip');
+  // Far right of the title row: the last child of the card header.
+  const head = findAll(card, (n) => hasClass(n, 'ch'))[0];
+  assert.strictEqual(head.children[head.children.length - 1], btn);
+  // None on the LAN view, none for a custom route.
+  assert.strictEqual(findAll(R.routeCard(route({ provider: 'kimi' }), ctx({ mode: 'lan' })), (n) => hasClass(n, 'icon-btn')).length, 0);
+  assert.strictEqual(findAll(R.routeCard(route({ provider: 'x', recipe: 'openai-compatible' }), ctx()), (n) => hasClass(n, 'icon-btn')).length, 0);
+  // The tooltip shows on hover AND keyboard focus.
+  const css = fs.readFileSync(path.join(__dirname, '..', 'lib', 'dashboard', 'page', 'app.css'), 'utf8');
+  assert.ok(css.includes('.icon-btn:hover .tip, .icon-btn:focus-visible .tip { opacity: 1; }'));
+});
+
+test('Q9: the desktop grid is capped at three columns', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'lib', 'dashboard', 'page', 'app.css'), 'utf8');
+  const rule = /\.grid \{[^}]*grid-template-columns: repeat\(auto-fill, minmax\(max\(320px, calc\(\(100% - 28px\) \/ 3\)\), 1fr\)\);/;
+  assert.ok(rule.test(css), 'grid columns are never narrower than a third (gap 14px x 2)');
+});
+
+test('Q9: wrapped "A · B" lines carry no stray separator; the pane header keeps the attention count whole', () => {
+  const profiles = [
+    { identity: {}, harness: 'claude', state: 'healthy', windows: [{ type: 'rolling-5h', remainingRatio: 0.64, resetAt: iso(7900e3) }], reasonCodes: [] },
+    { identity: {}, harness: 'codex', state: 'unknown', windows: [], reasonCodes: [] },
+  ];
+  const doc = statusDoc([route({ state: 'exhausted', windows: [{ type: 'rolling-5h', remainingRatio: 0, resetAt: iso(3600e3) }] })], profiles);
+  const strays = (tree) => findAll(tree, (n) => n.children.some((c) => typeof c === 'string' && /(^|\s)·(\s|$)/.test(c)));
+  for (const c of [ctx({ mode: 'lan' }), ctx({ narrow: true })]) {
+    const tree = R.renderPage(doc, c);
+    const list = findAll(tree, (n) => hasClass(n, 'plist'))[0];
+    assert.ok(list, 'profile list rendered');
+    assert.deepStrictEqual(strays(list), [], 'no literal separator text in the profile list');
+    const items = findAll(list, (n) => n.tag === 'li');
+    assert.deepStrictEqual(items.map((li) => findAll(li, (n) => hasClass(n, 'seg')).length), [4, 2]);
+    assert.ok(textOf(items[0]).includes('64% left (5 hour)') && textOf(items[0]).includes('resets in 2 h 11 m'));
+    const fresh = findAll(tree, (n) => hasClass(n, 'fresh'))[0];
+    assert.deepStrictEqual(strays(fresh), [], 'no literal separator text in the header freshness line');
+  }
+  const pane = R.renderPage(doc, ctx({ narrow: true }));
+  const sub = findAll(pane, (n) => hasClass(n, 'sub'))[0];
+  assert.ok(!textOf(sub).includes('next check'), 'the pane header drops "next check" to fit 360 px');
+  const whole = findAll(sub, (n) => hasClass(n, 'nowrap'));
+  assert.strictEqual(whole.length, 1);
+  assert.strictEqual(textOf(whole[0]), '1 needs attention');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'lib', 'dashboard', 'page', 'app.css'), 'utf8');
+  assert.ok(css.includes('.segs { display: block; overflow: hidden; }') && css.includes('.seg.nowrap { white-space: nowrap; }'));
+});
+
 // ---- escaping, end to end through the real browser script --------------------
 
 console.log('page escaping');

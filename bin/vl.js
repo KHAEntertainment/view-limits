@@ -2217,20 +2217,29 @@ async function dashboardCmd(args) {
     };
     const log = (line) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
     const { createViewRunner } = require('../lib/dashboard/view-runner');
+    process.on('uncaughtException', (e) => {
+      log(`fatal: ${(e && e.message) || e}`);
+      process.exit(1);
+    });
     const handle = await dashboard.runDaemon({
       dir, host: bind.host, port: bind.port, intervalSeconds: interval, log,
       collect: createViewRunner({ vlPath: __filename, cwd: dir }),
+      // After the record is published and BEFORE the first collection spawns:
+      // answer `start` and close fd 3, so no collection child can inherit it.
+      onReady: (h) => {
+        for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => { h.shutdown(signal); });
+        process.removeAllListeners('uncaughtException');
+        process.on('uncaughtException', (e) => {
+          log(`fatal: ${(e && e.message) || e}`);
+          h.shutdown('fatal').finally(() => process.exit(1));
+        });
+        ready({ ok: true, url: h.url, instanceId: h.instanceId, intervalSeconds: h.intervalSeconds });
+      },
     });
     if (!handle.ok) {
       ready({ ok: false, reason: handle.reason, code: handle.code || null, error: handle.error || null });
       process.exit(1);
     }
-    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(signal, () => { handle.shutdown(signal); });
-    process.on('uncaughtException', (e) => {
-      log(`fatal: ${(e && e.message) || e}`);
-      handle.shutdown('fatal').finally(() => process.exit(1));
-    });
-    ready({ ok: true, url: handle.url, instanceId: handle.instanceId, intervalSeconds: handle.intervalSeconds });
     await handle.stopped;
     process.exit(0);
   }

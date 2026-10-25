@@ -14,10 +14,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const { spawnSync } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
+const daemonLib = require('../lib/dashboard/daemon');
 const {
-  CLI, GUARD, records, dirs, sleep, FAKE_TOKEN, ROUTE, scratch, vl, record, raw, apiStatus, providerCalls,
-  until, alive, liveStranger, deadPid, forgeTicket, tickets, started, note, cleanup, LOCK_DIR,
+  CLI, PRELOAD, GUARD, records, dirs, sleep, FAKE_TOKEN, ROUTE, scratch, vl, record, raw, apiStatus, providerCalls,
+  until, events, alive, liveStranger, deadPid, forgeTicket, tickets, started, note, cleanup, LOCK_DIR,
 } = require('./helpers/dashboard-harness');
 
 let failures = 0;
@@ -259,6 +260,53 @@ test('AC8 provider failure: truthful age and diagnostics, the last good view is 
   await raw(rec.port, { method: 'POST', pathname: '/api/refresh', headers: { 'X-VL-Nonce': rec.nonce }, body: '' });
   const healed = await until(async () => { const s = await apiStatus(dir); return s.status === 'ok' && s.collection.attempts >= 3 ? s : null; }, 'recovery');
   assert.strictEqual(healed.collection.stale, false);
+});
+
+test('the daemon closes its ready channel right after answering, before any collection can hold it (EOF while the first collection still runs)', async () => {
+  // Root cause of a start that blocked on the first collection: fd 3 inherited by
+  // the `view` child, so the channel reached EOF only when the collection ended.
+  // Spawn the daemon exactly as `start` does and watch fd 3 itself. (On macOS
+  // libuv spawns with POSIX_SPAWN_CLOEXEC_DEFAULT, so a leak cannot show here;
+  // on Linux a child forked while fd 3 is open inherits it. The ordering that
+  // prevents it — answer, close, THEN collect — is pinned platform-independently
+  // by dashboard-lib "runDaemon answers onReady … BEFORE the first collection".)
+  const dir = scratch();
+  fs.writeFileSync(path.join(dir, 'provider-mode'), 'slow:9000');
+  const child = spawn(process.execPath, [CLI, 'dashboard', '__daemon', '--host', '127.0.0.1', '--port', '0', '--interval', '30'], {
+    cwd: dir,
+    detached: true,
+    env: { PATH: process.env.PATH, HOME: dir, CLAUDE_PLUGIN_DATA: dir, NODE_OPTIONS: `--require=${PRELOAD}` },
+    stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
+  });
+  child.unref();
+  let text = '';
+  const t0 = Date.now();
+  const eof = new Promise((resolve) => { child.stdio[3].on('data', (c) => { text += c; }); child.stdio[3].on('end', resolve); });
+  const outcome = await Promise.race([eof.then(() => 'eof'), sleep(4000).then(() => 'still-open')]);
+  note(dir);
+  assert.strictEqual(outcome, 'eof', 'fd 3 is held open past the ready line: something the daemon spawned inherited it');
+  assert.ok(Date.now() - t0 < 4000);
+  assert.strictEqual(JSON.parse(text.split('\n')[0]).ok, true);
+  // the 9 s collection is still running: EOF did not wait for it
+  const status = await apiStatus(dir);
+  assert.strictEqual(status.collection.state, 'collecting');
+  assert.strictEqual(status.status, 'pending');
+});
+
+test('start returns promptly even when the first collection outlasts the ready timeout', async () => {
+  const dir = scratch();
+  fs.writeFileSync(path.join(dir, 'provider-mode'), 'slow:9000');
+  const t0 = Date.now();
+  const res = await daemonLib.startDaemon({
+    dir,
+    daemonArgs: [CLI, 'dashboard', '__daemon', '--host', '127.0.0.1', '--port', '0', '--interval', '30'],
+    env: { PATH: process.env.PATH, HOME: dir, CLAUDE_PLUGIN_DATA: dir, NODE_OPTIONS: `--require=${PRELOAD}` },
+    readyTimeoutMs: 3000,
+  });
+  note(dir);
+  assert.strictEqual(res.ok, true, JSON.stringify(res));
+  assert.ok(Date.now() - t0 < 3000, `start took ${Date.now() - t0}ms; it waited on the collection`);
+  assert.strictEqual((await apiStatus(dir)).collection.state, 'collecting');
 });
 
 // ---- gate warmth -------------------------------------------------------------

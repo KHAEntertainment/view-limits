@@ -655,6 +655,72 @@ test('status: a listener that answers but whose process identity is unreadable i
   } finally { d.release(); await h.shutdown('test'); }
 });
 
+// ---- start's ready handshake -------------------------------------------------
+
+console.log('start handshake');
+
+function fakeDaemonScript(source) {
+  const dir = tmp('fakedaemon');
+  const file = path.join(dir, 'fake-daemon.js');
+  fs.writeFileSync(file, source);
+  return { dir, file };
+}
+const readyLine = JSON.stringify({ ok: true, url: 'http://127.0.0.1:1/', instanceId: 'a'.repeat(32), intervalSeconds: 30 });
+
+test('start settles on the first newline even while something still holds fd 3 open', async () => {
+  // The fake daemon answers and then KEEPS fd 3 open (as a leaked grandchild would).
+  const { dir, file } = fakeDaemonScript(`require('fs').writeSync(3, ${JSON.stringify(readyLine + '\n')}); setTimeout(() => {}, 30000);`);
+  const t0 = Date.now();
+  const res = await daemon.startDaemon({ dir, daemonArgs: [file], readyTimeoutMs: 5000 });
+  try {
+    assert.strictEqual(res.ok, true, JSON.stringify(res));
+    assert.ok(Date.now() - t0 < 3000, `start waited ${Date.now() - t0}ms for the held-open channel`);
+    assert.strictEqual(res.url, 'http://127.0.0.1:1/');
+  } finally { try { process.kill(-res.pid, 'SIGKILL'); } catch { /* gone */ } }
+});
+
+test('start settles exactly once on the FIRST line; later lines and the later close are ignored', async () => {
+  const bad = JSON.stringify({ ok: false, reason: 'second-line' });
+  const { dir, file } = fakeDaemonScript(`require('fs').writeSync(3, ${JSON.stringify(readyLine + '\n' + bad + '\n')}); setTimeout(() => {}, 30000);`);
+  const res = await daemon.startDaemon({ dir, daemonArgs: [file], readyTimeoutMs: 5000 });
+  try {
+    assert.strictEqual(res.ok, true);
+    await sleep(200);
+  } finally { try { process.kill(-res.pid, 'SIGKILL'); } catch { /* gone */ } }
+});
+
+test('start still parses a ready line that arrives without a newline when the channel closes', async () => {
+  const { dir, file } = fakeDaemonScript(`const fs = require('fs'); fs.writeSync(3, ${JSON.stringify(readyLine)}); fs.closeSync(3); setTimeout(() => {}, 30000);`);
+  const res = await daemon.startDaemon({ dir, daemonArgs: [file], readyTimeoutMs: 5000 });
+  try { assert.strictEqual(res.ok, true, JSON.stringify(res)); } finally { try { process.kill(-res.pid, 'SIGKILL'); } catch { /* gone */ } }
+});
+
+test('start reports a daemon that dies before answering, and a daemon that never answers times out', async () => {
+  const dead = fakeDaemonScript('process.exit(7);');
+  const gone = await daemon.startDaemon({ dir: dead.dir, daemonArgs: [dead.file], readyTimeoutMs: 5000 });
+  assert.deepStrictEqual({ ok: gone.ok, reason: gone.reason }, { ok: false, reason: 'no-ready-line' });
+  const mute = fakeDaemonScript('setTimeout(() => {}, 30000);');
+  const t0 = Date.now();
+  const late = await daemon.startDaemon({ dir: mute.dir, daemonArgs: [mute.file], readyTimeoutMs: 400 });
+  assert.deepStrictEqual({ ok: late.ok, reason: late.reason }, { ok: false, reason: 'ready-timeout' });
+  assert.ok(Date.now() - t0 < 4000);
+});
+
+test('runDaemon answers onReady AFTER the record is published and BEFORE the first collection starts', async () => {
+  const dir = tmp('run-ready');
+  const order = [];
+  const h = await daemon.runDaemon({
+    dir, host: '127.0.0.1', port: 0, intervalSeconds: 30,
+    onReady: (info) => { order.push(`ready:${records.readRecord(dir).ok ? 'record-published' : 'no-record'}:${info.port > 0}`); },
+    collect: async () => { order.push('collect'); return { ok: true, envelope: envelope('completed') }; },
+  });
+  assert.ok(h.ok);
+  try {
+    await sleep(50);
+    assert.deepStrictEqual(order, ['ready:record-published:true', 'collect']);
+  } finally { await h.shutdown('test'); }
+});
+
 // ---- option validation -------------------------------------------------------
 
 console.log('options');

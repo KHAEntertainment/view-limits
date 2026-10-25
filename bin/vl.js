@@ -2326,7 +2326,7 @@ function writeLanConfig(mutate) {
       }
     }
   } catch (e) {
-    outcome = { error: e && e.code === 'CONFIG_MIGRATION_PENDING'
+    outcome = { error: e && e.lanRefusal ? e.lanRefusal : e && e.code === 'CONFIG_MIGRATION_PENDING'
       ? 'config.json does not exist yet; run /view-limits:setup to add a provider first.'
       : `config.json could not be written (${(e && e.code) || 'write-failed'}).` };
   } finally {
@@ -2387,10 +2387,16 @@ async function dashboardLanCmd(dir, args, dashboard) {
   if (action === 'disable') {
     if (rest.length) dashboardUsage('lan disable takes no options.');
     // The interface, port and token are kept, so enabling again restores the
-    // same phone link.
-    const next = writeLanConfig((section) => (section && typeof section === 'object' && !Array.isArray(section)
-      ? Object.assign({}, section, { enabled: false })
-      : undefined));
+    // same phone link. An absent section is a no-op; a present but invalid
+    // one is refused and left as it is, never rewritten (fail loudly). The
+    // check is the document's, not this machine's: an interface that is gone
+    // can still be disabled.
+    const next = writeLanConfig((section, doc) => {
+      if (section === undefined) return undefined;
+      const check = lanLib.resolveLanConfig(doc, { interfaces: null });
+      if (!check.ok) throw Object.assign(new Error('invalid dashboard.lan'), { lanRefusal: check.error });
+      return Object.assign({}, section, { enabled: false });
+    });
     if (next === undefined) { process.stdout.write('dashboard: the LAN view is already off.\n'); return; }
     process.stdout.write('dashboard: LAN view disabled. The same phone link works again if you re-enable it; `vl.js dashboard lan rotate` replaces it.\n');
     process.stdout.write(await running()

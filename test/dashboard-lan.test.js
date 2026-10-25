@@ -524,6 +524,37 @@ test('a corrupt config.json refuses lan enable and lan url (exit 10), writing no
   assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), '{ not json');
 });
 
+test('lan disable refuses a present but invalid dashboard.lan (exit 1) and leaves it as it is; an absent section is a no-op', async () => {
+  const cfgPath = (dir) => path.join(dir, 'config.json');
+  const invalid = ['on', null, [], 42, { enabled: 'yes' }, { enabled: true, interface: 'my-mac.local', port: 5000 }];
+  for (const value of invalid) {
+    const dir = scratch(baseConfig({ dashboard: { lan: value } }));
+    const before = fs.readFileSync(cfgPath(dir), 'utf8');
+    const r = await vl(dir, ['dashboard', 'lan', 'disable']);
+    assert.strictEqual(r.status, 1, `${JSON.stringify(value)}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /dashboard\.lan/, JSON.stringify(value));
+    assert.ok(r.stderr.includes(lan.LAN_FIX), `${JSON.stringify(value)}: recovery text: ${r.stderr}`);
+    assert.ok(!r.stdout.includes('already off'), JSON.stringify(value));
+    assert.strictEqual(fs.readFileSync(cfgPath(dir), 'utf8'), before, `${JSON.stringify(value)}: config untouched`);
+    // resolveLanConfig gives the same recovery text for the same value.
+    const resolved = lan.resolveLanConfig({ dashboard: { lan: value } }, { interfaces: null });
+    assert.strictEqual(resolved.ok, false, JSON.stringify(value));
+    assert.ok(resolved.error.includes(lan.LAN_FIX), JSON.stringify(value));
+  }
+  // Absent: the no-op, config untouched.
+  const dir = scratch(baseConfig());
+  const before = fs.readFileSync(cfgPath(dir), 'utf8');
+  const r = await vl(dir, ['dashboard', 'lan', 'disable']);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.stdout, /already off/);
+  assert.strictEqual(fs.readFileSync(cfgPath(dir), 'utf8'), before);
+  // A valid section whose interface is not on this machine can still be disabled.
+  const gone = scratch(baseConfig({ dashboard: { lan: { enabled: true, interface: '203.0.113.7', port: 47615 } } }));
+  const off = await vl(gone, ['dashboard', 'lan', 'disable']);
+  assert.strictEqual(off.status, 0, off.stderr);
+  assert.deepStrictEqual(readCfg(gone).dashboard.lan, { enabled: false, interface: '203.0.113.7', port: 47615 });
+});
+
 if (!LAN_ADDR) {
   console.log('    (skipped: the real-interface LAN scenarios need a non-loopback IPv4 address on this machine)');
 } else {

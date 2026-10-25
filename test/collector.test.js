@@ -94,9 +94,18 @@ function world({ adapters = {}, vault = { has: () => true, get: () => 'fake-toke
     // function.
     getRuntimeSnapshot: async (opts) => {
       calls.native += 1;
+      // Like the real service, run the live source (the collector wraps it to
+      // record this run's rows). The fake source returns the rows `native`
+      // carries, so a snapshot with profiles is a snapshot whose live read
+      // produced them.
+      if (opts && opts.io && typeof opts.io.readTraycer === 'function') await opts.io.readTraycer({});
       if (typeof native === 'function') return native(opts);
       if (native instanceof Error) throw native;
       return native || { generatedAt: new Date(FIXED_NOW).toISOString(), profiles: [], sessions: [], harnesses: [], routes: [], diagnostics: [] };
+    },
+    readTraycer: async () => {
+      const snap = native && typeof native === 'object' && !(native instanceof Error) && typeof native !== 'function' ? native : {};
+      return { sessions: snap.sessions || [], harnesses: snap.harnesses || [], profiles: snap.profiles || [] };
     },
     now: () => FIXED_NOW,
   };
@@ -677,6 +686,176 @@ await testAsync('R2-3: collect() itself never runs the native observation (refre
   assert.strictEqual(calls.native, 0, 'refresh/collect never invokes the native runner');
   assert.strictEqual(result.snapshot, null);
   assert.strictEqual(result.native, null);
+});
+
+// CR5 — "observed" is what THIS run's live sources returned. The merged
+// snapshot also carries cached sidecar rows, which are not an observation
+// made now. These run the REAL runtime snapshot service with injected live
+// sources and an injected sidecar.
+const LIVE_EMPTY = { caller: null, sessions: [], harnesses: [], profiles: [], diagnostics: [] };
+const profileRow = (id) => ({ key: { host: 'h', provider: 'p', profileId: id } });
+const sidecarWith = (profiles) => () => ({ doc: { sessions: [], harnesses: [], profiles }, degradations: [] });
+const NO_CREDS = { has: () => false, get: () => null };
+const MINIMAX_CFG = () => Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+
+await testAsync('CR5: a sidecar profile with an empty live read is unknown, and stays no-credentials', async () => {
+  scratch();
+  const result = await collector.collectView({
+    cfg: MINIMAX_CFG(),
+    io: realViewIo({
+      vault: NO_CREDS,
+      readSidecar: sidecarWith([profileRow('cached')]),
+      readTraycer: async () => LIVE_EMPTY,
+    }),
+  });
+  assert.strictEqual(result.snapshot.profiles.length, 1, 'the cached sidecar profile is in the snapshot');
+  assert.strictEqual(result.native.outcome, 'unknown', 'a cached row is not an observation made now');
+  assert.strictEqual(result.outcome, collector.OUTCOME.NO_CREDENTIALS, 'not promoted to completed');
+});
+
+await testAsync('CR5: a live profile is observed — native-only completes', async () => {
+  scratch();
+  const result = await collector.collectView({
+    cfg: MINIMAX_CFG(),
+    io: realViewIo({
+      vault: NO_CREDS,
+      readSidecar: sidecarWith([]),
+      readTraycer: async () => Object.assign({}, LIVE_EMPTY, { profiles: [profileRow('live')] }),
+    }),
+  });
+  assert.strictEqual(result.native.outcome, 'completed');
+  assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED);
+});
+
+await testAsync('CR5: a sidecar profile plus a live profile is observed', async () => {
+  scratch();
+  const result = await collector.collectView({
+    cfg: MINIMAX_CFG(),
+    io: realViewIo({
+      vault: NO_CREDS,
+      readSidecar: sidecarWith([profileRow('cached')]),
+      readTraycer: async () => Object.assign({}, LIVE_EMPTY, { profiles: [profileRow('live')] }),
+    }),
+  });
+  assert.strictEqual(result.snapshot.profiles.length, 2, 'cached and live rows are both in the snapshot');
+  assert.strictEqual(result.native.outcome, 'completed');
+  assert.strictEqual(result.outcome, collector.OUTCOME.COMPLETED);
+});
+
+await testAsync('CR5: a live source in io.liveReads counts as this run\'s observation', async () => {
+  scratch();
+  const result = await collector.collectView({
+    cfg: MINIMAX_CFG(),
+    io: realViewIo({
+      vault: NO_CREDS,
+      readSidecar: sidecarWith([]),
+      readTraycer: async () => LIVE_EMPTY,
+      liveReads: [{ key: 'extra', read: async () => ({ sessions: [{ key: { host: 'h', agentId: 'a' } }] }) }],
+    }),
+  });
+  assert.strictEqual(result.native.outcome, 'completed');
+});
+
+await testAsync('CR5: a throwing live source is still failed with the same codes (the wrapper re-throws)', async () => {
+  scratch();
+  const failing = (extra) => collector.collectView({
+    cfg: MINIMAX_CFG(),
+    io: realViewIo(Object.assign({
+      getAdapter: () => ({ fetchStatus: async () => HEALTHY }),
+      vault: { has: () => true, get: () => 'fake-test-key' },
+      readSidecar: sidecarWith([profileRow('cached')]),
+    }, extra)),
+  });
+  const viaTraycer = await failing({ readTraycer: async () => { throw new Error('boom'); } });
+  assert.strictEqual(viaTraycer.native.outcome, 'failed');
+  assert.deepStrictEqual(viaTraycer.native.codes, ['traycer-read-failed']);
+  assert.strictEqual(viaTraycer.outcome, collector.OUTCOME.PARTIAL);
+
+  const viaExtra = await failing({
+    readTraycer: async () => LIVE_EMPTY,
+    liveReads: [{ key: 'extra', read: async () => { throw new Error('boom'); } }],
+  });
+  assert.strictEqual(viaExtra.native.outcome, 'failed');
+  assert.deepStrictEqual(viaExtra.native.codes, ['live-source-failed']);
+
+  // A failed source records nothing even when a sibling observed rows: the
+  // failure code still wins, as before.
+  const mixed = await failing({
+    readTraycer: async () => Object.assign({}, LIVE_EMPTY, { profiles: [profileRow('live')] }),
+    liveReads: [{ key: 'extra', read: async () => { throw new Error('boom'); } }],
+  });
+  assert.strictEqual(mixed.native.outcome, 'failed');
+});
+
+await testAsync('CR5: every live source runs exactly ONCE per view — keys and coalescing are preserved', async () => {
+  scratch();
+  const counts = { traycer: 0, a: 0, shared: 0, dupKey: 0 };
+  const shared = async () => { counts.shared += 1; return LIVE_EMPTY; };
+  await collector.collectView({
+    cfg: MINIMAX_CFG(),
+    io: realViewIo({
+      vault: NO_CREDS,
+      readSidecar: sidecarWith([]),
+      readTraycer: async () => { counts.traycer += 1; return LIVE_EMPTY; },
+      liveReads: [
+        { key: 'a', read: async () => { counts.a += 1; return LIVE_EMPTY; } },
+        // one read function under two keys: the service coalesces it to one run
+        { key: 'shared-1', read: shared },
+        { key: 'shared-2', read: shared },
+        // one key under two functions: the first wins, the second never runs
+        { key: 'dup', read: async () => { counts.dupKey += 1; return LIVE_EMPTY; } },
+        { key: 'dup', read: async () => { counts.dupKey += 100; return LIVE_EMPTY; } },
+        // an entry the service ignores must not shift positional keys
+        null,
+        { read: 'not a function' },
+      ],
+    }),
+  });
+  assert.deepStrictEqual(counts, { traycer: 1, a: 1, shared: 1, dupKey: 1 });
+});
+
+await testAsync('CR5: the default Traycer source runs ONCE per view when no readTraycer is injected', async () => {
+  scratch();
+  const traycerAdapter = require('../lib/traycer-adapter');
+  const real = traycerAdapter.readTraycerRuntime;
+  let calls = 0;
+  traycerAdapter.readTraycerRuntime = async () => { calls += 1; return LIVE_EMPTY; };
+  try {
+    const result = await collector.collectView({
+      cfg: MINIMAX_CFG(),
+      io: realViewIo({ vault: NO_CREDS, readSidecar: sidecarWith([]) }),
+    });
+    assert.strictEqual(calls, 1, 'the default source ran exactly once');
+    assert.strictEqual(result.native.outcome, 'unknown');
+  } finally {
+    traycerAdapter.readTraycerRuntime = real;
+  }
+});
+
+await testAsync('CR5: a fake getRuntimeSnapshot that runs no live source observes nothing (unknown)', async () => {
+  scratch();
+  const { io } = world({ vault: NO_CREDS });
+  io.getRuntimeSnapshot = async () => ({ generatedAt: '2026-10-24T12:00:00Z', profiles: [profileRow('x')], sessions: [], harnesses: [], routes: [], diagnostics: [] });
+  const result = await collector.collectView({ cfg: MINIMAX_CFG(), io });
+  assert.strictEqual(result.native.outcome, 'unknown', 'rows the snapshot merely carries are not this run\'s observation');
+});
+
+// Drift guard: the collector must wrap EVERY live source runtime-snapshot runs
+// by default. runtime-snapshot exports no list of them, so pin the io members
+// collectLiveSources reads against the collector's own list. A new default
+// source (a new io.<member>, or another sources.push) fails here until the
+// collector wraps it.
+await testAsync('CR5: the collector wraps every live source runtime-snapshot runs by default', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'runtime-snapshot.js'), 'utf8');
+  const m = /function collectLiveSources\(io\) \{([\s\S]*?)\n\}\n/.exec(src);
+  assert.ok(m, 'lib/runtime-snapshot.js#collectLiveSources was not found — update this guard and the collector together');
+  const members = [...new Set([...m[1].matchAll(/\bio\.(\w+)/g)].map((x) => x[1]))].sort();
+  assert.deepStrictEqual(members, [...collector.LIVE_SOURCE_IO_MEMBERS].sort(),
+    'collectLiveSources reads a live-source io member the collector does not wrap');
+  assert.strictEqual((m[1].match(/sources\.push\(/g) || []).length, 2,
+    'collectLiveSources gained (or lost) a source.push — wrap the new source in lib/collector.js recordLiveSources');
+  assert.strictEqual((src.match(/collectLiveSources\(/g) || []).length, 2,
+    'collectLiveSources is the single place live sources are chosen (definition + one use in runLiveSources)');
 });
 
 // A1 — the worker lock is released after every outcome, and a publish throw

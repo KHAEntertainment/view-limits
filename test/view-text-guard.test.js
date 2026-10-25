@@ -9,8 +9,14 @@
 // The ALLOWED forms are named explicitly below. A value that reaches a
 // rendered line must be
 //   * textCell(...)        - the one sanitizer, at the text boundary, or
+//   * a chained form        - padEnd(n), padStart(n), toUpperCase() or
+//     repeat(n) on either the sanitizer's result or an escape-free string
+//     literal, and only with the argument form each method permits (see
+//     ALLOWED_CHAINS: a padEnd fill string, a concat/replace argument, or
+//     any argument carrying a provider field would put that field back into
+//     the cell unescaped),
 //   * a numeric formatter   - barFor, formatCount, Math.round, Math.max,
-//                             or a numeric toFixed/repeat expression, or
+//                             or a numeric toFixed expression, or
 //   * a fixed-vocabulary lookup - ownLookup, whose result is one of a
 //                             fixed set of labels, or
 //   * a bare local or an element access of one - a value that was already
@@ -68,18 +74,68 @@ const ALLOWED_CALLEES = new Set([
 ]);
 
 // The expression must be EXACTLY one call: the argument list is matched with
-// BALANCED parentheses and the rest must be empty (or one method chain). A
+// BALANCED parentheses and the rest must be empty or a method chain, which is
+// captured so every segment of it can be checked against ALLOWED_CHAINS. A
 // greedy pattern would accept `textCell('') + String(x)`, whose right
 // operand escapes the sanitizer.
-const ONE_CALL = /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?\((?:[^()]|\([^()]*\))*\)(?:\.[A-Za-z_$][\w$]*\((?:[^()]|\([^()]*\))*\))*$/;
-const LITERAL_CALL = /^'[^']*'\.[A-Za-z_$][\w$]*\((?:[^()]|\([^()]*\))*\)$/;
+const ONE_CALL = /^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\((?:[^()]|\([^()]*\))*\)((?:\.[A-Za-z_$][\w$]*\((?:[^()]|\([^()]*\))*\))*)$/;
+
+// The methods that may be chained, and the argument form each must take.
+//
+// The argument is part of the rule, not a detail of it: a method allow-list
+// on its own is not enough. `.padEnd(15, route.label)` writes its second
+// argument (the fill string) into the cell, and `.concat(route.stateReason)`
+// / `.replace(a, route.stateReason)` write theirs in directly - so padEnd
+// and padStart take exactly ONE numeric-literal width and no fill string,
+// toUpperCase takes no arguments, and repeat's count is an arithmetic
+// expression over bare identifiers and numbers: never a member access, which
+// is a provider field.
+//
+// These are exactly the methods lib/view-model.js chains on the scanned
+// renderers today - padEnd/padStart/toUpperCase on textCell(...)
+// (expandedRows:1345, renderViewText:1480/1495/1498) and padEnd/padStart/
+// repeat on a string literal (renderViewText: header cells, barFor:1229).
+// A method the source does not use, however harmless it looks, is not here.
+const ALLOWED_CHAINS = new Map([
+  ['padEnd', /^\d+$/],
+  ['padStart', /^\d+$/],
+  ['toUpperCase', /^$/],
+  ['repeat', /^(?:[A-Za-z_$][\w$]*|\d+)(?:\s*[+\-*/%]\s*(?:[A-Za-z_$][\w$]*|\d+))*$/],
+]);
+
+// A string literal may be the receiver of a chain: its output starts from a
+// fixed, escape-free value (a `\n` escape in the literal would put a real
+// newline in it, so backslashes are out), and then only through a method
+// ALLOWED_CHAINS lists, with that method's argument form.
+const LITERAL_CALL = /^'(?:[^'\\]*)'\.([A-Za-z_$][\w$]*)\(((?:[^()]|\([^()]*\))*)\)$/;
 const NUMERIC_CALL = /^\([^()]*\)\.toFixed\(\d\)$/;
 
+// Every segment of a captured chain must be a listed method taking its
+// listed argument form, and the segments must cover the whole suffix.
+function chainAllowed(suffix) {
+  const segment = /\.([A-Za-z_$][\w$]*)\(((?:[^()]|\([^()]*\))*)\)/g;
+  let cursor = 0;
+  let match = segment.exec(suffix);
+  while (match !== null) {
+    if (match.index !== cursor) return false;
+    cursor = segment.lastIndex;
+    const rule = ALLOWED_CHAINS.get(match[1]);
+    if (!rule || !rule.test(match[2].trim())) return false;
+    match = segment.exec(suffix);
+  }
+  return cursor === suffix.length;
+}
+
 function isAllowedExpression(expression) {
-  if (LITERAL_CALL.test(expression) || NUMERIC_CALL.test(expression)) return true;
-  if (!ONE_CALL.test(expression)) return false;
-  const callee = expression.match(/^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\(/);
-  return !!callee && ALLOWED_CALLEES.has(callee[1]);
+  const literal = LITERAL_CALL.exec(expression);
+  if (literal) {
+    const rule = ALLOWED_CHAINS.get(literal[1]);
+    return !!rule && rule.test(literal[2].trim());
+  }
+  if (NUMERIC_CALL.test(expression)) return true;
+  const call = ONE_CALL.exec(expression);
+  if (!call || !ALLOWED_CALLEES.has(call[1])) return false;
+  return chainAllowed(call[2]);
 }
 
 // Skip a line or block comment starting at `i` (which is the first `/`).
@@ -271,6 +327,72 @@ const findings = findingsIn(SOURCE);
 assert.deepStrictEqual(findings, [],
   `the view text renderers interpolate a provider field directly:\n  ${findings.join('\n  ')}`);
 
-console.log('view-text-guard: PASS');
+// ---- probes (Issue #92) ----
+//
+// The checker runs on an in-memory renderer source exactly as it runs on the
+// real file, so a form can be proved flagged (or proved still accepted)
+// without touching lib/view-model.js.
+function probeFindings(expression) {
+  const source = [
+    'function renderViewText(schema, opts = {}) {',
+    '  return `' + '${' + expression + '}`;',
+    '}',
+    '',
+  ].join('\n');
+  return findingsIn(source, ['renderViewText']);
+}
+
+// Forms that must be FLAGGED: a provider field reaching the cell through a
+// chain argument, through a chain method that is not listed, or not through
+// a call at all.
+const ESCAPES = [
+  "textCell('').concat(route.stateReason)",
+  "textCell('').replace(/x/, route.stateReason)",
+  "textCell('').padEnd(3, route.stateReason)",
+  "textCell('').padStart(3, route.stateReason)",
+  "textCell('').toUpperCase().padEnd(3, route.stateReason)",
+  // an ALLOWED method with a provider field in its argument must still fail
+  "textCell('').repeat(route.stateReason)",
+  // the literal base is no safer a place to hide one
+  "'#'.concat(route.stateReason)",
+  "'PROVIDER'.padEnd(15, route.stateReason)",
+  "'PROVIDER\\nFAKE'.padEnd(15)",
+  "textCell('').trim()",
+  "textCell('').toLowerCase()",
+  "textCell('') + route.stateReason",
+  'route.stateReason',
+];
+
+// Forms lib/view-model.js actually uses: they must keep passing, so the
+// restriction cannot be satisfied by banning chains outright.
+const LEGIT_FORMS = [
+  "textCell(pctLabel(w.remainingRatio)).padStart(3)",
+  "textCell(provider).padEnd(15)",
+  "textCell(cells.left).padStart(4)",
+  "textCell(route.state || 'unknown').toUpperCase().padEnd(13)",
+  "textCell(route.freshness || 'unknown').toUpperCase()",
+  "textCell(row.label).padEnd(9)",
+  "'PROVIDER'.padEnd(15)",
+  "'LEFT'.padStart(4)",
+  "'#'.repeat(filled)",
+  "'-'.repeat(BAR_WIDTH - filled)",
+  '(value / 1e9).toFixed(1)',
+  'textCell(row.label)',
+  'barFor(w.remainingRatio)',
+  'ownLookup(map, key)',
+];
+
+for (const expression of ESCAPES) {
+  const found = probeFindings(expression);
+  assert.ok(found.length > 0,
+    `this escape must be flagged: \${${expression}}\n  checker said: ${found.join('; ') || 'nothing'}`);
+}
+for (const expression of LEGIT_FORMS) {
+  const found = probeFindings(expression);
+  assert.deepStrictEqual(found, [],
+    `this is a form lib/view-model.js uses and must keep passing: \${${expression}}`);
+}
+
+console.log(`view-text-guard: PASS (${ESCAPES.length} escapes flagged, ${LEGIT_FORMS.length} real forms accepted)`);
 
 module.exports = { findingsIn, isAllowedExpression };

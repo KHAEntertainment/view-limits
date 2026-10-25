@@ -329,6 +329,8 @@ test('view --json: a busy collector keeps the Xiaomi row, pending and never heal
     assert.strictEqual(doc.collection.outcome, 'in-progress');
     const row = doc.routes.find((x) => x.id === 'xiaomi-token-plan');
     assert.ok(row, 'the Xiaomi row is present — never dropped on a busy collector');
+    assert.strictEqual(row.collection.outcome, 'pending', 'the route-level collection outcome is pending, not skipped');
+    assert.ok(row.reasonCodes.includes('collection-pending'));
     assert.strictEqual(row.state, 'unknown', 'pending renders unknown');
     assert.match(row.error, /refresh in progress/, 'the row is the pending projection');
     assert.strictEqual(row.freshness, 'fresh', 'the pending display is current, not a stale cached entry');

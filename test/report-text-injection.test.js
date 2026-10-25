@@ -463,6 +463,25 @@ for (const variant of VARIANTS) {
   }
 }
 
+// ---- a control-free period end keeps its EXACT old rendering --------------
+//
+// The plan-period line used to escape with JSON.stringify(...).slice(1,-1),
+// which also escaped `"` and `\`. The sanitizer alone would leave those two
+// raw, so the line runs the JSON form through the sanitizer instead: a
+// control-free period end renders byte-identically to the old output, and
+// only DEL and the C1 range change — from raw to escaped.
+{
+  const VALUES = ['2026-11-07 "UTC"', '"2026-11-07"', 'C:\\path\\2026-11-07'];
+  for (const value of VALUES) {
+    const fixture = cloneNode(VARIANTS[0].fixture);
+    setAt(fixture, ['routes', 0, 'resource', 'periodEnd', 'value'], value);
+    const text = vm.buildViewModel(fixture, UPDATED_AT).lines.join('\n');
+    const expected = ` · plan period ends ${JSON.stringify(String(value)).slice(1, -1)} (reported)`;
+    assert.ok(text.includes(expected),
+      `periodEnd ${JSON.stringify(value)}: the rendered text changed from ${JSON.stringify(expected)}`);
+  }
+}
+
 console.log(`report-text-injection: PASS (${VARIANTS.length} variants, ${totalLeaves} leaves [${leafCounts.join(', ')}], ${CONTROLS.length} controls)`);
 
 // The fixtures are exported so the byte-identical proof can render the SAME

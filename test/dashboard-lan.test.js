@@ -20,6 +20,7 @@ const lan = require('../lib/dashboard/lan');
 const { redactForLan } = require('../lib/dashboard/lan-redact');
 const { createLanServer } = require('../lib/dashboard/lan-server');
 const { CSP } = require('../lib/dashboard/page');
+const { buildViewSchema } = require('../lib/view-model');
 const { scratch, vl, record, dirs, started, note, cleanup, alive, until, sleep } = require('./helpers/dashboard-harness');
 
 let failures = 0;
@@ -107,6 +108,8 @@ test('resolveLanConfig: a bad value refuses with the fix, never a default', () =
     [cfgWith({ enabled: 'yes' }), /enabled" must be true or false/],
     [cfgWith({ enabled: true, interface: '127.0.0.1', port: 5000 }), /loopback/],
     [cfgWith({ enabled: true, interface: '::1', port: 5000 }), /loopback/],
+    [cfgWith({ enabled: true, interface: '::FFFF:127.0.0.1', port: 5000 }), /loopback/],
+    [cfgWith({ enabled: true, interface: '0:0:0:0:0:0:0:1', port: 5000 }), /loopback/],
     [cfgWith({ enabled: true, interface: '0.0.0.0', port: 5000 }), /wildcard/],
     [cfgWith({ enabled: true, interface: '::', port: 5000 }), /wildcard/],
     [cfgWith({ enabled: true, interface: 'fe80::1', port: 5000 }), /link-local/],
@@ -130,6 +133,28 @@ test('hostFor / lanUrl: IPv6 hosts are bracketed', () => {
   assert.strictEqual(lan.hostFor('192.168.1.20', 47615), '192.168.1.20:47615');
   assert.strictEqual(lan.hostFor('fd7a:115c:a1e0::9', 47615), '[fd7a:115c:a1e0::9]:47615');
   assert.strictEqual(lan.lanUrl('fd7a::9', 8000, 'a'.repeat(64)), `http://[fd7a::9]:8000/?t=${'a'.repeat(64)}`);
+});
+
+test('an uppercase IPv6 interface resolves to the one canonical spelling, and the printed link\'s Host is accepted', async () => {
+  const ifaces = { utun4: [{ address: 'fd7a:115c:a1e0::9', family: 'IPv6', internal: false }] };
+  const resolved = lan.resolveLanConfig(cfgWith({ enabled: true, interface: 'FD7A:115C:A1E0::9', port: 47615 }), { interfaces: ifaces });
+  assert.deepStrictEqual(resolved, { ok: true, enabled: true, address: 'fd7a:115c:a1e0::9', port: 47615 });
+  assert.strictEqual(lan.canonicalAddress('FD7A:115C:A1E0:0:0:0:0:9'), 'fd7a:115c:a1e0::9');
+  const token = 'a'.repeat(64);
+  // What a browser sends as Host for the printed link.
+  const browserHost = new URL(lan.lanUrl('FD7A:115C:A1E0::9', 47615, token)).host;
+  assert.strictEqual(lan.hostFor('FD7A:115C:A1E0::9', 47615), browserHost);
+  // The listener built from the spelling in config accepts that Host. It is
+  // bound on loopback here; only the Host header carries the IPv6 address.
+  const port = await new Promise((r) => { const sv = net.createServer(); sv.listen(0, '127.0.0.1', () => { const p = sv.address().port; sv.close(() => r(p)); }); });
+  const server = createLanServer({ address: 'FD7A:115C:A1E0::9', port, getStatus: () => ({}), currentToken: () => token });
+  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  try {
+    const host = new URL(lan.lanUrl('FD7A:115C:A1E0::9', port, token)).host;
+    assert.strictEqual((await get(port, { pathname: '/', host })).status, 200, host);
+    assert.strictEqual((await get(port, { pathname: '/api/lan/status', host, headers: { 'X-VL-Read': token } })).status, 200);
+    assert.strictEqual((await get(port, { pathname: '/', host: `[FD7A:115C:A1E0::9]:${port}` })).status, 403, 'the Host check stays exact');
+  } finally { server.closeAllConnections(); await new Promise((r) => server.close(r)); }
 });
 
 // ---- token -----------------------------------------------------------------------
@@ -190,6 +215,63 @@ test('redactForLan: no identifier, secret, URL or diagnostic survives; the displ
   assert.strictEqual(doc.view.collection, undefined, 'the collection block (route ids, errors) is not projected');
   // Never throws on garbage.
   for (const junk of [null, 42, 'x', [], { view: 'x' }, { view: { routes: [null, 1, 'x'] } }]) redactForLan(junk);
+});
+
+// Provider text planted in the fields the LAN keeps (currency, window type
+// and unit, a parseable but decorated reset time), through the REAL view
+// schema builder: none of it may reach the LAN document or its HTTP body.
+const PLANTED_TEXT = 'acct-private';
+function providerTextDoc() {
+  const configured = (value) => ({ value, provenance: 'configured', source: 'config', observedAt: null, freshUntil: null, reason: null });
+  const observed = (value) => ({ value, provenance: 'observed', source: 'status.json', observedAt: null, freshUntil: null, reason: null });
+  const view = buildViewSchema({
+    routes: [{
+      id: 'deepseek-direct', configured: true,
+      provider: configured('deepseek'), account: configured(PLANTED_TEXT), pool: configured({ provider: 'deepseek', account: PLANTED_TEXT }),
+      resource: {
+        state: observed('healthy'), basis: observed('quota-window'), freshness: 'fresh', error: null, reauth: null,
+        windows: [{ type: PLANTED_TEXT, unit: 'session-77', remaining: 4, limit: 10, resetAt: `2026-10-26 (${PLANTED_TEXT})` },
+          { type: 'weekly', unit: 'requests', remaining: 1, limit: 2, resetAt: '2026-10-26T09:00:00+02:00' }],
+        balance: { available: 5, currency: PLANTED_TEXT },
+        observedAt: observed(iso(-1000)), freshUntil: observed(iso(60000)), resetAt: observed(`2026-10-26 (${PLANTED_TEXT})`),
+      },
+    }, {
+      id: 'openrouter-main', configured: true, provider: configured('openrouter'), account: configured('main'),
+      resource: { state: observed('healthy'), freshness: 'fresh', error: null, reauth: null, windows: [],
+        balance: { available: 12.5, currency: 'USD' }, observedAt: observed(iso(-1000)), freshUntil: observed(iso(60000)) },
+    }],
+  }, { now: NOW });
+  view.profiles = [{ harness: PLANTED_TEXT, state: 'healthy', freshness: 'fresh', windows: [], reasonCodes: [] }];
+  return { schemaVersion: 1, status: 'ok', daemon: { intervalSeconds: 30 }, collection: { state: 'idle' }, view };
+}
+
+test('redactForLan: provider text in allowed fields (currency, window type/unit, decorated dates, harness) never survives', async () => {
+  const doc = providerTextDoc();
+  // The planted text really is in the loopback document's kept fields.
+  const [ds] = doc.view.routes;
+  assert.strictEqual(ds.balance.currency, PLANTED_TEXT);
+  assert.strictEqual(ds.windows[0].type, PLANTED_TEXT);
+  assert.strictEqual(ds.windows[0].unit, 'session-77');
+  assert.ok(ds.windows[0].resetAt.includes(PLANTED_TEXT));
+  const out = redactForLan(doc);
+  const text = JSON.stringify(out);
+  for (const value of [PLANTED_TEXT, 'session-77']) assert.ok(!text.includes(value), `leaked: ${value}`);
+  const [lanDs, lanOr] = out.view.routes;
+  assert.strictEqual(lanDs.balance.currency, null, 'not an ISO 4217 code');
+  assert.strictEqual(lanDs.balance.amount, 5);
+  assert.deepStrictEqual([lanDs.windows[0].type, lanDs.windows[0].unit], [null, null]);
+  assert.strictEqual(lanDs.windows[0].resetAt, new Date(Date.parse(`2026-10-26 (${PLANTED_TEXT})`)).toISOString(), 're-emitted, not copied');
+  assert.deepStrictEqual([lanDs.windows[1].type, lanDs.windows[1].unit, lanDs.windows[1].resetAt], ['weekly', 'requests', '2026-10-26T07:00:00.000Z']);
+  assert.strictEqual(lanOr.balance.currency, 'USD');
+  assert.strictEqual(out.view.profiles[0].harness, null);
+  assert.ok(lanDs.observedAt, 'an observation time is kept');
+  for (const t of [out.view.generatedAt, lanDs.observedAt].filter(Boolean)) assert.strictEqual(t, new Date(t).toISOString(), 'canonical timestamps');
+  // And over HTTP.
+  await withLanServer(async (port, dir) => {
+    const res = await get(port, { pathname: '/api/lan/status', headers: { 'X-VL-Read': lan.readToken(dir).token } });
+    assert.strictEqual(res.status, 200);
+    for (const value of [PLANTED_TEXT, 'session-77']) assert.ok(!res.text.includes(value), `HTTP body leaked: ${value}`);
+  }, { status: doc });
 });
 
 // ---- the LAN listener --------------------------------------------------------------
@@ -287,7 +369,9 @@ function runLanPage({ search = '', storage = 'ok', statusCode = 200, body = reda
   const metas = { 'vl-mode': 'lan', 'vl-threshold': '0.2' };
   const localStorage = storage === 'ok'
     ? { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) }
-    : { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); }, removeItem() { throw new Error('denied'); } };
+    : storage === 'write-fails'
+      ? { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem() { throw new Error('quota'); }, removeItem: (k) => store.delete(k) }
+      : { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); }, removeItem() { throw new Error('denied'); } };
   const sandbox = {
     document: {
       createElement: (t) => new El(t),
@@ -335,6 +419,16 @@ test('a bookmark of "/" uses the stored token; without storage the token lives i
   await p.settle();
   assert.deepStrictEqual(p.calls.replaceState, ['/']);
   assert.deepStrictEqual(p.calls.fetch.map((f) => f.headers['X-VL-Read']), [t], 'private mode: the in-memory token is used');
+});
+
+test('a fresh ?t= wins for the session when storage reads work but the write fails (quota): never the stale stored token', async () => {
+  const stale = 'a'.repeat(64);
+  const fresh = 'b'.repeat(64);
+  const p = runLanPage({ search: `?t=${fresh}`, storage: 'write-fails', seed: stale });
+  await p.settle();
+  assert.strictEqual(p.store.get('vl-lan-read-token'), stale, 'the write really failed');
+  assert.deepStrictEqual(p.calls.fetch.map((f) => f.headers['X-VL-Read']), [fresh]);
+  assert.ok(p.root.textContent.includes('Kimi'));
 });
 
 test('no token: no request, and the page says where to get the link; 401: the stored token is cleared and the page says it was replaced', async () => {

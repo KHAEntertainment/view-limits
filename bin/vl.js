@@ -2264,7 +2264,7 @@ async function dashboardCmd(args) {
         ready({ ok: false, reason: 'invalid-lan', error: 'invalid LAN address or port' });
         process.exit(1);
       }
-      lan = { address: flags['--lan-address'], port: lanPort, currentToken: lanLib.createTokenReader(dir) };
+      lan = { address: lanLib.canonicalAddress(flags['--lan-address']), port: lanPort, currentToken: lanLib.createTokenReader(dir) };
     }
     const handle = await dashboard.runDaemon({
       dir, host: bind.host, port: bind.port, intervalSeconds: interval, log, threshold, lan,
@@ -2346,7 +2346,7 @@ async function dashboardLanCmd(dir, args, dashboard) {
 
   if (action === 'enable') {
     const flags = parseDashboardFlags(rest, ['--interface', '--port']);
-    const address = flags['--interface'];
+    const address = lanLib.canonicalAddress(flags['--interface']);
     if (address === undefined) dashboardUsage('lan enable needs --interface <ip> (a LAN or Tailscale address of this machine).');
     const flagPort = flags['--port'] === undefined ? undefined : strictInteger(flags['--port']);
     if (Number.isNaN(flagPort)) dashboardUsage(`--port must be a whole number; got ${JSON.stringify(flags['--port'])}.`);
@@ -2354,7 +2354,7 @@ async function dashboardLanCmd(dir, args, dashboard) {
     const choices = here.length ? `this machine's addresses: ${here.join(', ')}` : 'this machine has no LAN or Tailscale address right now';
     const problem = lanLib.addressProblem(address);
     if (problem) err(`dashboard lan enable: ${address} ${problem}; pick one of ${choices}.`);
-    if (!here.some((a) => a.toLowerCase() === address.toLowerCase())) err(`dashboard lan enable: ${address} is not an address on this machine right now; pick one of ${choices}.`);
+    if (!here.some((a) => lanLib.canonicalAddress(a) === address)) err(`dashboard lan enable: ${address} is not an address on this machine right now; pick one of ${choices}.`);
     if (flagPort !== undefined && (flagPort < lanLib.PORT_MIN || flagPort > lanLib.PORT_MAX)) err(`dashboard lan enable: --port must be from ${lanLib.PORT_MIN} to ${lanLib.PORT_MAX}; got ${flagPort}.`);
 
     const tok = lanLib.readToken(dir);

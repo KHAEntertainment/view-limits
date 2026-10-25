@@ -1,4 +1,5 @@
-# view-limits
+ <img alt="View-Limits" src="https://ascii.rest/banner/View-Limits.svg?color=3be858,ea2f1a&font=tall&shadow=heavy&effect=glint">
+
 
 A Claude Code plugin that shows an orchestrator agent the credit / rate-limit
 status of its coding-plan accounts **before** dispatching sub-agents, with an

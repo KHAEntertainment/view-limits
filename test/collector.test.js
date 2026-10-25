@@ -814,6 +814,33 @@ await testAsync('CR5: every live source runs exactly ONCE per view — keys and 
   assert.deepStrictEqual(counts, { traycer: 1, a: 1, shared: 1, dupKey: 1 });
 });
 
+await testAsync('CR5: a non-enumerable or inherited source key is preserved — a `traycer` key still suppresses the default', async () => {
+  scratch();
+  const traycerAdapter = require('../lib/traycer-adapter');
+  const real = traycerAdapter.readTraycerRuntime;
+  let defaultCalls = 0;
+  traycerAdapter.readTraycerRuntime = async () => { defaultCalls += 1; return LIVE_EMPTY; };
+  try {
+    for (const shape of ['non-enumerable', 'inherited']) {
+      defaultCalls = 0;
+      let sourceCalls = 0;
+      const read = async () => { sourceCalls += 1; return Object.assign({}, LIVE_EMPTY, { profiles: [profileRow('live')] }); };
+      const source = shape === 'non-enumerable'
+        ? Object.defineProperty({ read }, 'key', { value: 'traycer' })
+        : Object.assign(Object.create({ key: 'traycer' }), { read });
+      const result = await collector.collectView({
+        cfg: MINIMAX_CFG(),
+        io: realViewIo({ vault: NO_CREDS, readSidecar: sidecarWith([]), liveReads: [source] }),
+      });
+      assert.strictEqual(sourceCalls, 1, `${shape}: the source runs once`);
+      assert.strictEqual(defaultCalls, 0, `${shape}: the \`traycer\` key suppresses the default Traycer source`);
+      assert.strictEqual(result.native.outcome, 'completed', shape);
+    }
+  } finally {
+    traycerAdapter.readTraycerRuntime = real;
+  }
+});
+
 await testAsync('CR5: the default Traycer source runs ONCE per view when no readTraycer is injected', async () => {
   scratch();
   const traycerAdapter = require('../lib/traycer-adapter');

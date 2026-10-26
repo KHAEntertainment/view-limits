@@ -35,7 +35,7 @@ const { spawn } = require('child_process');
 
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt,
-  resolveDashboardInterval } = require('../lib/config');
+  resolveDashboardInterval, hostLabel } = require('../lib/config');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, spawnRefresh,
@@ -2635,6 +2635,28 @@ function config() {
       : {
         id: r.id, provider: r.provider, account: r.account, match: r.match,
         ttlSeconds: r.ttlSeconds, hasCredential: vault.has(r.id),
+        // Issue #113: region-capable built-ins (kimi/glm) report the resolved
+        // canonical region and effective host, plus the refusal reason when
+        // the route does not resolve to a monitorable built-in.
+        ...(r.provider === 'kimi' || r.provider === 'glm'
+          ? (() => {
+              // The resolver's adapter wrapper carries capability + effective
+              // cfg; a stubbed adapters module (test preload) may not, so
+              // guard both before reaching into them.
+              const eff = getAdapter(r.provider, r, cfg);
+              if (!eff || !eff.capability || !eff.effectiveCfg) return {};
+              const pc = eff.effectiveCfg.providerCfg || {};
+              // Never echo a secret-bearing override: strip userinfo/path/
+              // query/fragment down to a display-safe host label. When there is
+              // no baseUrl to label (refused route), omit effectiveHost.
+              const host = typeof pc.baseUrl === 'string' ? hostLabel(pc.baseUrl) : undefined;
+              return {
+                region: pc.region,
+                ...(host !== undefined ? { effectiveHost: host } : {}),
+                ...(!eff.capability.monitorable ? { reason: eff.capability.reason } : {}),
+              };
+            })()
+          : {}),
       })),
     providers: Object.fromEntries(Object.entries(cfg.providers).map(([k, v]) => [k, v.baseUrl])),
     gate: cfg.gate,

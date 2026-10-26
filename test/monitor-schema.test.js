@@ -129,6 +129,41 @@ test('non-object recipeOptions → rejected', () => {
   assert.strictEqual(validateMonitor({ id: 'x', monitor: { recipeOptions: [] } }).ok, false);
 });
 
+console.log('Issue #113 — built-in region/endpoint refusals');
+
+test('built-in kimi route with monitor.endpoint → refused with a stable code', () => {
+  const r = validateMonitor({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', endpoint: 'https://api.example.com' } });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.code, 'built-in-endpoint-refused');
+  assert.match(r.error, /endpoint is not allowed/);
+});
+
+test('built-in glm route with an unknown region → refused with a stable code', () => {
+  const r = validateMonitor({ id: 'glm-coding-plan', provider: 'glm', monitor: { recipe: 'built-in', region: 'europe' } });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.code, 'unknown-region');
+  assert.match(r.error, /"europe" is not one of: international, china/);
+});
+
+test('built-in region accepts case/whitespace variants of a known region', () => {
+  const upper = validateMonitor({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: ' GLOBAL ' } });
+  assert.strictEqual(upper.ok, true);
+  const cased = validateMonitor({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'China' } });
+  assert.strictEqual(cased.ok, true);
+});
+
+test('custom/compat route keeps its own endpoint and region (no built-in refusal)', () => {
+  const r = validateMonitor({ id: 'custom-x', provider: 'kimi', monitor: { recipe: 'stepfun-plan', region: 'europe' } });
+  assert.strictEqual(r.ok, true);
+  const e = validateMonitor({ id: 'custom-y', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://api.example.com', region: 'us', recipeOptions: { path: '/v1/models' } } });
+  assert.strictEqual(e.ok, true);
+});
+
+test('built-in region rules do not fire on a non-region built-in provider', () => {
+  const r = validateMonitor({ id: 'minimax-token-plan', provider: 'minimax', monitor: { recipe: 'built-in', region: 'europe' } });
+  assert.strictEqual(r.ok, true);
+});
+
 console.log('endpoint — https-only (F2)');
 
 test('http: endpoint is rejected (https-only — F2)', () => {
@@ -492,6 +527,37 @@ test('httpsEndpointError credential check still wins over query (CR-1 regression
   assert.strictEqual(
     httpsEndpointError('https://user:pass@api.example.com/v1/models'),
     'must not embed credentials');
+});
+
+console.log('Issue #113 — canonical region hashing (B2)');
+
+test('built-in-recipe kimi: region spellings hash identically', () => {
+  const a = configRevision({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'global' } });
+  const b = configRevision({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: ' GLOBAL ' } });
+  assert.strictEqual(a, b);
+  const c = configRevision({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'China' } });
+  const d = configRevision({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'china' } });
+  assert.strictEqual(c, d);
+});
+
+test('built-in-recipe glm: region spellings hash identically', () => {
+  const a = configRevision({ id: 'glm-coding-plan', provider: 'glm', monitor: { recipe: 'built-in', region: 'international' } });
+  const b = configRevision({ id: 'glm-coding-plan', provider: 'glm', monitor: { recipe: 'built-in', region: ' INTERNATIONAL ' } });
+  assert.strictEqual(a, b);
+});
+
+test('an already-canonical region hashes exactly as before (caches not invalidated)', () => {
+  const route = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', account: 'a', region: 'global' } };
+  const expected = require('crypto').createHash('sha1')
+    .update(JSON.stringify({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', account: 'a', region: 'global' } }))
+    .digest('hex');
+  assert.strictEqual(configRevision(route), expected);
+});
+
+test('custom/compat routes keep raw region semantics in the revision', () => {
+  const a = configRevision({ id: 'custom-a', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://a', region: 'us', recipeOptions: { path: '/v1/models' } } });
+  const b = configRevision({ id: 'custom-a', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://a', region: 'US', recipeOptions: { path: '/v1/models' } } });
+  assert.notStrictEqual(a, b);
 });
 
 if (failures) {

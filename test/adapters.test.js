@@ -128,17 +128,66 @@ function unknownWithoutCapacity(status) {
     try { await run(glm, body); } catch (e) { return e; }
     return null;
   };
+  const rejectionWithRegion = async (body, cfg) => {
+    // CR1: this helper must drive `global.fetch` from ITS body argument, or
+    // it would silently run against whatever response the previous test left
+    // installed.
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+    try { await glm.fetchStatus(cfg, 'sk-test', { threshold: 0.2 }); } catch (e) { return e; }
+    return null;
+  };
   let e = await rejection({ code: 1000, msg: 'Authentication Failed', success: false });
-  test('live code 1000 (bad key) is an auth failure', () => {
+  // run() passes { baseUrl: 'https://test.invalid' } with no resolved region,
+  // so the hint names the host and points at the setting instead of guessing.
+  test('live code 1000 (bad key) is an auth failure with a host-naming hint', () => {
     assert.ok(e, 'expected a throw');
     assert.strictEqual(e.status, 401);
-    assert.strictEqual(e.message, 'Z.ai auth failed (code 1000: Authentication Failed)');
+    assert.strictEqual(e.message, 'Z.ai auth failed (code 1000: Authentication Failed) — auth failed at https://test.invalid? check providers.glm.baseUrl or set monitor.region');
   });
   e = await rejection({ code: 1001, msg: 'Authentication parameter not received in Header, unable to authenticate', success: false });
-  test('live code 1001 (no auth header) is an auth failure', () => {
+  test('live code 1001 (no auth header) is an auth failure with a host-naming hint', () => {
     assert.ok(e, 'expected a throw');
     assert.strictEqual(e.status, 401);
     assert.match(e.message, /^Z\.ai auth failed \(code 1001: Authentication parameter not received/);
+    assert.match(e.message, /check providers\.glm\.baseUrl or set monitor\.region/);
+  });
+  const chinaAuth = await rejectionWithRegion(
+    { code: 1000, msg: 'Authentication Failed', success: false },
+    { baseUrl: 'https://open.bigmodel.cn', region: 'china' });
+  test('code 1000 on a china route hints the international region (its own envelope)', () => {
+    assert.ok(chinaAuth, 'expected a throw');
+    assert.match(chinaAuth.message, /code 1000/);
+    assert.match(chinaAuth.message, /wrong region\? try region: international/);
+  });
+  const arbitraryAuth = await rejectionWithRegion(
+    { code: 1000, msg: 'Authentication Failed', success: false },
+    { baseUrl: 'https://override.example' });
+  test('code 1000 with no resolved region names the host and the setting', () => {
+    assert.ok(arbitraryAuth, 'expected a throw');
+    assert.match(arbitraryAuth.message, /check providers\.glm\.baseUrl or set monitor\.region/);
+    assert.doesNotMatch(arbitraryAuth.message, /try region/);
+  });
+  const secretHostAuth = await rejectionWithRegion(
+    { code: 1000, msg: 'Authentication Failed', success: false },
+    { baseUrl: 'https://override.example/v1?api_key=fixture-query-secret' });
+  test('code 1000 with a query-secret override never echoes the secret (N1)', () => {
+    assert.ok(secretHostAuth, 'expected a throw');
+    assert.match(secretHostAuth.message, /auth failed at https:\/\/override\.example/);
+    assert.doesNotMatch(secretHostAuth.message, /api_key|fixture-query-secret/);
+  });
+  const userInfoAuth = await rejectionWithRegion(
+    { code: 1000, msg: 'Authentication Failed', success: false },
+    { baseUrl: 'https://u:p@override.example' });
+  test('code 1000 with userinfo in the override never echoes it (N1)', () => {
+    assert.ok(userInfoAuth, 'expected a throw');
+    assert.match(userInfoAuth.message, /auth failed at https:\/\/override\.example/);
+    assert.doesNotMatch(userInfoAuth.message, /u:p|:p@/);
+  });
+  let requestedGlm;
+  global.fetch = async (url) => { requestedGlm = url; return response({ data: { limits: [{ type: 'TOKENS_LIMIT', percentage: 40, nextResetTime: 1789775460000 }] } }); };
+  await glm.fetchStatus({ baseUrl: 'https://open.bigmodel.cn/coding' }, 'sk-test', { threshold: 0.2 });
+  test('a path override is still requested verbatim (glm)', () => {
+    assert.strictEqual(requestedGlm, 'https://open.bigmodel.cn/coding/api/monitor/usage/quota/limit');
   });
   e = await rejection({ code: 500, msg: '当前用户不存在coding plan', success: false });
   test('live code 500 (lapsed plan) surfaces a translated reason, not an auth failure', () => {
@@ -158,6 +207,63 @@ function unknownWithoutCapacity(status) {
   test('success envelope still parses limits', () => {
     assert.strictEqual(st.state, 'healthy');
     assert.strictEqual(st.windows[0].remaining, 75);
+  });
+
+  console.log('kimi wrong-region hint');
+  const kimiAuth = async (status, cfg) => {
+    global.fetch = async () => ({ ok: false, status, text: async () => 'unauthorized', json: async () => ({}) });
+    try {
+      await kimi.fetchStatus(cfg || { baseUrl: 'https://api.kimi.ai', region: 'global' }, 'sk-test', { threshold: 0.2 });
+      return null;
+    } catch (err) { return err; }
+  };
+  let ke = await kimiAuth(401);
+  test('kimi 401 is an auth failure with a wrong-region hint (try china)', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.strictEqual(ke.status, 401);
+    assert.match(ke.message, /^HTTP 401/);
+    assert.match(ke.message, /wrong region\? try region: china/);
+  });
+  ke = await kimiAuth(403);
+  test('kimi 403 is an auth failure with a wrong-region hint', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.strictEqual(ke.status, 403);
+    assert.match(ke.message, /wrong region\? try region: china/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://api.kimi.com', region: 'china' });
+  test('kimi 401 on a china route hints global', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /wrong region\? try region: global/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://override.example' });
+  test('kimi 401 with no resolved region names the host and the setting', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /check providers\.kimi\.baseUrl or set monitor\.region/);
+    assert.doesNotMatch(ke.message, /try region/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://override.example/v1?api_key=fixture-query-secret' });
+  test('kimi 401 with a query-secret override never echoes the secret (N1)', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /auth failed at https:\/\/override\.example/);
+    assert.doesNotMatch(ke.message, /api_key|fixture-query-secret/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://u:p@override.example' });
+  test('kimi 401 with userinfo in the override never echoes it (N1)', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /auth failed at https:\/\/override\.example/);
+    assert.doesNotMatch(ke.message, /u:p|:p@/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://api.kimi.com?api_key=x' });
+  test('kimi 401 on a query-bearing api.kimi.com override gives the generic hint (N2)', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /check providers\.kimi\.baseUrl or set monitor\.region/);
+    assert.doesNotMatch(ke.message, /try region/);
+  });
+  let requestedKimi;
+  global.fetch = async (url) => { requestedKimi = url; return response({ usage: { limit: '100', remaining: '50' } }); };
+  await kimi.fetchStatus({ baseUrl: 'https://api.kimi.com/coding' }, 'sk-test', { threshold: 0.2 });
+  test('a path override is still requested verbatim (kimi)', () => {
+    assert.strictEqual(requestedKimi, 'https://api.kimi.com/coding/coding/v1/usages');
   });
 
   console.log('deepseek');

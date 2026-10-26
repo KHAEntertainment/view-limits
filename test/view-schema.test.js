@@ -274,6 +274,65 @@ const APPROVED_CONDENSED = [
   assert.deepStrictEqual(schema.routes.map((r) => r.id), ['configured-route']);
 }
 
+// ---- the built-in refusal (Issue #120) -------------------------------------
+
+{
+  // A refused route reaches the view as an additive `refusal` block: the
+  // stable code + a human fix derived from the provider's region table.
+  const snapshot = { routes: [
+    route('kimi-refused', 'kimi', 'code-plan', {
+      state: unknown('cached-state-absent'),
+      reason: 'unknown-region',
+    }),
+    route('glm-refused', 'glm', 'coding-plan', {
+      state: unknown('cached-state-absent'),
+      reason: 'built-in-endpoint-refused',
+    }),
+    route('glm-region', 'glm', 'coding-plan', {
+      state: unknown('cached-state-absent'),
+      reason: 'unknown-region',
+    }),
+  ]};
+  const schema = vm.buildViewSchema(snapshot, { now: NOW });
+  const byId = Object.fromEntries(schema.routes.map((r) => [r.id, r]));
+  assert.deepStrictEqual(byId['kimi-refused'].refusal,
+    { reason: 'unknown-region', fix: 'region must be one of: global, china' });
+  assert.deepStrictEqual(byId['glm-refused'].refusal,
+    { reason: 'built-in-endpoint-refused', fix: 'use monitor.region instead of monitor.endpoint' });
+  assert.deepStrictEqual(byId['glm-region'].refusal,
+    { reason: 'unknown-region', fix: 'region must be one of: international, china' },
+    'the fix list comes from the provider\'s own region table');
+  assert.strictEqual(schema.schemaVersion, 1, 'C-001 stays additive; schemaVersion untouched');
+  // The refusal never rides the reason-code channel: the vocabulary and the
+  // LAN allowlist stay fixed (C-003).
+  assert.ok(!byId['kimi-refused'].reasonCodes.includes('unknown-region'));
+  assert.ok(!byId['glm-refused'].reasonCodes.includes('built-in-endpoint-refused'));
+}
+
+{
+  // The fix never echoes a value supplied on the route: a planted hostile
+  // region/endpoint string must not appear anywhere in the view.
+  const snapshot = { routes: [route('kimi-refused', 'kimi', 'code-plan', {
+    state: unknown('cached-state-absent'),
+    reason: 'unknown-region',
+    endpoint: 'https://api.example.com',
+    region: 'europe',
+  })] };
+  const serialized = JSON.stringify(vm.buildViewSchema(snapshot, { now: NOW }));
+  assert.ok(!serialized.includes('europe'), 'the offending region string is never echoed');
+  assert.ok(!serialized.includes('https://api.example.com'), 'an endpoint string is never echoed');
+}
+
+{
+  // A non-refused route keeps refusal null — regression.
+  const snapshot = { routes: [
+    route('kimi-ok', 'kimi', 'code-plan', {}),
+    route('kimi-unknown', 'kimi', 'code-plan', { state: unknown('cached-state-absent') }),
+  ]};
+  const schema = vm.buildViewSchema(snapshot, { now: NOW });
+  for (const r of schema.routes) assert.strictEqual(r.refusal, null);
+}
+
 // The always-valid empty envelope (no configured routes).
 {
   const schema = vm.buildViewSchema({ routes: [] }, { generatedAt: '2026-10-13T09:46:00Z' });

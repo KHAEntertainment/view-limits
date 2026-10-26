@@ -24,6 +24,19 @@ const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const VL = path.join(PLUGIN_ROOT, 'bin', 'vl.js');
 const GUARD = path.join(__dirname, 'guard.cjs');
 
+// Issue #103: the static banner header — the ascii.rest "View-Limits" banner
+// as plain text, 8 lines.
+const EXPECTED_BANNER = [
+  '▓┓  ▓┓ ▓▓▓┓ ▓▓▓▓▓┓ ▓┓  ▓┓       ▓┓     ▓▓▓┓ ▓┓  ▓┓ ▓▓▓┓ ▓▓▓▓▓┓  ▓▓▓┓',
+  '▓┃  ▓┃ ┗▓┏┛ ▓┏━━━┛ ▓┃  ▓┃       ▓┃     ┗▓┏┛ ▓▓┓▓▓┃ ┗▓┏┛ ┗━▓┏━┛ ▓┏━━▓┓',
+  '▓┃  ▓┃  ▓┃  ▓┃     ▓┃  ▓┃       ▓┃      ▓┃  ▓┏▓┏▓┃  ▓┃    ▓┃   ▓┃  ┗┛',
+  '▓┃  ▓┃  ▓┃  ▓▓▓▓┓  ▓┃▓┓▓┃ ▓▓▓▓┓ ▓┃      ▓┃  ▓┃▓┃▓┃  ▓┃    ▓┃   ┗▓▓▓┓',
+  '▓┃  ▓┃  ▓┃  ▓┏━━┛  ▓┃▓┃▓┃ ┗━━━┛ ▓┃      ▓┃  ▓┃┗┛▓┃  ▓┃    ▓┃    ┗━━▓┓',
+  '┗▓┓▓┏┛  ▓┃  ▓┃     ▓▓┏▓▓┃       ▓┃      ▓┃  ▓┃  ▓┃  ▓┃    ▓┃   ▓┓  ▓┃',
+  ' ┗▓┏┛  ▓▓▓┓ ▓▓▓▓▓┓ ▓┏┛┗▓┃       ▓▓▓▓▓┓ ▓▓▓┓ ▓┃  ▓┃ ▓▓▓┓   ▓┃   ┗▓▓▓┏┛',
+  '  ┗┛   ┗━━┛ ┗━━━━┛ ┗┛  ┗┛       ┗━━━━┛ ┗━━┛ ┗┛  ┗┛ ┗━━┛   ┗┛    ┗━━┛',
+];
+
 let failures = 0;
 function test(name, fn) {
   try {
@@ -111,7 +124,7 @@ test('view renders the expanded text format', () => {
   });
   const r = vl(dir, ['view']);
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
-  assert.ok(r.stdout.startsWith('+---------------------------+\n|        View-Limits        |\n'), 'the view header');
+  assert.ok(r.stdout.startsWith(EXPECTED_BANNER.join('\n') + '\n'), 'the view header');
   assert.ok(r.stdout.includes('QUOTA REMAINING'));
   assert.ok(r.stdout.includes('MiniMax                                          HEALTHY      FRESH'));
   assert.ok(r.stdout.includes('  5-hour   [##############------]   72% left'));

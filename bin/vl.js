@@ -68,6 +68,9 @@ const { writeReceipt, ackReceipt, formatReceipt, receiptFact, OUTCOME_SUBMITTED,
 const xiaomiSession = require('../lib/xiaomi-session');
 const { validProfile } = require('../lib/cookies/chrome');
 const { buildHelper } = require('../lib/helper-install');
+// Issue #103: the view's banner dependency. Installed by a user-invoked
+// setup or update, and nowhere else.
+const { installDependencies, dependencySatisfied } = require('../lib/npm-install');
 // Phase 0 (Issue #35): transport-neutral view model — owns the presentation
 // layer's rendering; vl.js only joins its pre-formatted text lines.
 const { buildViewModel, reauthNote, buildViewSchema, buildCollectionBlock, renderViewText, VIEW_SCHEMA_VERSION, escapeControlChars } = require('../lib/view-model');
@@ -1360,7 +1363,24 @@ function removeXiaomi(cfg, routeId) {
     : `disabled Chrome cookie source for "${routeId}" and removed private metadata`);
 }
 
+// Issue #103: the view's banner dependency, installed on a user-invoked setup
+// or update. A failure is a notice, never a failure: the view keeps its
+// static banner. The line before the install says what is happening, so a
+// slow install does not look like a hang.
+function installBannerDependency() {
+  if (dependencySatisfied(PLUGIN_ROOT)) return true;
+  log('installing the view banner dependency…');
+  const result = installDependencies({ pluginRoot: PLUGIN_ROOT });
+  if (result.ok) {
+    log('installed the view banner dependency.');
+    return true;
+  }
+  log('could not install the view banner dependency — the view keeps its static banner.');
+  return false;
+}
+
 function setup(args) {
+  installBannerDependency();
   const cfg = loadConfig();
   const options = parseCredentialArgs(cfg, args, { offerBuiltIns: true });
 
@@ -1426,6 +1446,7 @@ function setup(args) {
 }
 
 async function update(args) {
+  installBannerDependency();
   const cfg = loadConfig();
   const options = parseCredentialArgs(cfg, args);
 
@@ -1962,6 +1983,70 @@ function viewFailure(kind, asJson) {
   process.exitCode = lifecycle.exitCodeFor(VIEW_FAILURE_STATUS[kind]);
 }
 
+// Issue #103 — the view's live banner.
+//
+// The banner is drawn by ascii.rest (MIT, Copyright 2026 bas3line —
+// https://ascii.rest), loaded HERE and nowhere else: a dynamic import inside
+// viewCmd, on a terminal only. No module in lib/ imports it, and the static
+// banner in lib/view-model.js stands in whenever it is not loaded.
+//
+// The options are the README banner's: the same colour, font and shadow, and
+// the glint the banner ships with by default.
+const BANNER_TEXT = 'View-Limits';
+const BANNER_OPTIONS = Object.freeze({ color: ['#3be858', '#ea2f1a'], font: 'tall', shadow: 'heavy' });
+
+// Whether the live banner may be drawn: a real terminal, a full-text view,
+// and colour allowed.
+//
+//   * --json and --condensed never carry a banner — their bytes are fixed.
+//   * A pipe or a capture is not a terminal: the static banner stands in.
+//   * TERM=dumb is a terminal that cannot show colour.
+//   * NO_COLOR, per no-color.org, counts as set when it is present AND
+//     non-empty; an empty NO_COLOR is not set.
+function bannerAllowed(asJson, condensed) {
+  if (asJson || condensed) return false;
+  if (process.stdout.isTTY !== true) return false;
+  if (process.env.TERM === 'dumb') return false;
+  const noColor = process.env.NO_COLOR;
+  if (typeof noColor === 'string' && noColor !== '') return false;
+  return true;
+}
+
+// Draws the live banner: one glint pass, then it rests.
+//
+// The result says whether the banner was DRAWN and whether it WROTE anything.
+// A failure after the first write leaves a half-drawn banner on the screen,
+// and the caller must not print a second banner under it — so a write, drawn
+// or half-drawn, claims the header.
+async function drawBanner() {
+  let banner;
+  try {
+    ({ banner } = await import('ascii.rest/terminal'));
+  } catch {
+    return { drawn: false, wrote: false };
+  }
+  // The banner draws to this wrapper, so the writes are observable. The
+  // terminal's own TTY flag, size and resize events pass through unchanged.
+  let wrote = false;
+  const out = {
+    isTTY: process.stdout.isTTY,
+    columns: process.stdout.columns,
+    rows: process.stdout.rows,
+    write(text) {
+      wrote = true;
+      return process.stdout.write(text);
+    },
+    on(event, listener) { return process.stdout.on(event, listener); },
+    off(event, listener) { return process.stdout.off(event, listener); },
+  };
+  try {
+    await banner(BANNER_TEXT, { ...BANNER_OPTIONS, seconds: 1, out });
+  } catch {
+    return { drawn: false, wrote };
+  }
+  return { drawn: true, wrote };
+}
+
 async function viewCmd(args) {
   const allowed = new Set(['--condensed', '--json']);
   if (args.some((a) => !allowed.has(a))) err('usage: vl.js view [--condensed] [--json]');
@@ -2078,7 +2163,17 @@ async function viewCmd(args) {
   if (asJson) {
     process.stdout.write(JSON.stringify(schema, null, 2) + '\n');
   } else {
-    process.stdout.write(renderViewText(schema, { condensed }).join('\n') + '\n');
+    // Issue #103: on a terminal the header is the live banner — one glint
+    // pass, then it rests — and the body starts under the banner it already
+    // printed. Everywhere else the static banner is part of the text.
+    let header;
+    if (bannerAllowed(asJson, condensed)) {
+      const drawn = await drawBanner();
+      // A banner that wrote anything — drawn, or half-drawn before a failure
+      // — owns the header: the static banner must not print under it.
+      if (drawn.drawn || drawn.wrote) header = [];
+    }
+    process.stdout.write(renderViewText(schema, { condensed, header }).join('\n') + '\n');
   }
   // A collection that FAILED — the lock errored, the publish failed, or
   // every attempted route failed — prints the envelope AND exits nonzero.

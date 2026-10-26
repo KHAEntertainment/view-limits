@@ -71,7 +71,16 @@ is an allow: it fails open). See
 Anthropic is omitted — Claude Code surfaces its own native rate-limit state.
 
 > **Kimi note:** `kimi-code-plan` needs a `sk-kimi-*` Coding Plan key (a Moonshot
-> `sk-*` key will not work). Base URL defaults to `https://api.kimi.com/coding/v1`.
+> `sk-*` key will not work). Kimi routes use the global host `https://api.kimi.ai`
+> by default; China accounts must set `monitor.region: "china"` on the route
+> (`monitor: { "recipe": "built-in", "region": "china" }`) to use
+> `https://api.kimi.com`. A hand-typed `monitor.endpoint` on a built-in route is
+> refused — use `monitor.region` instead.
+>
+> **GLM note:** `glm-coding-plan` uses the international host
+> `https://api.z.ai` by default; China accounts can set `monitor.region: "china"`
+> on the route (same `recipe: "built-in"` form) to use
+> `https://open.bigmodel.cn`.
 
 ## Custom OpenAI- / Anthropic-compatible routes
 

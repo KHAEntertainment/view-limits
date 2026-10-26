@@ -129,6 +129,41 @@ test('non-object recipeOptions → rejected', () => {
   assert.strictEqual(validateMonitor({ id: 'x', monitor: { recipeOptions: [] } }).ok, false);
 });
 
+console.log('Issue #113 — built-in region/endpoint refusals');
+
+test('built-in kimi route with monitor.endpoint → refused with a stable code', () => {
+  const r = validateMonitor({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', endpoint: 'https://api.example.com' } });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.code, 'built-in-endpoint-refused');
+  assert.match(r.error, /endpoint is not allowed/);
+});
+
+test('built-in glm route with an unknown region → refused with a stable code', () => {
+  const r = validateMonitor({ id: 'glm-coding-plan', provider: 'glm', monitor: { recipe: 'built-in', region: 'europe' } });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.code, 'unknown-region');
+  assert.match(r.error, /"europe" is not one of: international, china/);
+});
+
+test('built-in region accepts case/whitespace variants of a known region', () => {
+  const upper = validateMonitor({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: ' GLOBAL ' } });
+  assert.strictEqual(upper.ok, true);
+  const cased = validateMonitor({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'China' } });
+  assert.strictEqual(cased.ok, true);
+});
+
+test('custom/compat route keeps its own endpoint and region (no built-in refusal)', () => {
+  const r = validateMonitor({ id: 'custom-x', provider: 'kimi', monitor: { recipe: 'stepfun-plan', region: 'europe' } });
+  assert.strictEqual(r.ok, true);
+  const e = validateMonitor({ id: 'custom-y', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://api.example.com', region: 'us', recipeOptions: { path: '/v1/models' } } });
+  assert.strictEqual(e.ok, true);
+});
+
+test('built-in region rules do not fire on a non-region built-in provider', () => {
+  const r = validateMonitor({ id: 'minimax-token-plan', provider: 'minimax', monitor: { recipe: 'built-in', region: 'europe' } });
+  assert.strictEqual(r.ok, true);
+});
+
 console.log('endpoint — https-only (F2)');
 
 test('http: endpoint is rejected (https-only — F2)', () => {

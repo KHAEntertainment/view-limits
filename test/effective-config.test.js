@@ -17,6 +17,7 @@ const assert = require('assert');
 const { resolveEffectiveConfig, stableUnknown } = require('../lib/effective-config');
 const { getAdapter, getAdapterForRoute } = require('../lib/adapters');
 const { ADAPTERS } = require('../lib/adapters');
+const { configRevision } = require('../lib/monitor-schema');
 
 let failures = 0;
 async function runTests() {
@@ -45,7 +46,7 @@ const CFG = {
   routes: ROUTES_DEFAULT,
   providers: {
     minimax: { baseUrl: 'https://www.minimax.io' },
-    kimi: { baseUrl: 'https://api.kimi.com' },
+    kimi: { baseUrl: 'https://api.kimi.ai' },
     glm: { baseUrl: 'https://api.z.ai' },
     deepseek: { baseUrl: 'https://api.deepseek.com' },
     openrouter: { baseUrl: 'https://openrouter.ai/api' },
@@ -62,7 +63,9 @@ test('built-in route: resolver returns getAdapter(provider) wrapper', () => {
   // The bound cfg must carry the wire-family adapter + providerCfg.
   assert.ok(eff.cfg.adapter, 'expected cfg.adapter');
   assert.strictEqual(eff.cfg.adapter, ADAPTERS.kimi);
-  assert.deepStrictEqual(eff.cfg.providerCfg, CFG.providers.kimi);
+  // Issue #113: kimi/glm built-ins carry the resolved canonical region (and
+  // effective host) on providerCfg.
+  assert.deepStrictEqual(eff.cfg.providerCfg, { baseUrl: 'https://api.kimi.ai', region: 'global' });
   // Pool identity is null for built-ins; revision is deterministic.
   assert.strictEqual(eff.poolIdentity, null);
   assert.strictEqual(typeof eff.configRevision, 'string');
@@ -75,7 +78,10 @@ test('every default built-in route produces its own adapter', () => {
     const eff = resolveEffectiveConfig(route, CFG, { getAdapter });
     assert.strictEqual(eff.cfg.adapter, ADAPTERS[route.provider],
       `expected adapter ${route.provider} for route ${route.id}`);
-    assert.deepStrictEqual(eff.cfg.providerCfg, CFG.providers[route.provider]);
+    const expected = (route.provider === 'kimi' || route.provider === 'glm')
+      ? { ...CFG.providers[route.provider], region: route.provider === 'kimi' ? 'global' : 'international' }
+      : CFG.providers[route.provider];
+    assert.deepStrictEqual(eff.cfg.providerCfg, expected);
   }
 });
 
@@ -234,6 +240,97 @@ test('stableUnknown produces monitorable:false unknown with a fixed reason', asy
   assert.deepStrictEqual(result.windows, []);
   assert.strictEqual(result.balance, null);
   assert.strictEqual(result.resetAt, null);
+});
+
+console.log('Issue #113 — built-in provider region');
+
+const KIMI_DEFAULT = { id: 'kimi-code-plan', provider: 'kimi', account: 'code-plan' };
+const GLM_DEFAULT = { id: 'glm-coding-plan', provider: 'glm', account: 'coding-plan' };
+const DEFAULT_CFG = {
+  providers: {
+    kimi: { baseUrl: 'https://api.kimi.ai' },
+    glm: { baseUrl: 'https://api.z.ai' },
+    minimax: { baseUrl: 'https://www.minimax.io' },
+  },
+};
+
+test('built-in kimi: no region uses the global host (default)', () => {
+  const eff = resolveEffectiveConfig(KIMI_DEFAULT, DEFAULT_CFG, { getAdapter });
+  assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://api.kimi.ai');
+  assert.strictEqual(eff.cfg.providerCfg.region, 'global');
+});
+
+test('built-in kimi: region china uses the china host', () => {
+  const route = { ...KIMI_DEFAULT, monitor: { recipe: 'built-in', region: 'china' } };
+  const eff = resolveEffectiveConfig(route, DEFAULT_CFG, { getAdapter });
+  assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://api.kimi.com');
+  assert.strictEqual(eff.cfg.providerCfg.region, 'china');
+});
+
+test('built-in kimi: explicit region beats a user baseUrl override', () => {
+  const route = { ...KIMI_DEFAULT, monitor: { recipe: 'built-in', region: 'global' } };
+  const cfg = { providers: { kimi: { baseUrl: 'https://override.example' } } };
+  const eff = resolveEffectiveConfig(route, cfg, { getAdapter });
+  assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://api.kimi.ai');
+  assert.strictEqual(eff.cfg.providerCfg.region, 'global');
+});
+
+test('built-in kimi: a user baseUrl override wins over the default region host', () => {
+  const cfg = { providers: { kimi: { baseUrl: 'https://override.example' } } };
+  const eff = resolveEffectiveConfig(KIMI_DEFAULT, cfg, { getAdapter });
+  assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://override.example');
+  assert.strictEqual(eff.cfg.providerCfg.region, 'global');
+});
+
+test('built-in glm: international default and china host', () => {
+  const effDefault = resolveEffectiveConfig(GLM_DEFAULT, DEFAULT_CFG, { getAdapter });
+  assert.strictEqual(effDefault.cfg.providerCfg.baseUrl, 'https://api.z.ai');
+  assert.strictEqual(effDefault.cfg.providerCfg.region, 'international');
+  const effChina = resolveEffectiveConfig({ ...GLM_DEFAULT, monitor: { recipe: 'built-in', region: 'china' } }, DEFAULT_CFG, { getAdapter });
+  assert.strictEqual(effChina.cfg.providerCfg.baseUrl, 'https://open.bigmodel.cn');
+  assert.strictEqual(effChina.cfg.providerCfg.region, 'china');
+});
+
+test('built-in region is normalized (case/whitespace)', () => {
+  const route = { ...KIMI_DEFAULT, monitor: { recipe: 'built-in', region: ' GLOBAL ' } };
+  const eff = resolveEffectiveConfig(route, DEFAULT_CFG, { getAdapter });
+  assert.strictEqual(eff.cfg.providerCfg.region, 'global');
+  assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://api.kimi.ai');
+});
+
+test('built-in endpoint is refused with a stable capability reason', async () => {
+  const route = { ...KIMI_DEFAULT, monitor: { recipe: 'built-in', endpoint: 'https://api.example.com' } };
+  const eff = resolveEffectiveConfig(route, DEFAULT_CFG, { getAdapter });
+  assert.strictEqual(eff.capability.monitorable, false);
+  assert.strictEqual(eff.capability.reason, 'built-in-endpoint-refused');
+  const result = await eff.adapterFn(eff.cfg, 'token', {});
+  assert.strictEqual(result.state, 'unknown');
+  assert.strictEqual(result.detail.monitorable, false);
+});
+
+test('built-in unknown region is refused with a stable capability reason', async () => {
+  const route = { ...KIMI_DEFAULT, monitor: { recipe: 'built-in', region: 'europe' } };
+  const eff = resolveEffectiveConfig(route, DEFAULT_CFG, { getAdapter });
+  assert.strictEqual(eff.capability.monitorable, false);
+  assert.strictEqual(eff.capability.reason, 'unknown-region');
+  const result = await eff.adapterFn(eff.cfg, 'token', {});
+  assert.strictEqual(result.state, 'unknown');
+});
+
+test('custom/compat route whose provider label is kimi keeps its own region untouched', () => {
+  // recipe ≠ built-in → not a built-in route; it is not refused by the
+  // built-in region/endpoint rules even though the provider label is kimi.
+  const route = { id: 'custom-x', provider: 'kimi', monitor: { recipe: 'stepfun-plan', region: 'europe' } };
+  const eff = resolveEffectiveConfig(route, DEFAULT_CFG, { getAdapter });
+  assert.strictEqual(eff.capability.reason, 'unmonitored:stepfun-plan');
+  assert.strictEqual(eff.capability.monitorable, false);
+});
+
+test('changing a built-in route region changes configRevision', () => {
+  const a = configRevision({ ...KIMI_DEFAULT, monitor: { recipe: 'built-in', region: 'global' } });
+  const b = configRevision({ ...KIMI_DEFAULT, monitor: { recipe: 'built-in', region: 'china' } });
+  assert.notStrictEqual(a, b);
+  assert.strictEqual(configRevision({ ...KIMI_DEFAULT, monitor: { recipe: 'built-in', region: 'global' } }), a);
 });
 
 runTests().then(() => {

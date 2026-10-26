@@ -128,17 +128,29 @@ function unknownWithoutCapacity(status) {
     try { await run(glm, body); } catch (e) { return e; }
     return null;
   };
+  const rejectionWithRegion = async (body, cfg) => {
+    try { await glm.fetchStatus(cfg, 'sk-test', { threshold: 0.2 }); } catch (e) { return e; }
+    return null;
+  };
   let e = await rejection({ code: 1000, msg: 'Authentication Failed', success: false });
-  test('live code 1000 (bad key) is an auth failure', () => {
+  test('live code 1000 (bad key) is an auth failure with a wrong-region hint', () => {
     assert.ok(e, 'expected a throw');
     assert.strictEqual(e.status, 401);
-    assert.strictEqual(e.message, 'Z.ai auth failed (code 1000: Authentication Failed)');
+    assert.strictEqual(e.message, 'Z.ai auth failed (code 1000: Authentication Failed) — wrong region? try region: china');
   });
   e = await rejection({ code: 1001, msg: 'Authentication parameter not received in Header, unable to authenticate', success: false });
-  test('live code 1001 (no auth header) is an auth failure', () => {
+  test('live code 1001 (no auth header) is an auth failure with a wrong-region hint', () => {
     assert.ok(e, 'expected a throw');
     assert.strictEqual(e.status, 401);
     assert.match(e.message, /^Z\.ai auth failed \(code 1001: Authentication parameter not received/);
+    assert.match(e.message, /wrong region\? try region: china/);
+  });
+  const chinaAuth = await rejectionWithRegion(
+    { code: 1000, msg: 'Authentication Failed', success: false },
+    { baseUrl: 'https://open.bigmodel.cn', region: 'china' });
+  test('code 1000 on a china route hints the international region', () => {
+    assert.ok(chinaAuth, 'expected a throw');
+    assert.match(chinaAuth.message, /wrong region\? try region: international/);
   });
   e = await rejection({ code: 500, msg: '当前用户不存在coding plan', success: false });
   test('live code 500 (lapsed plan) surfaces a translated reason, not an auth failure', () => {
@@ -158,6 +170,33 @@ function unknownWithoutCapacity(status) {
   test('success envelope still parses limits', () => {
     assert.strictEqual(st.state, 'healthy');
     assert.strictEqual(st.windows[0].remaining, 75);
+  });
+
+  console.log('kimi wrong-region hint');
+  const kimiAuth = async (status, cfg) => {
+    global.fetch = async () => ({ ok: false, status, text: async () => 'unauthorized', json: async () => ({}) });
+    try {
+      await kimi.fetchStatus(cfg || { baseUrl: 'https://api.kimi.ai', region: 'global' }, 'sk-test', { threshold: 0.2 });
+      return null;
+    } catch (err) { return err; }
+  };
+  let ke = await kimiAuth(401);
+  test('kimi 401 is an auth failure with a wrong-region hint (try china)', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.strictEqual(ke.status, 401);
+    assert.match(ke.message, /^HTTP 401/);
+    assert.match(ke.message, /wrong region\? try region: china/);
+  });
+  ke = await kimiAuth(403);
+  test('kimi 403 is an auth failure with a wrong-region hint', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.strictEqual(ke.status, 403);
+    assert.match(ke.message, /wrong region\? try region: china/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://api.kimi.com', region: 'china' });
+  test('kimi 401 on a china route hints global', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /wrong region\? try region: global/);
   });
 
   console.log('deepseek');

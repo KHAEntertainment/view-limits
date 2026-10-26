@@ -552,6 +552,42 @@ test('fresh exhausted / stale exhausted / unknown freshness — state always ver
   assert.ok(!diagCodes(s).includes('status-cache-corrupt@routes'));
 });
 
+console.log('\nruntime snapshot — built-in refusal reason (Issue #120)');
+
+test('a refused built-in route projects its stable reason from detail.reason', async () => {
+  const dir = scratch();
+  seedRoutes(dir);
+  writeJson(dir, 'status.json', {
+    updatedAt: iso(0),
+    routes: {
+      'kimi-code-plan': {
+        routeId: 'kimi-code-plan', observedAt: iso(-60_000), freshUntil: iso(300_000),
+        source: 'kimi',
+        status: { state: 'unknown', windows: [], balance: null, resetAt: null,
+          detail: { reason: 'unknown-region', monitorable: false } },
+      },
+      'glm-coding-plan': {
+        routeId: 'glm-coding-plan', observedAt: iso(-60_000), freshUntil: iso(300_000),
+        source: 'glm',
+        status: { state: 'unknown', windows: [], balance: null, resetAt: null,
+          detail: { reason: 'built-in-endpoint-refused', monitorable: false } },
+      },
+      'openrouter-main': {
+        routeId: 'openrouter-main', observedAt: iso(-60_000), freshUntil: iso(300_000),
+        source: 'openrouter',
+        status: { state: 'healthy', windows: [], balance: { available: 12.5, currency: 'USD' }, resetAt: null },
+      },
+    },
+  });
+  const s = await snap(dir);
+  const byId = Object.fromEntries(s.routes.map((r) => [r.id, r]));
+  assert.strictEqual(byId['kimi-code-plan'].resource.reason, 'unknown-region');
+  assert.strictEqual(byId['glm-coding-plan'].resource.reason, 'built-in-endpoint-refused');
+  assert.strictEqual(byId['openrouter-main'].resource.reason, null, 'no detail.reason → null');
+  // The deepseek route has no cached entry: the unknown resource carries null.
+  assert.strictEqual(byId['deepseek-direct'].resource.reason, null);
+});
+
 test('freshness boundary: freshUntil == now is fresh', async () => {
   const dir = scratch();
   writeJson(dir, 'status.json', {

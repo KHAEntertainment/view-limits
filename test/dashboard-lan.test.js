@@ -276,6 +276,34 @@ test('redactForLan: provider text in allowed fields (currency, window type/unit,
   }, { status: doc });
 });
 
+test('redactForLan: a refused route leaves the LAN projection byte-identical (C-003)', () => {
+  // A refused route as the view model emits it: state unknown + an additive
+  // `refusal` block (and the refusal codes deliberately NOT in reasonCodes).
+  // Against an otherwise-identical route that is merely unknown, the LAN
+  // projection must be byte-for-byte the same.
+  const plain = identifyingDoc();
+  const refused = identifyingDoc();
+  plain.view.routes[0].state = 'unknown';
+  refused.view.routes[0].state = 'unknown';
+  refused.view.routes[0].refusal = { reason: 'unknown-region', fix: 'region must be one of: global, china' };
+  assert.deepStrictEqual(
+    JSON.stringify(redactForLan(plain)),
+    JSON.stringify(redactForLan(refused)),
+    'the LAN projection must not change when a route is refused',
+  );
+  const lan = redactForLan(refused).view.routes[0];
+  assert.ok(!('refusal' in lan), 'the refusal block never reaches the LAN view');
+  assert.ok(!JSON.stringify(lan).includes('unknown-region'));
+  assert.ok(!JSON.stringify(lan).includes('region must be one of'));
+});
+
+test('redactForLan: refusal codes are not part of the LAN vocabulary (C-003)', () => {
+  const doc = identifyingDoc();
+  doc.view.routes[0].reasonCodes = ['unknown-region', 'built-in-endpoint-refused'];
+  const lan = redactForLan(doc).view.routes[0];
+  assert.deepStrictEqual(lan.reasonCodes, [], 'the LAN redaction drops the refusal codes');
+});
+
 // ---- the LAN listener --------------------------------------------------------------
 
 console.log('LAN listener');

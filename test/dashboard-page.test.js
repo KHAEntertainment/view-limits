@@ -307,6 +307,27 @@ test('an unknown route gets no bar, its raw counts as text, and a stale "last se
   assert.ok(!/healthy/i.test(textOf(tree)));
 });
 
+test('#120: a refused route renders its reason chip and the human fix (local)', () => {
+  const r = route({ state: 'unknown', refusal: { reason: 'unknown-region', fix: 'region must be one of: global, china' } });
+  const tree = R.routeCard(r, ctx());
+  const text = textOf(tree);
+  assert.ok(text.includes('unknown region'), 'the reason chip word renders');
+  assert.ok(text.includes('region must be one of: global, china'), 'the human fix renders');
+  const chips = findAll(tree, (n) => hasClass(n, 'reason'));
+  assert.strictEqual(chips.length, 1, 'one reason chip for the refusal');
+  assert.strictEqual(chips[0].attrs.class, 'chip reason', 'styled like the other reason chips');
+});
+
+test('#120: the LAN view never renders a refusal (C-003); a non-refused route shows none', () => {
+  const refused = route({ state: 'unknown', refusal: { reason: 'unknown-region', fix: 'region must be one of: global, china' } });
+  const lanText = textOf(R.routeCard(refused, ctx({ mode: 'lan' })));
+  assert.ok(!lanText.includes('unknown region'));
+  assert.ok(!lanText.includes('region must be one of'));
+  const plain = textOf(R.routeCard(route({ state: 'unknown' }), ctx()));
+  assert.ok(!plain.includes('unknown region'));
+  assert.ok(!plain.includes('region must be one of'));
+});
+
 test('each bar is coloured by its own window (M2-A); the route state stays on the chip', () => {
   const r = route({ state: 'exhausted', windows: [{ type: 'rolling-5h', remainingRatio: 0 }, { type: 'weekly', remainingRatio: 0.31 }, { type: 'monthly', remainingRatio: 0.1 }] });
   const fills = findAll(R.routeCard(r, ctx()), (n) => hasClass(n, 'fill'));

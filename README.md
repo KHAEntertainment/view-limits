@@ -742,6 +742,12 @@ What the schema guarantees:
 - **`reauth` is structured and validated.** The URL must be https, carry no
   userinfo and no query string; a URL that fails becomes `null` plus the
   reason code `reauth-url-invalid`.
+- **`refusal` is additive and nullable** (Issue #120): a built-in route the
+  region/endpoint policy refused (Issue #113) carries `{ reason, fix }` —
+  the stable code (`built-in-endpoint-refused` or `unknown-region`) plus a
+  short human fix built only from the provider's region table. Every other
+  route has `refusal: null`; an older consumer that ignores the field is
+  unaffected.
 
 The JSON envelope always has `schemaVersion`, `generatedAt`, `status`
 (`ok` | `empty` | `pending` | `failed` | `not-configured`), `reasonCodes` and

@@ -2012,23 +2012,39 @@ function bannerAllowed(asJson, condensed) {
   return true;
 }
 
-// Draws the live banner: one glint pass, then it rests. True when the banner
-// was drawn. Every failure is SILENT — a dependency that is not installed, a
-// throwing import, a terminal too small to move in — and the caller falls
-// back to the static banner.
+// Draws the live banner: one glint pass, then it rests.
+//
+// The result says whether the banner was DRAWN and whether it WROTE anything.
+// A failure after the first write leaves a half-drawn banner on the screen,
+// and the caller must not print a second banner under it — so a write, drawn
+// or half-drawn, claims the header.
 async function drawBanner() {
   let banner;
   try {
     ({ banner } = await import('ascii.rest/terminal'));
   } catch {
-    return false;
+    return { drawn: false, wrote: false };
   }
+  // The banner draws to this wrapper, so the writes are observable. The
+  // terminal's own TTY flag, size and resize events pass through unchanged.
+  let wrote = false;
+  const out = {
+    isTTY: process.stdout.isTTY,
+    columns: process.stdout.columns,
+    rows: process.stdout.rows,
+    write(text) {
+      wrote = true;
+      return process.stdout.write(text);
+    },
+    on(event, listener) { return process.stdout.on(event, listener); },
+    off(event, listener) { return process.stdout.off(event, listener); },
+  };
   try {
-    await banner(BANNER_TEXT, { ...BANNER_OPTIONS, seconds: 1, out: process.stdout });
+    await banner(BANNER_TEXT, { ...BANNER_OPTIONS, seconds: 1, out });
   } catch {
-    return false;
+    return { drawn: false, wrote };
   }
-  return true;
+  return { drawn: true, wrote };
 }
 
 async function viewCmd(args) {
@@ -2151,7 +2167,12 @@ async function viewCmd(args) {
     // pass, then it rests — and the body starts under the banner it already
     // printed. Everywhere else the static banner is part of the text.
     let header;
-    if (bannerAllowed(asJson, condensed) && await drawBanner()) header = [];
+    if (bannerAllowed(asJson, condensed)) {
+      const drawn = await drawBanner();
+      // A banner that wrote anything — drawn, or half-drawn before a failure
+      // — owns the header: the static banner must not print under it.
+      if (drawn.drawn || drawn.wrote) header = [];
+    }
     process.stdout.write(renderViewText(schema, { condensed, header }).join('\n') + '\n');
   }
   // A collection that FAILED — the lock errored, the publish failed, or

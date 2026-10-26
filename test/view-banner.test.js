@@ -24,7 +24,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawnSync, execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const VL = path.join(ROOT, 'bin', 'vl.js');
@@ -44,13 +44,13 @@ function test(name, fn) {
 // 8 lines, no escape bytes. The literal expectation, independent of the
 // implementation.
 const EXPECTED_BANNER = [
-  '▓┓  ▓▓ ▓▓▓┓ ▓▓▓▓▓▓ ▓┓  ▓▓       ▓▓     ▓▓▓┓ ▓▓  ▓▓ ▓▓▓▓ ▓▓▓▓▓▓  ▓▓▓▓',
-  '▓┃  ▓┃ ┗▓┏┛ ▓┏━━━┛ ▓┃  ▓┃       ▓┃     ┗▓┏┛ ▓▓▓▓▓┃ ┗▓┏┛ ┗━▓┏━┛ ▓┏━━▓┓',
+  '▓┓  ▓┓ ▓▓▓┓ ▓▓▓▓▓┓ ▓┓  ▓┓       ▓┓     ▓▓▓┓ ▓┓  ▓┓ ▓▓▓┓ ▓▓▓▓▓┓  ▓▓▓┓',
+  '▓┃  ▓┃ ┗▓┏┛ ▓┏━━━┛ ▓┃  ▓┃       ▓┃     ┗▓┏┛ ▓▓┓▓▓┃ ┗▓┏┛ ┗━▓┏━┛ ▓┏━━▓┓',
   '▓┃  ▓┃  ▓┃  ▓┃     ▓┃  ▓┃       ▓┃      ▓┃  ▓┏▓┏▓┃  ▓┃    ▓┃   ▓┃  ┗┛',
-  '▓┃  ▓┃  ▓┃  ▓▓▓▓▓  ▓┃▓▓▓┃ ▓▓▓▓▓ ▓┃      ▓┃  ▓┃▓┃▓┃  ▓┃    ▓┃   ┗▓▓▓┓',
-  '▓┃  ▓┃  ▓┃  ▓┏━━┛  ▓┃▓┃▓┃ ┗━━━┛ ▓┃      ▓┃  ▓┃┗┛▓┃  ▓┃    ▓┃    ┗━━▓▓',
-  '┗▓▓▓┏┛  ▓┃  ▓┃     ▓▓┏▓▓┃       ▓┃      ▓┃  ▓┃  ▓┃  ▓┃    ▓┃   ▓▓  ▓┃',
-  ' ┗▓┏┛  ▓▓▓▓ ▓▓▓▓▓▓ ▓┏┛┗▓┃       ▓▓▓▓▓▓ ▓▓▓▓ ▓┃  ▓┃ ▓▓▓▓   ▓┃   ┗▓▓▓┏┛',
+  '▓┃  ▓┃  ▓┃  ▓▓▓▓┓  ▓┃▓┓▓┃ ▓▓▓▓┓ ▓┃      ▓┃  ▓┃▓┃▓┃  ▓┃    ▓┃   ┗▓▓▓┓',
+  '▓┃  ▓┃  ▓┃  ▓┏━━┛  ▓┃▓┃▓┃ ┗━━━┛ ▓┃      ▓┃  ▓┃┗┛▓┃  ▓┃    ▓┃    ┗━━▓┓',
+  '┗▓┓▓┏┛  ▓┃  ▓┃     ▓▓┏▓▓┃       ▓┃      ▓┃  ▓┃  ▓┃  ▓┃    ▓┃   ▓┓  ▓┃',
+  ' ┗▓┏┛  ▓▓▓┓ ▓▓▓▓▓┓ ▓┏┛┗▓┃       ▓▓▓▓▓┓ ▓▓▓┓ ▓┃  ▓┃ ▓▓▓┓   ▓┃   ┗▓▓▓┏┛',
   '  ┗┛   ┗━━┛ ┗━━━━┛ ┗┛  ┗┛       ┗━━━━┛ ┗━━┛ ┗┛  ┗┛ ┗━━┛   ┗┛    ┗━━┛',
 ];
 
@@ -93,7 +93,8 @@ function writeFixture(dir) {
 
 // A scratch copy of the plugin, optionally with a FAKE ascii.rest package:
 // importing it writes the marker file, and drawing it writes the text.
-function scratchPlugin({ fake = true } = {}) {
+// `failing` makes the fake throw AFTER it wrote — the half-drawn banner.
+function scratchPlugin({ fake = true, failing = false } = {}) {
   const root = scratch();
   fs.cpSync(path.join(ROOT, 'bin'), path.join(root, 'bin'), { recursive: true });
   fs.cpSync(path.join(ROOT, 'lib'), path.join(root, 'lib'), { recursive: true });
@@ -114,8 +115,11 @@ function scratchPlugin({ fake = true } = {}) {
       "import fs from 'node:fs';",
       "if (process.env.VL_BANNER_MARKER) fs.writeFileSync(process.env.VL_BANNER_MARKER, 'loaded');",
       'export async function banner(text, options) {',
-      "  process.stdout.write('\\u001b[38;2;59;232;88m' + text + '\\u001b[0m\\n');",
-      '  return { cols: text.length, rows: 1, interrupted: false };',
+      // The real banner draws to the handle it is given, not to stdout.
+      "  (options.out || process.stdout).write('\\u001b[38;2;59;232;88m' + text + '\\u001b[0m\\n');",
+      failing
+        ? "  throw new Error('the banner failed after it started drawing');"
+        : '  return { cols: text.length, rows: 1, interrupted: false };',
       '}',
       '',
     ].join('\n'));
@@ -150,6 +154,28 @@ function runViewOnTerminal(vl, data, args = ['view'], env = {}) {
 }
 
 // ---- the model ---------------------------------------------------------------
+
+// The static fallback IS the package's resting frame: the same banner, the
+// same font and shadow, generated once from ascii.rest 0.4.0 and hardcoded —
+// so a piped view and a terminal view end on the same picture.
+//
+// The terminal banner draws at max = columns - 1; at the default
+// 80-column terminal that is 79, the width the issue measured (69 columns,
+// 8 rows).
+test('the static fallback is the package\'s resting frame', () => {
+  if (!fs.existsSync(path.join(ROOT, 'node_modules', 'ascii.rest', 'package.json'))) {
+    console.log('  – ascii.rest is not installed: skipped');
+    return;
+  }
+  const frame = execFileSync(process.execPath, ['--input-type=module', '-e', [
+    "import { banner as make } from 'ascii.rest/banner';",
+    "import { still } from 'ascii.rest/terminal';",
+    "const piece = make('View-Limits', { color: ['#3be858', '#ea2f1a'], font: 'tall', shadow: 'heavy', max: 79 });",
+    "const rows = (await still(piece)).split('\\n').map((r) => r.trimEnd());",
+    "process.stdout.write(rows.join('\\n'));",
+  ].join('\n')], { cwd: ROOT, encoding: 'utf8' });
+  assert.strictEqual(frame, BANNER_TEXT, 'the fallback is the package\'s resting frame');
+});
 
 test('the full text layout starts with the static banner', () => {
   const { renderViewText } = require('../lib/view-model');
@@ -247,6 +273,17 @@ test('a missing dependency falls back to the static banner, silently', () => {
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
   assert.ok(r.stdout.includes(EXPECTED_BANNER[0]), 'the static banner stands in');
   assert.ok(!r.stderr.includes('ascii.rest'), 'the failure was not announced');
+});
+
+test('a banner that fails after it started draws no second banner', () => {
+  const { root, data, vl } = scratchPlugin({ failing: true });
+  const marker = path.join(root, 'marker');
+  const r = runViewOnTerminal(vl, data, ['view'], { VL_BANNER_MARKER: marker });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  assert.ok(fs.existsSync(marker), 'the dependency WAS loaded');
+  assert.ok(r.stdout.includes('View-Limits'), 'the half-drawn banner is on the screen');
+  assert.ok(!r.stdout.includes(EXPECTED_BANNER[0]), 'no static banner under it');
+  assert.ok(r.stdout.includes('QUOTA REMAINING'), 'the body still follows');
 });
 
 test('--json and --condensed carry no banner and no escape byte', () => {

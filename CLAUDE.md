@@ -73,7 +73,8 @@ node bin/vl.js check <routeId>  # live-check one route (JSON)
 
 - **OpenRouter** — balance = `total_credits − total_usage` from `/api/v1/credits`;
   `limit` on `/api/v1/key` is a spending *cap* (notated separately), and
-  `usage_daily`/`usage_weekly` are the spent-today/this-week metrics.
+  only `usage_monthly` (this month's spend) is surfaced; `usage_daily`/`usage_weekly`
+  were seen returning false zeros on a live account (Issue #22), so they are not reported.
 - **MiniMax** — quota is per-model `*_remaining_percent` under `model_remains[]`
   (the `*_usage_count` fields are 0/unused).
 - **Kimi** — `/coding/v1/usages` returns `usage` (weekly) + `limits[]` (5h); no

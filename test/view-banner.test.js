@@ -11,6 +11,9 @@
 //   * TERM=dumb takes the static banner
 //   * a missing dependency falls back to the static banner, silently
 //   * --json and --condensed carry no banner and no escape byte
+//   * the child env defaults to an eligible terminal (NO_COLOR deleted,
+//     TERM=xterm-256color): the shell's colour policy never decides the
+//     outcome, and every test overrides what it is about
 //
 // No network and no real credentials: the scratch data dir holds a configured
 // route with no credential, so the collector never reaches a provider.
@@ -127,9 +130,18 @@ function scratchPlugin({ fake = true, failing = false } = {}) {
   return { root, data, vl: path.join(root, 'bin', 'vl.js') };
 }
 
+// The child's colour policy is the TEST's, never the shell's: a runner
+// started with NO_COLOR=1 or TERM=dumb would otherwise reach the terminal
+// cases through process.env and take the static banner there — the live
+// drawing works, but the test fails. So the child starts on an ELIGIBLE
+// terminal (NO_COLOR deleted, TERM=xterm-256color) and each test overrides
+// exactly what it is about: NO_COLOR=1, NO_COLOR="" and TERM=dumb below.
 function runView(vl, data, args = ['view'], env = {}) {
+  const base = { ...process.env, CLAUDE_PLUGIN_DATA: data };
+  delete base.NO_COLOR;
+  base.TERM = 'xterm-256color';
   const r = spawnSync(process.execPath, [vl, ...args], {
-    env: { ...process.env, CLAUDE_PLUGIN_DATA: data, ...env },
+    env: { ...base, ...env },
     encoding: 'utf8',
     timeout: 30000,
   });

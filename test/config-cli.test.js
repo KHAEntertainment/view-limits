@@ -71,6 +71,26 @@ try {
   assert.strictEqual(byId['custom-kimi-label'].effectiveHost, undefined);
   console.log('  ✓ custom route with kimi provider label is not a built-in refusal');
 
+  // B3: provider-level baseUrl overrides are reported by their matched region
+  // (or null when the host is unrecognised).
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    routes: [
+      { id: 'kimi-code-plan', provider: 'kimi', account: 'code-plan', match: { model: 'kimi' }, ttlSeconds: 180 },
+      { id: 'glm-coding-plan', provider: 'glm', account: 'coding-plan', match: { model: 'glm' }, ttlSeconds: 180 },
+    ],
+    providers: {
+      kimi: { baseUrl: 'https://api.kimi.com' },
+      glm: { baseUrl: 'https://override.example' },
+    },
+  }));
+  const out2 = config();
+  const byId2 = Object.fromEntries(out2.routes.map((r) => [r.id, r]));
+  assert.strictEqual(byId2['kimi-code-plan'].effectiveHost, 'https://api.kimi.com');
+  assert.strictEqual(byId2['kimi-code-plan'].region, 'china');
+  assert.strictEqual(byId2['glm-coding-plan'].effectiveHost, 'https://override.example');
+  assert.strictEqual(byId2['glm-coding-plan'].region, null);
+  console.log('  ✓ override hosts report their matched region (or null)');
+
   console.log('config-cli: ok');
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });

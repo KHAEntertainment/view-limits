@@ -529,6 +529,37 @@ test('httpsEndpointError credential check still wins over query (CR-1 regression
     'must not embed credentials');
 });
 
+console.log('Issue #113 — canonical region hashing (B2)');
+
+test('built-in-recipe kimi: region spellings hash identically', () => {
+  const a = configRevision({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'global' } });
+  const b = configRevision({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: ' GLOBAL ' } });
+  assert.strictEqual(a, b);
+  const c = configRevision({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'China' } });
+  const d = configRevision({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'china' } });
+  assert.strictEqual(c, d);
+});
+
+test('built-in-recipe glm: region spellings hash identically', () => {
+  const a = configRevision({ id: 'glm-coding-plan', provider: 'glm', monitor: { recipe: 'built-in', region: 'international' } });
+  const b = configRevision({ id: 'glm-coding-plan', provider: 'glm', monitor: { recipe: 'built-in', region: ' INTERNATIONAL ' } });
+  assert.strictEqual(a, b);
+});
+
+test('an already-canonical region hashes exactly as before (caches not invalidated)', () => {
+  const route = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', account: 'a', region: 'global' } };
+  const expected = require('crypto').createHash('sha1')
+    .update(JSON.stringify({ id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', account: 'a', region: 'global' } }))
+    .digest('hex');
+  assert.strictEqual(configRevision(route), expected);
+});
+
+test('custom/compat routes keep raw region semantics in the revision', () => {
+  const a = configRevision({ id: 'custom-a', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://a', region: 'us', recipeOptions: { path: '/v1/models' } } });
+  const b = configRevision({ id: 'custom-a', provider: 'openai-compat', monitor: { recipe: 'openai-compat', endpoint: 'https://a', region: 'US', recipeOptions: { path: '/v1/models' } } });
+  assert.notStrictEqual(a, b);
+});
+
 if (failures) {
   console.error(`\n${failures} monitor-schema test(s) failed`);
   process.exit(1);

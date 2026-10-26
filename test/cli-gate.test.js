@@ -13,6 +13,7 @@ const path = require('path');
 const os = require('os');
 const { spawnSync, spawn } = require('child_process');
 const { BUILT_IN_ROUTES } = require('../lib/config');
+const { configRevision } = require('../lib/monitor-schema');
 
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const VL = path.join(PLUGIN_ROOT, 'bin', 'vl.js');
@@ -160,6 +161,39 @@ test('native Agent kimi-k2 + fresh exhausted kimi cache → deny JSON', () => {
   assert.strictEqual(h.hookSpecificOutput.hookEventName, 'PreToolUse');
   assert.strictEqual(h.hookSpecificOutput.permissionDecision, 'deny');
   assert.match(h.hookSpecificOutput.permissionDecisionReason, /kimi-code-plan/);
+});
+
+console.log('cli gate — refused built-in routes never deny (B1)');
+
+function refusedGateRoute(monitor) {
+  return { id: 'kimi-code-plan', provider: 'kimi', match: { model: 'kimi' }, monitor };
+}
+
+function assertRefusedRouteAllows(route) {
+  const dir = scratch();
+  writeJson(dir, 'config.json', { gate: { mode: 'deny', injectContext: true }, routes: [route] });
+  // Pre-upgrade shape: the old route was accepted (hash matched the cached
+  // row), so the entry is fresh AND same-revision — the gate must still allow.
+  writeJson(dir, 'status.json', {
+    updatedAt: isoOffsetMs(0),
+    routes: { 'kimi-code-plan': { ...exhaustedEntry('kimi-code-plan'), configRevision: configRevision(route) } },
+  });
+  const r = runGate({
+    input: { tool_name: 'Agent', tool_input: { model: 'kimi-k2' } },
+    dir,
+  });
+  assert.strictEqual(r.status, 0, `expected exit 0, got ${r.status}; stderr=${r.stderr}`);
+  const h = parseHook(r.stdout);
+  assert.ok(!h || !h.hookSpecificOutput || !h.hookSpecificOutput.permissionDecision,
+    `a refused route must never deny: ${r.stdout}`);
+}
+
+test('built-in endpoint-refused route + fresh exhausted same-revision row → allow (B1)', () => {
+  assertRefusedRouteAllows(refusedGateRoute({ recipe: 'built-in', endpoint: 'https://api.example.com' }));
+});
+
+test('built-in unknown-region route + fresh exhausted same-revision row → allow (B1)', () => {
+  assertRefusedRouteAllows(refusedGateRoute({ recipe: 'built-in', region: 'europe' }));
 });
 
 console.log('\ncli gate — stale entry → allow + refresh + detached');

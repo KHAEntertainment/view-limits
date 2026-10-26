@@ -133,17 +133,19 @@ function unknownWithoutCapacity(status) {
     return null;
   };
   let e = await rejection({ code: 1000, msg: 'Authentication Failed', success: false });
-  test('live code 1000 (bad key) is an auth failure with a wrong-region hint', () => {
+  // run() passes { baseUrl: 'https://test.invalid' } with no resolved region,
+  // so the hint names the host and points at the setting instead of guessing.
+  test('live code 1000 (bad key) is an auth failure with a host-naming hint', () => {
     assert.ok(e, 'expected a throw');
     assert.strictEqual(e.status, 401);
-    assert.strictEqual(e.message, 'Z.ai auth failed (code 1000: Authentication Failed) — wrong region? try region: china');
+    assert.strictEqual(e.message, 'Z.ai auth failed (code 1000: Authentication Failed) — auth failed at https://test.invalid? check providers.glm.baseUrl or set monitor.region');
   });
   e = await rejection({ code: 1001, msg: 'Authentication parameter not received in Header, unable to authenticate', success: false });
-  test('live code 1001 (no auth header) is an auth failure with a wrong-region hint', () => {
+  test('live code 1001 (no auth header) is an auth failure with a host-naming hint', () => {
     assert.ok(e, 'expected a throw');
     assert.strictEqual(e.status, 401);
     assert.match(e.message, /^Z\.ai auth failed \(code 1001: Authentication parameter not received/);
-    assert.match(e.message, /wrong region\? try region: china/);
+    assert.match(e.message, /check providers\.glm\.baseUrl or set monitor\.region/);
   });
   const chinaAuth = await rejectionWithRegion(
     { code: 1000, msg: 'Authentication Failed', success: false },
@@ -151,6 +153,14 @@ function unknownWithoutCapacity(status) {
   test('code 1000 on a china route hints the international region', () => {
     assert.ok(chinaAuth, 'expected a throw');
     assert.match(chinaAuth.message, /wrong region\? try region: international/);
+  });
+  const arbitraryAuth = await rejectionWithRegion(
+    { code: 1000, msg: 'Authentication Failed', success: false },
+    { baseUrl: 'https://override.example' });
+  test('code 1000 with no resolved region names the host and the setting', () => {
+    assert.ok(arbitraryAuth, 'expected a throw');
+    assert.match(arbitraryAuth.message, /check providers\.glm\.baseUrl or set monitor\.region/);
+    assert.doesNotMatch(arbitraryAuth.message, /try region/);
   });
   e = await rejection({ code: 500, msg: '当前用户不存在coding plan', success: false });
   test('live code 500 (lapsed plan) surfaces a translated reason, not an auth failure', () => {
@@ -197,6 +207,12 @@ function unknownWithoutCapacity(status) {
   test('kimi 401 on a china route hints global', () => {
     assert.ok(ke, 'expected a throw');
     assert.match(ke.message, /wrong region\? try region: global/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://override.example' });
+  test('kimi 401 with no resolved region names the host and the setting', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /check providers\.kimi\.baseUrl or set monitor\.region/);
+    assert.doesNotMatch(ke.message, /try region/);
   });
 
   console.log('deepseek');

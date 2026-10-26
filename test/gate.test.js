@@ -6,6 +6,7 @@
 const assert = require('assert');
 
 const { decide: gateDecision } = require('../lib/gate');
+const { configRevision } = require('../lib/monitor-schema');
 
 // The existing cache/freshness matrix exercises the explicitly opted-in gate.
 function decide(input) {
@@ -427,6 +428,44 @@ test('parseStrictIsoTimestamp unit cases', () => {
     parseStrictIsoTimestamp('2099-09-19T05:00:00+05:00'),
     'UTC Z and +05:00 offset of same instant must produce identical epoch',
   );
+});
+
+console.log('Issue #113 — refusal fail-open at the gate (B1)');
+
+const REFUSED_ENDPOINT_ROUTE = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', endpoint: 'https://api.example.com' } };
+const REFUSED_REGION_ROUTE = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'europe' } };
+const MONITORABLE_BUILTIN = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'global' } };
+
+test('refused built-in (endpoint) + fresh exhausted pre-upgrade row → allow', () => {
+  const d = decide({ route: REFUSED_ENDPOINT_ROUTE, entry: entry({ state: 'exhausted' }), now: NOW });
+  assert.strictEqual(d.action, 'allow');
+});
+
+test('refused built-in (unknown region) + fresh exhausted pre-upgrade row → allow', () => {
+  const d = decide({ route: REFUSED_REGION_ROUTE, entry: entry({ state: 'exhausted' }), now: NOW });
+  assert.strictEqual(d.action, 'allow');
+});
+
+test('a monitorable exhausted built-in still denies (no over-correction)', () => {
+  const d = decide({ route: MONITORABLE_BUILTIN, entry: entry({ state: 'exhausted' }), now: NOW });
+  assert.strictEqual(d.action, 'deny');
+});
+
+test('no-monitor built-in route still passes validateMonitor ok and denies when exhausted', () => {
+  const v = require('../lib/monitor-schema').validateMonitor(ROUTE);
+  assert.strictEqual(v.ok, true);
+  const d = decide({ route: ROUTE, entry: entry({ state: 'exhausted' }), now: NOW });
+  assert.strictEqual(d.action, 'deny');
+});
+
+test('deny is preserved across region spellings (canonical hashing, B2)', () => {
+  const a = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: 'global' } };
+  const b = { id: 'kimi-code-plan', provider: 'kimi', monitor: { recipe: 'built-in', region: ' GLOBAL ' } };
+  assert.strictEqual(configRevision(a), configRevision(b));
+  for (const route of [a, b]) {
+    const d = decide({ route, entry: entry({ state: 'exhausted' }), now: NOW });
+    assert.strictEqual(d.action, 'deny');
+  }
 });
 
 if (failures) { console.error(`\n${failures} test(s) failed`); process.exit(1); }

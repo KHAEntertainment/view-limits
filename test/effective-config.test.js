@@ -275,11 +275,32 @@ test('built-in kimi: explicit region beats a user baseUrl override', () => {
   assert.strictEqual(eff.cfg.providerCfg.region, 'global');
 });
 
-test('built-in kimi: a user baseUrl override wins over the default region host', () => {
+test('built-in kimi: an unrecognised user baseUrl override wins over the default host, region null', () => {
   const cfg = { providers: { kimi: { baseUrl: 'https://override.example' } } };
   const eff = resolveEffectiveConfig(KIMI_DEFAULT, cfg, { getAdapter });
   assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://override.example');
-  assert.strictEqual(eff.cfg.providerCfg.region, 'global');
+  assert.strictEqual(eff.cfg.providerCfg.region, null);
+});
+
+test('built-in kimi: an override matching a known region host reports that region', () => {
+  const cfg = { providers: { kimi: { baseUrl: 'https://api.kimi.com' } } };
+  const eff = resolveEffectiveConfig(KIMI_DEFAULT, cfg, { getAdapter });
+  assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://api.kimi.com');
+  assert.strictEqual(eff.cfg.providerCfg.region, 'china');
+});
+
+test('built-in glm: an override matching the china host reports the china region', () => {
+  const cfg = { providers: { glm: { baseUrl: 'https://open.bigmodel.cn' } } };
+  const eff = resolveEffectiveConfig(GLM_DEFAULT, cfg, { getAdapter });
+  assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://open.bigmodel.cn');
+  assert.strictEqual(eff.cfg.providerCfg.region, 'china');
+});
+
+test('an override with a path is unrecognised → region null', () => {
+  const cfg = { providers: { kimi: { baseUrl: 'https://api.kimi.com/coding' } } };
+  const eff = resolveEffectiveConfig(KIMI_DEFAULT, cfg, { getAdapter });
+  assert.strictEqual(eff.cfg.providerCfg.baseUrl, 'https://api.kimi.com/coding');
+  assert.strictEqual(eff.cfg.providerCfg.region, null);
 });
 
 test('built-in glm: international default and china host', () => {

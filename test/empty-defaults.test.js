@@ -1773,7 +1773,7 @@ test('it runs once: the second command neither re-migrates nor rewrites', () => 
 });
 
 test('a credential-free fresh install gains routes: [] on its first allowlisted command', () => {
-  // Disclosed in README: "fresh install" resolves on first use. The document
+  // Disclosed in docs/configuration.md: "fresh install" resolves on first use. The document
   // is what stops the vault being re-probed on every later command.
   const dir = scratch();
   const r = run(dir, ['provider', 'list', '--json']);

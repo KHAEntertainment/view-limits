@@ -1574,7 +1574,7 @@ function lifecycleIo(cfg) {
     lock: () => lifecycle.acquireMutationLock(dataDir()),
     // The probe is the recipe's OWN read-only fetch, resolved exactly as
     // refresh and check resolve it. There is no separate discovery transport
-    // and no inference path: see the D1 decision in README.md.
+    // and no inference path: see the D1 decision in docs/providers.md.
     probe: async (route, token) => {
       const adapter = getAdapter(route.provider, route, cfg);
       const status = await adapter.fetchStatus(

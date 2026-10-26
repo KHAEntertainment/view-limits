@@ -91,6 +91,24 @@ try {
   assert.strictEqual(byId2['glm-coding-plan'].region, null);
   console.log('  ✓ override hosts report their matched region (or null)');
 
+  // N1: the per-route effectiveHost must never echo a secret-bearing override
+  // (userinfo + query) — it is a sanitised origin. The pre-existing
+  // `providers` map is out of scope and unchanged (flag filed separately).
+  const SECRET_Q = '?api_key=fixture-query-secret';
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+    routes: [
+      { id: 'kimi-code-plan', provider: 'kimi', account: 'code-plan', match: { model: 'kimi' }, ttlSeconds: 180 },
+    ],
+    providers: { kimi: { baseUrl: `https://u:p@override.example/v1${SECRET_Q}` } },
+  }));
+  const out3 = config();
+  const kimiScrubbed = out3.routes[0];
+  assert.strictEqual(kimiScrubbed.effectiveHost, 'https://override.example');
+  assert.strictEqual(kimiScrubbed.region, null);
+  assert.ok(!JSON.stringify(out3.routes).includes('fixture-query-secret'), 'query secret leaked into route output');
+  assert.ok(!JSON.stringify(out3.routes).includes('u:p'), 'userinfo leaked into route output');
+  console.log('  ✓ per-route effectiveHost never echoes a secret-bearing override');
+
   console.log('config-cli: ok');
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });

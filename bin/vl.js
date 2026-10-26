@@ -35,7 +35,7 @@ const { spawn } = require('child_process');
 
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt,
-  resolveDashboardInterval } = require('../lib/config');
+  resolveDashboardInterval, hostLabel } = require('../lib/config');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, spawnRefresh,
@@ -2646,9 +2646,13 @@ function config() {
               const eff = getAdapter(r.provider, r, cfg);
               if (!eff || !eff.capability || !eff.effectiveCfg) return {};
               const pc = eff.effectiveCfg.providerCfg || {};
+              // Never echo a secret-bearing override: strip userinfo/path/
+              // query/fragment down to a display-safe host label. When there is
+              // no baseUrl to label (refused route), omit effectiveHost.
+              const host = typeof pc.baseUrl === 'string' ? hostLabel(pc.baseUrl) : undefined;
               return {
                 region: pc.region,
-                effectiveHost: pc.baseUrl,
+                ...(host !== undefined ? { effectiveHost: host } : {}),
                 ...(!eff.capability.monitorable ? { reason: eff.capability.reason } : {}),
               };
             })()

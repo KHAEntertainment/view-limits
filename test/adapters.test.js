@@ -129,6 +129,10 @@ function unknownWithoutCapacity(status) {
     return null;
   };
   const rejectionWithRegion = async (body, cfg) => {
+    // CR1: this helper must drive `global.fetch` from ITS body argument, or
+    // it would silently run against whatever response the previous test left
+    // installed.
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
     try { await glm.fetchStatus(cfg, 'sk-test', { threshold: 0.2 }); } catch (e) { return e; }
     return null;
   };
@@ -150,8 +154,9 @@ function unknownWithoutCapacity(status) {
   const chinaAuth = await rejectionWithRegion(
     { code: 1000, msg: 'Authentication Failed', success: false },
     { baseUrl: 'https://open.bigmodel.cn', region: 'china' });
-  test('code 1000 on a china route hints the international region', () => {
+  test('code 1000 on a china route hints the international region (its own envelope)', () => {
     assert.ok(chinaAuth, 'expected a throw');
+    assert.match(chinaAuth.message, /code 1000/);
     assert.match(chinaAuth.message, /wrong region\? try region: international/);
   });
   const arbitraryAuth = await rejectionWithRegion(
@@ -161,6 +166,28 @@ function unknownWithoutCapacity(status) {
     assert.ok(arbitraryAuth, 'expected a throw');
     assert.match(arbitraryAuth.message, /check providers\.glm\.baseUrl or set monitor\.region/);
     assert.doesNotMatch(arbitraryAuth.message, /try region/);
+  });
+  const secretHostAuth = await rejectionWithRegion(
+    { code: 1000, msg: 'Authentication Failed', success: false },
+    { baseUrl: 'https://override.example/v1?api_key=fixture-query-secret' });
+  test('code 1000 with a query-secret override never echoes the secret (N1)', () => {
+    assert.ok(secretHostAuth, 'expected a throw');
+    assert.match(secretHostAuth.message, /auth failed at https:\/\/override\.example/);
+    assert.doesNotMatch(secretHostAuth.message, /api_key|fixture-query-secret/);
+  });
+  const userInfoAuth = await rejectionWithRegion(
+    { code: 1000, msg: 'Authentication Failed', success: false },
+    { baseUrl: 'https://u:p@override.example' });
+  test('code 1000 with userinfo in the override never echoes it (N1)', () => {
+    assert.ok(userInfoAuth, 'expected a throw');
+    assert.match(userInfoAuth.message, /auth failed at https:\/\/override\.example/);
+    assert.doesNotMatch(userInfoAuth.message, /u:p|:p@/);
+  });
+  let requestedGlm;
+  global.fetch = async (url) => { requestedGlm = url; return response({ data: { limits: [{ type: 'TOKENS_LIMIT', percentage: 40, nextResetTime: 1789775460000 }] } }); };
+  await glm.fetchStatus({ baseUrl: 'https://open.bigmodel.cn/coding' }, 'sk-test', { threshold: 0.2 });
+  test('a path override is still requested verbatim (glm)', () => {
+    assert.strictEqual(requestedGlm, 'https://open.bigmodel.cn/coding/api/monitor/usage/quota/limit');
   });
   e = await rejection({ code: 500, msg: '当前用户不存在coding plan', success: false });
   test('live code 500 (lapsed plan) surfaces a translated reason, not an auth failure', () => {
@@ -213,6 +240,30 @@ function unknownWithoutCapacity(status) {
     assert.ok(ke, 'expected a throw');
     assert.match(ke.message, /check providers\.kimi\.baseUrl or set monitor\.region/);
     assert.doesNotMatch(ke.message, /try region/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://override.example/v1?api_key=fixture-query-secret' });
+  test('kimi 401 with a query-secret override never echoes the secret (N1)', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /auth failed at https:\/\/override\.example/);
+    assert.doesNotMatch(ke.message, /api_key|fixture-query-secret/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://u:p@override.example' });
+  test('kimi 401 with userinfo in the override never echoes it (N1)', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /auth failed at https:\/\/override\.example/);
+    assert.doesNotMatch(ke.message, /u:p|:p@/);
+  });
+  ke = await kimiAuth(401, { baseUrl: 'https://api.kimi.com?api_key=x' });
+  test('kimi 401 on a query-bearing api.kimi.com override gives the generic hint (N2)', () => {
+    assert.ok(ke, 'expected a throw');
+    assert.match(ke.message, /check providers\.kimi\.baseUrl or set monitor\.region/);
+    assert.doesNotMatch(ke.message, /try region/);
+  });
+  let requestedKimi;
+  global.fetch = async (url) => { requestedKimi = url; return response({ usage: { limit: '100', remaining: '50' } }); };
+  await kimi.fetchStatus({ baseUrl: 'https://api.kimi.com/coding' }, 'sk-test', { threshold: 0.2 });
+  test('a path override is still requested verbatim (kimi)', () => {
+    assert.strictEqual(requestedKimi, 'https://api.kimi.com/coding/coding/v1/usages');
   });
 
   console.log('deepseek');

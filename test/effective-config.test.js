@@ -303,6 +303,39 @@ test('an override with a path is unrecognised → region null', () => {
   assert.strictEqual(eff.cfg.providerCfg.region, null);
 });
 
+test('built-in kimi: non-bare origins are unrecognised → region null (N2)', () => {
+  for (const baseUrl of [
+    'https://api.kimi.com?api_key=x',
+    'https://api.kimi.com#frag',
+    'https://u:p@api.kimi.com',
+  ]) {
+    const cfg = { providers: { kimi: { baseUrl } } };
+    const eff = resolveEffectiveConfig(KIMI_DEFAULT, cfg, { getAdapter });
+    assert.strictEqual(eff.cfg.providerCfg.baseUrl, baseUrl);
+    assert.strictEqual(eff.cfg.providerCfg.region, null, baseUrl);
+  }
+});
+
+test('built-in kimi: bare origin and trailing slash are recognised as china', () => {
+  for (const baseUrl of ['https://api.kimi.com', 'https://api.kimi.com/']) {
+    const cfg = { providers: { kimi: { baseUrl } } };
+    const eff = resolveEffectiveConfig(KIMI_DEFAULT, cfg, { getAdapter });
+    assert.strictEqual(eff.cfg.providerCfg.region, 'china', baseUrl);
+  }
+});
+
+test('built-in glm: non-bare open.bigmodel.cn origins are unrecognised → region null (N2)', () => {
+  for (const baseUrl of [
+    'https://open.bigmodel.cn?key=x',
+    'https://open.bigmodel.cn#frag',
+    'https://u:p@open.bigmodel.cn',
+  ]) {
+    const cfg = { providers: { glm: { baseUrl } } };
+    const eff = resolveEffectiveConfig(GLM_DEFAULT, cfg, { getAdapter });
+    assert.strictEqual(eff.cfg.providerCfg.region, null, baseUrl);
+  }
+});
+
 test('built-in glm: international default and china host', () => {
   const effDefault = resolveEffectiveConfig(GLM_DEFAULT, DEFAULT_CFG, { getAdapter });
   assert.strictEqual(effDefault.cfg.providerCfg.baseUrl, 'https://api.z.ai');

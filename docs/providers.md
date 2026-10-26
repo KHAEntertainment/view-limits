@@ -15,7 +15,7 @@ is an allow: it fails open). See
 | `kimi-code-plan` | Kimi Coding Plan | rolling-5h + weekly quota |
 | `glm-coding-plan` | Z.ai (GLM) | % used + `nextResetTime` |
 | `deepseek-direct` | DeepSeek | balance + `is_available` |
-| `openrouter-main` | OpenRouter | balance + spent today/week |
+| `openrouter-main` | OpenRouter | balance + spent this month |
 | `xiaomi-token-plan` | Xiaomi (experimental, opt-in) | token-plan counts; state derived from the tokens window (see [Xiaomi Token Plan](xiaomi.md)) |
 
 Anthropic is omitted — Claude Code surfaces its own native rate-limit state.

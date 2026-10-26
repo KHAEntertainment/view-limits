@@ -3,7 +3,7 @@
 ## What it does
 
 - **`/view-limits`** — renders a live view of each configured route's balance /
-  quota / reset time, with spent-today/this-week where available. The Claude,
+  quota / reset time, with this month's spend where available. The Claude,
   Codex and OpenCode surfaces all resolve the same `vl.js view` command.
 - **`/view-limits:setup`** — initial setup: opens a local browser form for routes
   that have no key yet (auto-imports MiniMax from `~/.mmx/config.json`).

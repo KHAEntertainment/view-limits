@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/github/license/KHAEntertainment/view-limits)](LICENSE) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/KHAEntertainment/view-limits) ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/KHAEntertainment/view-limits?logo=CodeRabbit&logoColor=%23FFFFFF&color=%23FF570A)
 
-**view-limits shows your orchestrator how much quota each coding-plan account has left before it dispatches sub-agents, and can block dispatch to an account that's out.**
+**See how much is left on your coding plans before your agents start new work.**
 
 [Quick start](#quick-start) | [Works with](#works-with) | [Dashboard](docs/dashboard.md) | [CLI reference](docs/cli-reference.md)
 
@@ -28,8 +28,7 @@ There's an optional gate too. A `PreToolUse` hook resolves each sub-agent dispat
 - It denies only a route whose status is fresh and unambiguously exhausted. Unknown, stale, unmapped and ambiguous routes are allowed.
 - Anything unreadable in its own config counts as `off`.
 
-An optional dashboard daemon keeps the status fresh in the background and serves a page on `127.0.0.1`, with an opt-in, read-only view for your phone.
-<!-- #116: add logo line here if this rides 0.1.52 -->
+An optional dashboard daemon keeps the status fresh in the background and serves a page on `127.0.0.1`, with an opt-in, read-only view for your phone. Built-in provider rows show the provider's logo (bundled with the plugin, nothing is fetched), and custom providers get a generic icon.
 
 Your keys stay out of chat. `/view-limits:setup` opens a local browser form, and the keys go to the macOS Keychain, or to an AES-256-GCM encrypted file on other systems.
 
@@ -52,8 +51,6 @@ Nothing is blocked yet. The gate starts off, and the cache refreshes when you ru
 
 Codex and OpenCode run the same `vl.js view` command: [Codex setup](harness/codex/README.md), [OpenCode setup](harness/opencode/README.md). To run from a checkout, use `claude --plugin-dir /path/to/view-limits`. More in [Install](docs/install.md).
 
-> **Roadmap, not shipped:** Cloudflare Workers AI as a built-in provider ([#117](https://github.com/KHAEntertainment/view-limits/issues/117)), and adding providers from the dashboard ([#64](https://github.com/KHAEntertainment/view-limits/issues/64)).
-
 ## Works with
 
 | Route | Provider | What it reads |
@@ -64,7 +61,9 @@ Codex and OpenCode run the same `vl.js view` command: [Codex setup](harness/code
 | `deepseek-direct` | DeepSeek | balance and availability |
 | `openrouter-main` | OpenRouter | balance and this month's spend |
 
-Also supported, with honest labels:
+> **Roadmap, not shipped:** Cloudflare Workers AI as a built-in provider ([#117](https://github.com/KHAEntertainment/view-limits/issues/117)), and adding providers from the dashboard ([#64](https://github.com/KHAEntertainment/view-limits/issues/64)).
+
+Also supported:
 
 - **Your own OpenAI- or Anthropic-compatible route.** Wire compatibility doesn't give you a quota API, so view-limits reads only the documented rate-limit headers from one read-only `GET` you point it at. Verified with documented-format fixtures, not a live account.
 - **Xiaomi Token Plan.** Experimental and opt-in, macOS only. It reads Xiaomi's console through your Chrome session. Two of three live acceptance checks have passed.
@@ -82,8 +81,7 @@ Kimi needs a `sk-kimi-*` Coding Plan key; a Moonshot `sk-*` key won't work. Kimi
 - [Dashboard](docs/dashboard.md): the daemon, the loopback page, the phone view.
 - [The view and its schema](docs/view-schema.md): `vl.js view`, the JSON envelope, what it guarantees.
 - [CLI reference](docs/cli-reference.md): every command and exit code.
-- [Development](docs/development.md): architecture, refresh and locking, tests, how releases are cut.
-- [Credential receipts](docs/credential-receipts.md), [Jev recommendation](docs/jev-recommendation.md) and [Jev readiness](docs/jev-readiness.md): the first-run notice, and the advisory model recommendation with its readiness gate.
+- [Development](docs/development.md): architecture, refresh and locking, tests, how releases are cut. Also see [credential receipts](docs/credential-receipts.md) (the first-run notice), [Jev recommendation](docs/jev-recommendation.md) and [Jev readiness](docs/jev-readiness.md) (the advisory model recommendation and its readiness gate).
 
 ## Credits
 

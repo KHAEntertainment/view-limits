@@ -7,6 +7,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const http = require('http');
 const vm = require('vm');
 
@@ -137,7 +138,8 @@ test('assets: only the fixed allowlist is served, with the right types', async (
       assert.strictEqual(res.headers['x-content-type-options'], 'nosniff', name);
       assert.ok(res.buf.equals(fs.readFileSync(path.join(__dirname, '..', 'lib', 'dashboard', 'page', name))), name);
     }
-    for (const bad of ['/assets/', '/assets/nope.js', '/assets/../server.js', '/assets/%2e%2e/server.js', '/assets/fonts/OFL.txt', '/assets/app.js/', '/assets/constructor', '/index.html']) {
+    for (const bad of ['/assets/', '/assets/nope.js', '/assets/../server.js', '/assets/%2e%2e/server.js', '/assets/fonts/OFL.txt', '/assets/app.js/', '/assets/constructor', '/index.html',
+      '/assets/logos/', '/assets/logos/unknown.svg', '/assets/logos/kimi.svg/']) {
       assert.strictEqual((await raw(port, { pathname: bad })).status, 404, bad);
     }
     assert.strictEqual((await raw(port, { method: 'POST', pathname: '/', body: '' })).status, 405);
@@ -509,7 +511,16 @@ test('hostile labels, reasons and URLs render as text; no markup, no script link
   assert.ok(elements.length > 20, 'the page rendered');
   assert.ok(root.textContent.includes(`Label ${evil}`), 'the hostile label is shown as text');
   assert.ok(root.textContent.includes(`err ${evil}`));
-  assert.ok(!elements.some((e) => e.tag === 'img' || e.tag === 'script'), 'no element came from data');
+  // Issue #116: the only img the page creates is a decorative provider logo on
+  // a fixed /assets/logos path. No img, and no src, comes from data.
+  const imgs = elements.filter((e) => e.tag === 'img');
+  assert.ok(imgs.length > 0, 'the built-in rows show a mark');
+  for (const img of imgs) {
+    assert.ok(L.safeLogoPath(img.attrs.src), img.attrs.src);
+    assert.strictEqual(img.attrs.alt, '');
+    assert.strictEqual(img.attrs['aria-hidden'], 'true');
+  }
+  assert.ok(!elements.some((e) => e.tag === 'script'), 'no element came from data');
   for (const e of elements) {
     if (e.attrs.href !== undefined) assert.ok(e.attrs.href.startsWith('https://'), e.attrs.href);
     assert.ok(!Object.keys(e.attrs).some((k) => /^on/i.test(k)), 'no event-handler attribute');
@@ -521,6 +532,200 @@ test('hostile labels, reasons and URLs render as text; no markup, no script link
   assert.deepStrictEqual(hrefs, ['https://platform.xiaomimimo.com/console/plan-manage']);
   // The unknown reason code is dropped, the known one is shown.
   assert.ok(root.textContent.includes('stale observation'));
+});
+
+// ---- provider logos (Issue #116) ---------------------------------------------
+
+console.log('provider logos');
+
+const PAGE_DIR = path.join(__dirname, '..', 'lib', 'dashboard', 'page');
+const LOGO_DIR = path.join(PAGE_DIR, 'logos');
+
+test('#116 the vendored logo set is exactly the built-in provider table (no drift, no orphan)', () => {
+  // The two fixed tables share their provider ids, key for key.
+  assert.deepStrictEqual(Object.keys(L.PROVIDER_LOGOS.provider).sort(), Object.keys(L.PROVIDER_DASHBOARDS).sort());
+  for (const p of Object.keys(L.PROVIDER_DASHBOARDS)) assert.strictEqual(L.PROVIDER_LOGOS.provider[p], p, p);
+  // The two built-in recipes (no console link) carry a mark of their own.
+  assert.deepStrictEqual({ ...L.PROVIDER_LOGOS.recipe }, {
+    'alibaba-coding-plan': 'alibaba',
+    'stepfun-plan': 'stepfun',
+  });
+  const stems = [...new Set([
+    ...Object.values(L.PROVIDER_LOGOS.provider),
+    ...Object.values(L.PROVIDER_LOGOS.recipe),
+    L.GENERIC_LOGO,
+  ])].sort();
+  const vendored = fs.readdirSync(LOGO_DIR).filter((f) => f.endsWith('.svg')).map((f) => f.slice(0, -4)).sort();
+  assert.deepStrictEqual(vendored, stems, 'one SVG per table entry, and no unreferenced SVG');
+  for (const stem of stems) {
+    assert.strictEqual(ASSETS[`logos/${stem}.svg`], 'image/svg+xml', `${stem} is on the /assets/ allowlist`);
+    assert.ok(fs.statSync(path.join(LOGO_DIR, `${stem}.svg`)).size > 0, stem);
+  }
+});
+
+test('#116 logoFor: built-ins by provider id, built-in recipes by recipe, everything else generic', () => {
+  for (const p of Object.keys(L.PROVIDER_DASHBOARDS)) {
+    assert.strictEqual(L.logoFor({ provider: p, recipe: null }), p);
+  }
+  assert.strictEqual(L.logoFor({ provider: 'alibaba', recipe: 'alibaba-coding-plan' }), 'alibaba');
+  assert.strictEqual(L.logoFor({ provider: 'stepfun', recipe: 'stepfun-plan' }), 'stepfun');
+  // A custom provider is NEVER matched on its name: any other recipe, an
+  // unknown id, an inherited member or a look-alike all get the generic mark.
+  for (const r of [
+    { provider: 'kimi', recipe: 'openai-compatible' },
+    { provider: 'my-proxy', recipe: null },
+    { provider: 'Kimi', recipe: null },
+    { provider: 'constructor', recipe: null },
+    { provider: '__proto__', recipe: null },
+    { provider: 'toString', recipe: null },
+    { provider: '', recipe: null },
+    { recipe: null },
+    {},
+    null,
+  ]) assert.strictEqual(L.logoFor(r), 'generic', JSON.stringify(r));
+  assert.strictEqual(L.logoAssetPath({ provider: 'kimi', recipe: null }), '/assets/logos/kimi.svg');
+  assert.strictEqual(L.logoAssetPath({ provider: 'my-proxy', recipe: null }), '/assets/logos/generic.svg');
+  // The page may only ever set this one shape of src.
+  assert.strictEqual(L.safeLogoPath('/assets/logos/kimi.svg'), '/assets/logos/kimi.svg');
+  for (const bad of ['https://evil.example/x.svg', '//evil.example/x.svg', '/assets/logos/../app.js', '/assets/logos/kimi.svg?x=1',
+    '/assets/logos/Kimi.svg', '/assets/logos/kimi.png', 'javascript:alert(1)', '', null, 42]) {
+    assert.strictEqual(L.safeLogoPath(bad), null, String(bad));
+  }
+});
+
+test('#116 every built-in row renders its mark; a custom provider gets the generic icon', () => {
+  const doc = statusDoc([
+    route({ id: 'k', label: 'Kimi', provider: 'kimi', recipe: null }),
+    route({ id: 'g', label: 'GLM', provider: 'glm', recipe: null }),
+    route({ id: 'a', label: 'Alibaba Coding Plan', provider: 'alibaba', recipe: 'alibaba-coding-plan' }),
+    route({ id: 's', label: 'StepFun', provider: 'stepfun', recipe: 'stepfun-plan' }),
+    route({ id: 'c', label: 'My proxy', provider: 'my-proxy', recipe: 'openai-compatible' }),
+  ]);
+  const srcOf = (id) => {
+    const card = findAll(R.renderPage(doc, ctx({})), (n) => n.tag === 'article' && n.attrs['data-route'] === id)[0];
+    assert.ok(card, id);
+    return findAll(card, (n) => n.tag === 'img')[0].attrs.src;
+  };
+  assert.deepStrictEqual(['k', 'g', 'a', 's', 'c'].map(srcOf), [
+    '/assets/logos/kimi.svg',
+    '/assets/logos/glm.svg',
+    '/assets/logos/alibaba.svg',
+    '/assets/logos/stepfun.svg',
+    '/assets/logos/generic.svg',
+  ]);
+  // The narrow pane shows the same marks, one per row.
+  const narrow = R.renderPage(doc, ctx({ narrow: true }));
+  const rowImgs = findAll(narrow, (n) => n.tag === 'div' && typeof n.attrs.class === 'string' && n.attrs.class.includes('line-item'))
+    .map((row) => findAll(row, (n) => n.tag === 'img').map((n) => n.attrs.src));
+  assert.deepStrictEqual(rowImgs, [['/assets/logos/kimi.svg'], ['/assets/logos/glm.svg'], ['/assets/logos/alibaba.svg'], ['/assets/logos/stepfun.svg'], ['/assets/logos/generic.svg']]);
+  // Decorative: the name is next to it, so no alt text and hidden from AT.
+  for (const img of findAll(narrow, (n) => n.tag === 'img').concat(findAll(R.renderPage(doc, ctx({})), (n) => n.tag === 'img'))) {
+    assert.strictEqual(img.attrs.alt, '');
+    assert.strictEqual(img.attrs['aria-hidden'], 'true');
+  }
+});
+
+test('#116 the page loads nothing off loopback (console links are still fine)', () => {
+  const doc = statusDoc([route({ windows: [] }), route({ id: 'x', provider: 'xiaomi', recipe: null })]);
+  const loaders = new Set(['img', 'script', 'link', 'source', 'iframe', 'video', 'audio', 'embed', 'object', 'track', 'input']);
+  for (const c of [ctx({}), ctx({ narrow: true }), ctx({ mode: 'lan', preview: true })]) {
+    const tree = R.renderPage(doc, c);
+    for (const el of findAll(tree, () => true)) {
+      for (const attr of ['src', 'data', 'poster']) {
+        const value = el.attrs[attr];
+        if (value === undefined) continue;
+        assert.ok(String(value).startsWith('/assets/'), `${el.tag}[${attr}]=${value}`);
+      }
+      if (el.tag === 'a' && el.attrs.href !== undefined) assert.ok(el.attrs.href.startsWith('https://'), el.attrs.href);
+      if (loaders.has(el.tag) && el.attrs.href !== undefined) assert.ok(String(el.attrs.href).startsWith('/assets/'), `${el.tag}[href]`);
+      if (el.tag === 'img') assert.ok(String(el.attrs.src).startsWith('/assets/logos/'), el.attrs.src);
+    }
+  }
+  // The stylesheet keeps to same-origin assets too.
+  const css = fs.readFileSync(path.join(PAGE_DIR, 'app.css'), 'utf8');
+  assert.ok(!/@import\b/.test(css));
+  for (const m of css.matchAll(/url\(\s*["']?([^"')]+)/g)) assert.ok(!/^(?:[a-z]+:|\/\/)/i.test(m[1].trim()), m[1]);
+});
+
+test('#116 every vendored SVG is safe to embed', () => {
+  const banned = [
+    [/<script\b/i, 'script element'],
+    [/\son[a-z]+\s*=/i, 'event-handler attribute'],
+    [/<foreignObject\b/i, 'foreignObject'],
+    [/\shref\s*=\s*["']\s*(?:https?:)?\/\//i, 'absolute href'],
+    [/\s(?:xlink:)?href\s*=\s*["']\s*(?:data|javascript):/i, 'non-fragment href'],
+    [/@import\b/i, '@import'],
+    [/<style\b/i, 'style element'],
+    [/url\(\s*["']?\s*(?:https?:|data:|\/\/)/i, 'external url()'],
+    [/<!ENTITY\b/i, 'entity declaration'],
+  ];
+  for (const file of fs.readdirSync(LOGO_DIR).filter((f) => f.endsWith('.svg'))) {
+    const src = fs.readFileSync(path.join(LOGO_DIR, file), 'utf8');
+    for (const [re, why] of banned) assert.ok(!re.test(src), `${file}: ${why}`);
+    assert.ok(src.trimStart().startsWith('<svg'), `${file}: root element is svg`);
+    assert.ok(/viewBox="0 0 24 24"/.test(src), `${file}: square viewBox`);
+    assert.ok(/xmlns="http:\/\/www\.w3\.org\/2000\/svg"/.test(src), `${file}: svg namespace`);
+  }
+});
+
+test('#116 logos come only from the fixed allowlist on loopback and LAN', async () => {
+  // Both listeners normalise with `new URL` BEFORE the exact-key allowlist
+  // lookup, so a dot-segment path can resolve to another allowlisted asset
+  // (e.g. `/assets/logos/../app.js` → `/assets/app.js`, already public). That
+  // is not a leak: the property to hold is that such a path returns 404 or the
+  // exact bytes of an allowlisted asset, never a file outside the list.
+  const allowlisted = Object.keys(ASSETS).map((name) => fs.readFileSync(path.join(PAGE_DIR, name)));
+  const isAllowlisted = (buf) => allowlisted.some((b) => b.equals(buf));
+  const variants = [
+    '/assets/logos/../app.js',
+    '/assets/logos/%2e%2e/app.js',
+    '/assets/../../etc/passwd',
+    '/assets/logos/%2e%2e%2f..%2fserver.js',
+  ];
+  const check = (res, pathname) => {
+    if (res.status === 404) return;
+    assert.strictEqual(res.status, 200, `${pathname} → ${res.status}`);
+    assert.ok(isAllowlisted(res.buf), `${pathname} returned bytes outside the allowlist`);
+  };
+
+  await withServer(async (port) => {
+    const ok = await raw(port, { pathname: '/assets/logos/kimi.svg' });
+    assert.strictEqual(ok.status, 200);
+    assert.strictEqual(ok.headers['content-type'], 'image/svg+xml');
+    assert.ok(ok.buf.equals(fs.readFileSync(path.join(LOGO_DIR, 'kimi.svg'))));
+    for (const pathname of variants) check(await raw(port, { pathname }), pathname);
+    assert.strictEqual((await raw(port, { pathname: '/assets/logos/unknown.svg' })).status, 404);
+  });
+
+  // LAN reuses the same assetFor/ASSETS, so it holds the same property.
+  const { createLanServer } = require('../lib/dashboard/lan-server');
+  const lan = require('../lib/dashboard/lan');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vl-logos-'));
+  lan.writeToken(dir);
+  const port = await new Promise((r) => { const s = require('net').createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+  const server = createLanServer({ address: '127.0.0.1', port, getStatus: () => statusDoc([]), currentToken: lan.createTokenReader(dir), threshold: 0.2 });
+  const get = (pathname) => new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port, path: pathname, headers: { Host: `127.0.0.1:${port}` } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'], buf: Buffer.concat(chunks) }));
+    });
+    req.on('error', () => resolve({ status: 0, buf: Buffer.alloc(0) }));
+    req.end();
+  });
+  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  try {
+    const ok = await get('/assets/logos/kimi.svg');
+    assert.strictEqual(ok.status, 200);
+    assert.strictEqual(ok.type, 'image/svg+xml');
+    assert.ok(ok.buf.equals(fs.readFileSync(path.join(LOGO_DIR, 'kimi.svg'))));
+    for (const pathname of variants) check(await get(pathname), pathname);
+    assert.strictEqual((await get('/assets/logos/unknown.svg')).status, 404);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('the browser scripts never use HTML-string sinks', () => {

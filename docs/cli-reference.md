@@ -6,10 +6,25 @@
   quota / reset time, with this month's spend where available. The Claude,
   Codex and OpenCode surfaces all resolve the same `vl.js view` command.
 - **`/view-limits:setup`** — initial setup: opens a local browser form for routes
-  that have no key yet (auto-imports MiniMax from `~/.mmx/config.json`).
-- **`/view-limits:update [route-id]`** — rotate existing keys: opens the form for
-  configured routes, or one route, e.g. `/view-limits:update kimi-code-plan`.
-  Rotation always requests a replacement; it never reimports a native key.
+  that have no key yet (auto-imports MiniMax from `~/.mmx/config.json`). Takes no
+  argument; one route at a time is `vl.js setup <route-id>` in a terminal.
+- **`/view-limits:setup-xiaomi`** — the Xiaomi route’s own setup (owner ruling Q36-A):
+  the fixed call `vl.js setup xiaomi-token-plan`, because that route reads Chrome
+  console cookies rather than a stored key, so the bare setup command would not
+  offer it. It takes no argument — the route id is a literal in the file, not
+  something the user passes — and the profile and console-source options stay
+  terminal-only.
+- **`/view-limits:update`** — rotate existing keys: it revalidates a configured
+  Xiaomi route's Chrome source in place, without a form, and opens the form only
+  for the configured routes that already have a stored key. A configured route
+  with no key yet belongs to `/view-limits:setup`. Takes no argument; one route is
+  `vl.js update <route-id>` in a terminal. Rotation always requests a replacement;
+  it never reimports a native key.
+- **`/view-limits:dashboard`**, **`…:dashboard-stop`**, **`…:dashboard-status`**
+  — the dashboard launch, shutdown and state read (#136). Three argument-free
+  commands rather than one that takes a word: a shim's injected command is shell
+  text, so a substituted argument would be code running under the shim's own
+  permission grant (owner ruling Q34-A).
 - **`vl.js provider add|update|remove|list`** — the custom-provider lifecycle:
   validate, probe the quota source read-only, then persist. Headless, with
   stable statuses and exit codes. See
@@ -42,8 +57,37 @@ vl.js snapshot --json [--refresh] # diagnostic runtime snapshot
 vl.js view [--condensed] [--json] # the versioned view schema: text or JSON
 vl.js recommend --json            # advisory recommendation (Jev-dormant by default)
 vl.js dashboard start|stop|status # persistent loopback dashboard daemon (Issue #61)
+vl.js dashboard open [--no-open]  #   start or reuse it and open the page (#136)
 vl.js dashboard lan enable|disable|rotate|url  # opt-in read-only LAN view (#62)
+vl.js … --relay                   #   the shim-only exit waiver on the six calls
+                                  #   the command surfaces make — see below
 ```
+
+### The `--relay` exit waiver (shim-only)
+
+`--relay` is accepted by exactly `view`, `setup`, `update` and `dashboard open`,
+`stop`, `status` — the six commands the command surfaces make, from seven shim
+files (`/view-limits:setup` and `/view-limits:setup-xiaomi` are two of them, and
+both run `setup`, the second with the route id written into the file rather than
+passed to it). It is accepted by nothing else: any other command given it exits
+`2` with one line saying so, and the command does not run.
+
+With the flag, the output is what it always was, byte for byte, on both streams,
+in the same order: it touches no rendering, no collection and no side effect. The
+process exit is then `0` whatever the command decided. Without it, every exit
+code in the table above is the contract, in a terminal, in a hook and for the
+gate.
+
+It exists because a command shim's injected exec is not run the way a shell is
+run: Claude Code checks it while the file renders, and
+["a failed command aborts the entire skill invocation, not just its own placeholder"](https://code.claude.com/docs/en/skills#when-an-injected-command-fails)
+— with the default shell, any non-zero exit counts as a failure. For a surface
+whose job is to report state, that turns the ordinary answers into an error
+banner: `status` on a stopped daemon exits `3`, `stop` on nothing running exits
+`1`, and a refused configuration exits `8`, `9` or `10`. A waiver on the exit
+code is the fix that leaves the contract alone; `|| true` would not be, because
+`||` makes a second subcommand the shim's own permission rule does not cover.
+
 
 ### Exit codes
 
@@ -56,6 +100,7 @@ vl.js dashboard lan enable|disable|rotate|url  # opt-in read-only LAN view (#62)
 | `snapshot --json` | `0` (one pretty JSON envelope on stdout) | `1` when `--json` is missing or any other flag is passed |
 | `view [--condensed] [--json]` | `0` (the text layout, or one always-valid JSON envelope on stdout) | `1` on an unknown flag (usage on stderr); `8` config.json has never been published (the one-time vault→routes migration has not resolved — a rerun cannot fix it): `No configuration yet: run /view-limits:setup to add a provider, or start a new session to finish first-run setup` on stderr; `9` config.json could not be confirmed (another process was replacing it, or it exists but could not be read): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr. `--json` still prints exactly one valid envelope (`routes: []`, the status and the reason code) in every refusing case |
 | `dashboard start\|stop\|status` | `0` (`status`: running and verified) | `1` refused or failed; `2` usage; `3` `status` with nothing verified running; `9` / `10` config.json refused, as for `view` — see [the dashboard daemon](dashboard.md#the-dashboard-daemon-vljs-dashboard) |
+| `dashboard open` | `0` — including the case where the browser could not be opened (the address is printed and one diagnostic line follows). Reuse of a verified running daemon and recovery of a stale record both exit `0` | `1` the same refusals `start` gives (an unverified record, or another start holding the ownership lock) with the same message, and no browser opened; `2` usage (a bad flag); `9` / `10` config.json refused, as for `start` |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |
 | `setup` / `update` / `remove` | `0` | `1` on bad args, credential-storage failure, or a stored credential whose route row was not added; `8` migration pending ([how config.json is assembled](configuration.md#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr |
 | `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found; `8` migration pending ([how config.json is assembled](configuration.md#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr — see [the lifecycle section](providers.md#adding-updating-and-removing-a-custom-provider) |

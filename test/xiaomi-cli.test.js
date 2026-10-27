@@ -294,7 +294,7 @@ async function until(predicate, deadlineMs = 5000) {
     assert.strictEqual(text.status, 0, text.stderr);
     assert.match(text.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/);
     assert.doesNotMatch(text.stdout, /xiaomi-token-plan:[^\n]*\(stale\)/, 'live Xiaomi observation is not marked stale');
-    assert.ok(!text.stdout.includes('rotate via'), 'xiaomi rows never get the rotate hint');
+    assert.ok(!text.stdout.includes('via /view-limits:update'), 'xiaomi rows never get the rotate hint');
     assert.strictEqual(fetches(ctx).length, 2, 'text report performs its own single pair');
     noVaultForXiaomi(ctx, true);
     console.log('  ✓ report (text + json) is live: fresh counts replace the cached success');
@@ -348,7 +348,7 @@ async function until(predicate, deadlineMs = 5000) {
     assert.strictEqual(text.status, 0, text.stderr);
     assert.ok(!text.stdout.includes(String(OLD_COUNTS)), 'old counts must not appear in text');
     assert.match(text.stdout, /session unavailable — open https:\/\/platform\.xiaomimimo\.com\/ in Chrome \(profile Profile 46\) and log in if needed; next refresh checks for new cookies/);
-    assert.doesNotMatch(text.stdout, /rotate via \/view-limits:update xiaomi-token-plan/);
+    assert.doesNotMatch(text.stdout, /rotate xiaomi-token-plan via \/view-limits:update/);
     noVaultForXiaomi(ctx, true);
     console.log('  ✓ live auth failure shows the full dashboard link with zero cached counts');
   } finally {
@@ -476,7 +476,7 @@ async function until(predicate, deadlineMs = 5000) {
   try {
     const out = run(ctx, ['update', XIOMI_ID]);
     assert.strictEqual(out.status, 1);
-    assert.match(out.stderr, /not configured — run \/view-limits:setup xiaomi-token-plan first/);
+    assert.match(out.stderr, /not configured — run \/view-limits:setup-xiaomi first/);
     noVaultForXiaomi(ctx, false);
   } finally {
     cleanup(ctx);
@@ -987,7 +987,7 @@ async function until(predicate, deadlineMs = 5000) {
     });
     assert.strictEqual(out.status, 1, out.stderr);
     assert.match(out.stderr, /Approve Chrome key access: click "Always Allow" \(not "Allow"\) in the macOS dialog\./);
-    assert.match(out.stderr, /Chrome key access was not granted — rerun \/view-limits:setup xiaomi-token-plan, then click "Always Allow" \(not "Allow"\)/);
+    assert.match(out.stderr, /Chrome key access was not granted — rerun \/view-limits:setup-xiaomi, then click "Always Allow" \(not "Allow"\)/);
     assert.doesNotMatch(out.stderr, /configured Chrome cookie source/, 'no success message on denial');
     const cfg = readConfig(ctx);
     assert.strictEqual(cfg.xiaomi.chromeProfile, 'Profile 46', 'denied grant must NOT publish the new selection');
@@ -1013,7 +1013,7 @@ async function until(predicate, deadlineMs = 5000) {
 
     const out = run(ctx, ['update', XIOMI_ID, '--profile', 'Profile 9'], { env: { VL_XIAOMI_GRANT_MODE: 'denied' } });
     assert.strictEqual(out.status, 1, out.stderr);
-    assert.match(out.stderr, /Chrome key access was not granted — rerun \/view-limits:setup xiaomi-token-plan/);
+    assert.match(out.stderr, /Chrome key access was not granted — rerun \/view-limits:setup-xiaomi/);
     assert.doesNotMatch(out.stderr, /revalidated/, 'no success message on denial');
     assert.strictEqual(readConfig(ctx).xiaomi.chromeProfile, 'Profile 46', 'denied grant keeps the prior config');
     assert.ok(fs.existsSync(path.join(xiaomiDir, 'rejected.json')),

@@ -34,6 +34,10 @@ const { spawnSync } = require('child_process');
 const ROOT = path.resolve(__dirname, '..');
 const HOOKS_PATH = path.join(ROOT, 'harness', 'codex', 'hooks.json');
 const SKILL_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits', 'SKILL.md');
+const SKILL_DASHBOARD_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard', 'SKILL.md');
+const SKILL_DASHBOARD_STOP_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard-stop', 'SKILL.md');
+const SKILL_DASHBOARD_STATUS_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard-status', 'SKILL.md');
+const SKILL_SETUP_XIAOMI_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-setup-xiaomi', 'SKILL.md');
 const GUARD = path.join(__dirname, 'guard.cjs');
 const hooks = require('../harness/codex/hooks.json');
 
@@ -51,7 +55,14 @@ const CLI_INVOCATION_PLAIN = /^node "([\s\S]+)\/bin\/vl\.js"((?: [A-Za-z0-9._:-]
 const ALLOWED_ARGV = {
   gate: ['gate'],
   refresh: ['refresh', '--quiet', '--session-start'],
-  view: ['view'],
+  view: ['view', '--relay'],
+  // Issue #136: the dashboard skills open, stop and read the daemon; one fixed
+  // call each, no logic and no argument (owner ruling Q34-A).
+  dashboard: ['dashboard', 'open', '--relay'],
+  dashboardStop: ['dashboard', 'stop', '--relay'],
+  dashboardStatus: ['dashboard', 'status', '--relay'],
+  // Q36-A: the Xiaomi route has its own skill, with the route id fixed in the call.
+  setupXiaomi: ['setup', 'xiaomi-token-plan', '--relay'],
 };
 
 // Shaping / processing tools that must never appear in a Codex surface file.
@@ -161,6 +172,10 @@ try {
   // ---- 1. SHAPE: a valid Codex hook config ---------------------------------
   assert.ok(fs.existsSync(HOOKS_PATH), 'harness/codex/hooks.json must exist');
   assert.ok(fs.existsSync(SKILL_PATH), 'harness/codex/skills/view-limits/SKILL.md must exist');
+  assert.ok(fs.existsSync(SKILL_DASHBOARD_PATH), 'harness/codex/skills/view-limits-dashboard/SKILL.md must exist');
+  assert.ok(fs.existsSync(SKILL_DASHBOARD_STOP_PATH), 'harness/codex/skills/view-limits-dashboard-stop/SKILL.md must exist');
+  assert.ok(fs.existsSync(SKILL_DASHBOARD_STATUS_PATH), 'harness/codex/skills/view-limits-dashboard-status/SKILL.md must exist');
+  assert.ok(fs.existsSync(SKILL_SETUP_XIAOMI_PATH), 'harness/codex/skills/view-limits-setup-xiaomi/SKILL.md must exist');
   assert.ok(hooks.hooks && typeof hooks.hooks === 'object' && !Array.isArray(hooks.hooks));
   assert.deepStrictEqual(
     Object.keys(hooks.hooks).sort(),
@@ -219,23 +234,45 @@ try {
     assert.strictEqual((handler.command.match(/\$\(/g) || []).length, 1, `${handler.event}: one expansion only`);
   }
 
-  const skill = fs.readFileSync(SKILL_PATH, 'utf8');
-  assert.match(skill, /^---\nname: view-limits\ndescription: .+\n---\n/, 'skill frontmatter');
-  const skillCommands = [...skill.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) => m[1].trim());
-  assert.strictEqual(skillCommands.length, 1, 'the skill runs exactly one command');
-  const skillMatch = skillCommands[0].match(CLI_INVOCATION_PLAIN);
-  assert.ok(skillMatch, `skill: not a bare CLI invocation: ${skillCommands[0]}`);
-  assert.strictEqual(skillMatch[1], ROOT_EXPR, 'skill: unexpected root resolution');
-  assert.deepStrictEqual(
-    skillMatch[2].trim().split(/\s+/),
-    ALLOWED_ARGV.view,
-    'skill: the status surface wires to `vl.js view`',
-  );
-  assert.doesNotMatch(skill.split(ROOT_EXPR).join('ROOT'), FORMAT_TOOL_RE, 'skill: no text-processing tools');
-  assert.doesNotMatch(skill, /^\|/m, 'skill: no markdown table — the CLI renders the table');
-  assert.match(skill, /relay/i);
-  assert.doesNotMatch(skill, /summar|reformat|extract the|rebuild/i,
-    'skill: instruct verbatim relay, never reshaping');
+  // Both skills are the same shape: frontmatter, exactly one `sh` block holding
+  // a bare CLI invocation with allowlisted argv, a verbatim-relay instruction,
+  // no code of its own and no table to render.
+  const skills = [
+    { file: SKILL_PATH, name: 'view-limits', argvKey: 'view', why: 'the status surface wires to `vl.js view`' },
+    { file: SKILL_DASHBOARD_PATH, name: 'view-limits-dashboard', argvKey: 'dashboard', why: 'the dashboard launch wires to `vl.js dashboard open`' },
+    { file: SKILL_DASHBOARD_STOP_PATH, name: 'view-limits-dashboard-stop', argvKey: 'dashboardStop', why: 'the dashboard shutdown wires to `vl.js dashboard stop`' },
+    { file: SKILL_DASHBOARD_STATUS_PATH, name: 'view-limits-dashboard-status', argvKey: 'dashboardStatus', why: 'the dashboard state read wires to `vl.js dashboard status`' },
+    { file: SKILL_SETUP_XIAOMI_PATH, name: 'view-limits-setup-xiaomi', argvKey: 'setupXiaomi', why: 'the Xiaomi setup wires to the fixed `vl.js setup xiaomi-token-plan`' },
+  ];
+  const skillCommandOf = {};
+  for (const spec of skills) {
+    const skill = fs.readFileSync(spec.file, 'utf8');
+    assert.match(skill, new RegExp(`^---\\nname: ${spec.name}\\ndescription: [^\\n]+\\n---\\n`), `${spec.name}: skill frontmatter`);
+    const skillCommands = [...skill.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) => m[1].trim());
+    assert.strictEqual(skillCommands.length, 1, `${spec.name}: the skill runs exactly one command`);
+    const skillMatch = skillCommands[0].match(CLI_INVOCATION_PLAIN);
+    assert.ok(skillMatch, `${spec.name}: not a bare CLI invocation: ${skillCommands[0]}`);
+    assert.strictEqual(skillMatch[1], ROOT_EXPR, `${spec.name}: unexpected root resolution`);
+    assert.deepStrictEqual(
+      skillMatch[2].trim().split(/\s+/),
+      ALLOWED_ARGV[spec.argvKey],
+      `${spec.name}: ${spec.why}`,
+    );
+    assert.doesNotMatch(skill.split(ROOT_EXPR).join('ROOT'), FORMAT_TOOL_RE, `${spec.name}: no text-processing tools`);
+    assert.doesNotMatch(skill, /^\|/m, `${spec.name}: no markdown table — the CLI renders the table`);
+    assert.match(skill, /relay/i, `${spec.name}: instructs a relay`);
+    assert.doesNotMatch(skill, /summar|reformat|extract the|rebuild/i,
+      `${spec.name}: instruct verbatim relay, never reshaping`);
+    // Q34-A ("no arguments in any pre-approved command"): Codex has no injection
+    // and no `allowed-tools` field, but the rule still applies to what the skill
+    // tells the model to run — one fixed command line with nothing substituted
+    // but the documented root resolution.
+    const noRoot = skillCommands[0].split(ROOT_EXPR).join('ROOT');
+    assert.doesNotMatch(noRoot, /\$/, `${spec.name}: the command line substitutes nothing but the root resolution`);
+    assert.doesNotMatch(skill, /\$ARGUMENTS|\$[0-9]/,
+      `${spec.name}: no user argument reaches a shell command (Q34-A)`);
+    skillCommandOf[spec.name] = skillCommands[0];
+  }
 
   // ---- 3. LIVE: the real command lines, against the real CLI ----------------
   const gateArgv = resolveArgv(handlers.find((h) => h.event === 'PreToolUse').command);
@@ -246,6 +283,15 @@ try {
   }
   assert.deepStrictEqual(gateArgv.slice(1), ALLOWED_ARGV.gate);
   assert.deepStrictEqual(refreshArgv.slice(1), ALLOWED_ARGV.refresh);
+
+  // Issue #136: each dashboard skill's command line resolves to the real CLI
+  // with exactly the wired argv — the same verbs the Claude commands run.
+  for (const spec of skills.slice(1)) {
+    const argv = resolveArgv(skillCommandOf[spec.name]);
+    assert.strictEqual(argv[0], path.join(ROOT, 'bin', 'vl.js'), `${spec.name}: resolves to the real CLI`);
+    assert.ok(fs.existsSync(argv[0]), `${spec.name}: the CLI it names exists`);
+    assert.deepStrictEqual(argv.slice(1), ALLOWED_ARGV[spec.argvKey], `${spec.name}: unexpected argv`);
+  }
 
   // VIEW_LIMITS_ROOT must win over the git-root fallback, or the global
   // install mode documented in harness/codex/README.md would not work.

@@ -7,6 +7,7 @@ LAN view for a phone.
 
 ```sh
 vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
+vl.js dashboard open [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open]
 vl.js dashboard status [--json]
 vl.js dashboard stop
 vl.js dashboard lan enable --interface IP [--port N]   # LAN view on (off by default)
@@ -19,6 +20,49 @@ vl.js dashboard lan url                                # prints the phone link (
   returns once the daemon is listening, printing its URL. The listener binds
   port `0` (a free port) unless `--port` is given; the bound port is recorded.
   An occupied `--port` is a clean error and publishes nothing.
+- **`open` — start or reuse, then show it (Issue #136).** With nothing verified
+  running it does exactly what `start` does (same config, port and interval
+  rules, same stale-record recovery); with a verified instance running it
+  reuses it and starts nothing. Either way it prints
+  `dashboard: running at <loopback url>` and asks the operating system to open
+  that address in the default browser — `open` on macOS, `xdg-open` on Linux,
+  `cmd /c start "" <url>` on Windows, always as an argument array and never
+  through a shell string. `--no-open` prints the address and launches nothing,
+  which is the headless form.
+  - **The URL is the loopback page URL, and that is all it is.** Never the LAN
+    link, never the LAN read token, never the control nonce: nothing secret
+    rides in the URL, the argv or the output, even with the LAN view enabled.
+  - **A browser that cannot be opened is not a failed command.** The address is
+    printed, one line says the browser could not be opened and why, the daemon
+    keeps running, and the exit is `0`.
+  - **A refusal is still a refusal.** An unverified record, or a lock held by
+    another start, prints the message `start` prints for it, opens no browser,
+    and exits nonzero like `start` does.
+- **From inside a harness — three argument-free commands (owner ruling Q34-A).**
+  Claude: `/view-limits:dashboard` runs `dashboard open`,
+  `/view-limits:dashboard-stop` runs `dashboard stop` and
+  `/view-limits:dashboard-status` runs `dashboard status`. Each command file
+  injects exactly one fixed CLI call and passes the user nothing: an injected
+  command is shell text, so a substituted argument would be code running under
+  that file's own permission grant rather than data for the CLI to read. To work
+  on one route, or to pass a dashboard option, use the terminal forms. The Codex
+  skills `view-limits-dashboard`, `view-limits-dashboard-stop` and
+  `view-limits-dashboard-status`, and the OpenCode commands `/dashboard`,
+  `/dashboard-stop` and `/dashboard-status`, name the same three verbs. The
+  Claude files inject their one fixed call; the Codex and OpenCode files carry no
+  injection at all and tell the model to run the call and relay the output,
+  because OpenCode merges the user's arguments into the template before it looks
+  for shell spans ([OpenCode surface README](../harness/opencode/README.md#the-commands-inject-nothing)).
+  Both Claude guards pin the rule: `test/relay-only.test.js` requires each shim's
+  single injected call to match and allows exactly one of them, and
+  `test/shim-allowed-tools.test.js` refuses any substitution but
+  `${CLAUDE_PLUGIN_ROOT}`.
+- **`--relay` is for the surfaces, not for you.** Each of those calls carries it:
+  a shim's injected exec aborts the whole command on any non-zero exit, and
+  `status` / `stop` legitimately exit `3` / `1` when nothing is running. The flag
+  waives the exit code and nothing else — same bytes out, same daemon behavior —
+  and in a terminal you still get the real codes. See
+  [the CLI reference](cli-reference.md#the--relay-exit-waiver-shim-only).
 - **Collection.** On start, then every `--interval` seconds (default 30; flag >
   `config.json` `{"dashboard": {"intervalSeconds": N}}` > 30; allowed 15–3600). Each
   collection is the same `vl.js view --json` run, so it uses the shared

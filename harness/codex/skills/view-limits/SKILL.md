@@ -6,7 +6,7 @@ description: Show coding-plan credit and rate-limit status across all routes/acc
 Run exactly this command with the shell tool:
 
 ```sh
-node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" view
+node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" view --relay
 ```
 
 Relay the output above verbatim.

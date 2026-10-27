@@ -96,7 +96,7 @@ test('a failed fetch keeps the prior observation AND says so on stdout', () => {
   assert.match(r.stdout, /refresh failed/, 'the failure is named');
   assert.match(r.stdout, /HTTP 502: upstream unavailable/, 'the error is named');
   assert.match(r.stdout, new RegExp(PRIOR_AT), 'the retained observation time is named');
-  assert.match(r.stdout, new RegExp(`rotate via /view-limits:update ${ROUTE_ID}`),
+  assert.match(r.stdout, new RegExp(`rotate ${ROUTE_ID} via /view-limits:update`),
     'the rotate hint the inventory printed is kept');
   // The prior entry survived, with its age.
   const doc = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
@@ -120,7 +120,7 @@ test('a multi-line provider error folds into exactly one line, and no fragment l
   const expected =
     'view-limits: kimi-code-plan refresh failed (HTTP 502: upstream unavailable retry later); ' +
     'showing the last observation from 2026-10-13T09:45:00.000Z ' +
-    '(rotate via /view-limits:update kimi-code-plan)';
+    '(rotate kimi-code-plan via /view-limits:update)';
   assert.ok(r.stdout.includes(expected), `the exact folded failure line is missing:\n${r.stdout}`);
   // No fragment of the raw multi-line error reaches a line of its own.
   const lines = r.stdout.split('\n');

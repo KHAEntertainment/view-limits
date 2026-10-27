@@ -39,7 +39,7 @@ try {
   console.log('  ✓ success still prints the status JSON');
 
   assertOneLineError(check('auth'),
-    'check glm-coding-plan failed: Z.ai auth failed (code 1000: Authentication Failed) (rotate via /view-limits:update glm-coding-plan)');
+    'check glm-coding-plan failed: Z.ai auth failed (code 1000: Authentication Failed) (rotate glm-coding-plan via /view-limits:update)');
   console.log('  ✓ auth failure (status 401) is one line with a rotate hint');
 
   assertOneLineError(check('plain'),

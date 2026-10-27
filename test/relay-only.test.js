@@ -11,8 +11,12 @@
 //
 // "Formatting logic" here means field-shaping CODE or agent-facing
 // reformatting instructions:
-//   - an exec line outside the argv allowlist (pipes, `;`, redirects,
-//     subshells, sed/awk/jq/printf all fail closed by construction),
+//   - an injected command outside the argv allowlist (pipes, `;`, redirects,
+//     subshells, sed/awk/jq/printf all fail closed by construction), in ANY of
+//     the shapes the docs support — its own line, inline or indented, or a ```!
+//     fenced block — and a marker that cannot be parsed fails the file instead
+//     of being skipped (test/helpers/injected-commands.cjs is the one reader of
+//     those shapes, shared with test/shim-allowed-tools.test.js),
 //   - text-processing tools or pipeline metacharacters in any code span, or
 //     formatting tools / piping instructions in shim prose (ambiguous English
 //     words such as "paste" or "cut" are excluded from the prose scan so
@@ -35,16 +39,28 @@ const root = path.resolve(__dirname, '..');
 // fails below.
 const REQUIRED_SHIMS = [
   'commands/view-limits.md',
+  'commands/dashboard.md',
+  'commands/dashboard-stop.md',
+  'commands/dashboard-status.md',
   'skills/setup/SKILL.md',
   'skills/update/SKILL.md',
+  'skills/setup-xiaomi/SKILL.md',
 ];
 
-// Exec argv allowlist: the rendering CLI, one or more plain argv tokens,
-// an optional $ARGUMENTS passthrough, an optional 2>&1. Anything beyond that —
-// a pipe, redirect, `;`, `&&`, quoting, a different command — fails closed.
+// Exec argv allowlist: the rendering CLI and one or more plain argv tokens, with
+// an optional 2>&1. Anything beyond that — a pipe, a redirect to a file, `;`,
+// `&&`, a substitution, quoting, a different command — fails closed.
+//
+// The `$ARGUMENTS` passthrough this allowlist used to carry is GONE, by owner
+// ruling Q34-A ("no arguments in any pre-approved command"). A `!` exec is shell
+// text and Claude Code substitutes `$ARGUMENTS` as typed, so an argument is not
+// data for the CLI — it is code that runs under the file's own permission grant.
+// The PR #144 repro `/view-limits:dashboard status; "<root>/bin/vl.js" dashboard
+// lan disable` executed two vl.js calls inside one grant. Wrapping the
+// substitution in quotes does not help: the substitution is textual.
 const CLI_PREFIX = /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js"/;
 const EXEC_BODY_RE =
-  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js"(?: [A-Za-z0-9._:@/-]+)*(?: \$ARGUMENTS)?(?: 2>&1)?$/;
+  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js"(?: [A-Za-z0-9._:@/-]+)*(?: 2>&1)?$/;
 
 // The shim must instruct verbatim relay of the injected CLI output.
 const RELAY_RE = /relay the output above verbatim/i;
@@ -76,16 +92,42 @@ const PROSE_TOOL_RE = /\b(?:sed|awk|jq|grep|perl|printf|xargs|base64|column)\b/i
 const PROSE_PIPE_RE =
   /\b(?:pipe|pipes|piped|piping|redirect|redirects|redirected|redirecting)\b/i;
 
-// [QA-Low] Every exec line in the command shim must be the live view: the
-// `view` command runs the shared collector, so it is a LIVE surface — a
-// second "extra" exec line must not smuggle in a second rendering path.
-const VIEW_EXEC_RE =
-  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" view(?: 2>&1)?$/;
+// Q34-A (owner ruling, 2026-10-28): "no arguments in any pre-approved command".
+// Every scanned shim makes ONE exact, argument-free CLI call, pinned by file in
+// EXPECTED_EXEC below. The allowlist above already refuses shell shaping; this
+// refuses the OTHER half — a substituted argument is shell text, not data, so a
+// shim that takes one is not a relay surface at all.
+const EXPECTED_EXEC = {
+  'commands/view-limits.md': 'view --relay 2>&1',
+  'commands/dashboard.md': 'dashboard open --relay 2>&1',
+  'commands/dashboard-stop.md': 'dashboard stop --relay 2>&1',
+  'commands/dashboard-status.md': 'dashboard status --relay 2>&1',
+  'skills/setup/SKILL.md': 'setup --relay 2>&1',
+  'skills/update/SKILL.md': 'update --relay 2>&1',
+  // Q36-A: the Xiaomi route has its own command, so the route id is a literal in the
+  // file rather than an argument the user supplies.
+  'skills/setup-xiaomi/SKILL.md': 'setup xiaomi-token-plan --relay 2>&1',
+};
+// The prefix is matched in either documented spelling, closing quote included,
+// exactly as the shims write it.
+const expectedExecRe = (tail) => new RegExp(
+  `^"[$]{1,2}\\{?CLAUDE_PLUGIN_ROOT\\}?/bin/vl\\.js" ${tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
 
-const failures = [];
-function check(cond, msg) {
+const failures = [];function check(cond, msg) {
   if (!cond) failures.push(msg);
 }
+
+// ---- the injected-command shapes ---------------------------------------------
+//
+// Both relay-only guards read a shim's injections through ONE module,
+// test/helpers/injected-commands.cjs, so they cannot drift into disagreeing about
+// what counts as an exec: a line-initial `!`-exec, the inline form at the start
+// of a line or after whitespace (which is what makes an indented or mid-sentence
+// injection run), and a fenced block opened with ```!, whose lines are the
+// commands. A marker that cannot be parsed is a MALFORMED injection, not an
+// absent one, and is reported as a failure rather than skipping the file —
+// skipping is how a shim escapes a guard without anyone noticing.
+const { extractExecs, withoutInjections, findSubstitutions, ALLOWED_SUBSTITUTION } = require('./helpers/injected-commands.cjs');
 
 function listShims() {
   const found = [];
@@ -116,20 +158,25 @@ for (const required of REQUIRED_SHIMS) {
 
 for (const rel of shims) {
   const text = fs.readFileSync(path.join(root, rel), 'utf8');
-  const lines = text.split('\n');
 
-  // [AC1] relay source: at least one `!` exec line, each strictly allowlisted
-  // so the shim only invokes the rendering CLI and never shapes its output.
-  const execLines = lines.filter((l) => l.startsWith('!'));
-  check(execLines.length >= 1, `${rel}: no \`!\` exec line — a relay-only shim must invoke bin/vl.js`);
-  for (const line of execLines) {
-    const m = line.match(/^!`(.+)`$/);
-    check(!!m, `${rel}: exec line is not \`!\`<command>\` form: ${line.trim()}`);
-    if (!m) continue;
-    check(CLI_PREFIX.test(m[1]), `${rel}: exec line does not invoke the rendering CLI (bin/vl.js): ${m[1]}`);
-    check(EXEC_BODY_RE.test(m[1]),
-      `${rel}: exec argv outside the relay allowlist (CLI + plain args + optional $ARGUMENTS + optional 2>&1 only — no pipes, redirects, subshells, or other commands): ${m[1]}`);
+  // [AC1] relay source: EXACTLY ONE injected command — a relay-only shim does
+  // one fixed thing, and a second call (even a byte-identical one) doubles the
+  // work the surface does and is how a "fixed" shim quietly stops being fixed —
+  // in any of the documented shapes, each strictly allowlisted so the shim only
+  // invokes the rendering CLI and never shapes its output.
+  const problems = [];
+  const execs = extractExecs(rel, text, problems);
+  check(execs.length === 1,
+    execs.length === 0
+      ? `${rel}: no injected \`!\` command — a relay-only shim must invoke bin/vl.js`
+      : `${rel}: a relay-only shim injects exactly one command, found ${execs.length}: ${execs.join(' | ')}`);
+  for (const cmd of execs) {
+    check(CLI_PREFIX.test(cmd), `${rel}: exec line does not invoke the rendering CLI (bin/vl.js): ${cmd}`);
+    check(EXEC_BODY_RE.test(cmd),
+      `${rel}: exec argv outside the relay allowlist (CLI + plain args + optional 2>&1 only — no pipes, redirects, subshells, substitutions, or other commands): ${cmd}`);
   }
+  // A file this guard cannot read is a failure, never a skip.
+  for (const problem of problems) check(false, problem);
 
   // [AC3] relay-only property: the verbatim-relay instruction must be present,
   // so a future edit cannot quietly turn the shim into "summarize/format it".
@@ -137,10 +184,11 @@ for (const rel of shims) {
     `${rel}: missing the verbatim-relay instruction ("Relay the output above verbatim")`);
 
   // [AC1] no formatting logic: code fences, shaping tools, or pipeline
-  // metacharacters anywhere in the shim's code. Exec lines are already
-  // argv-allowlisted above, so they are excluded from these scans.
-  const body = lines.filter((l) => !l.startsWith('!')).join('\n');
-  check(!text.includes('```'),
+  // metacharacters anywhere in the shim's code. Injected commands are already
+  // argv-allowlisted above, so they are taken out of this scan by shape, not by
+  // whether the line happens to start with `!`.
+  const body = withoutInjections(text);
+  check(!body.includes('```'),
     `${rel}: code fences are not allowed in a relay-only shim (formatting code belongs in the CLI / view model)`);
   const spans = body.match(/`[^`\n]+`/g) || [];
   for (const span of spans) {
@@ -165,14 +213,111 @@ for (const rel of shims) {
   // [AC2] /view-limits stays a live surface: EVERY exec line in the command
   // shim must run `vl.js view` — a second "extra" exec line must not
   // smuggle in a different display path such as `vl.js report`.
-  if (rel === 'commands/view-limits.md') {
-    for (const line of execLines) {
-      const m = line.match(/^!`(.+)`$/);
-      if (!m) continue; // malformed form already failed above
-      check(VIEW_EXEC_RE.test(m[1]),
-        `${rel}: every exec must remain the live view — expected \`vl.js view\`, found: ${m[1]}`);
+  // [AC2] /view-limits stays a live surface: EVERY exec in the command shim must
+  // run `vl.js view` — a second "extra" exec must not smuggle in a different
+  // display path such as `vl.js report`.
+  // [AC2] Q34-A: every exec in a scanned shim is the one argument-free call that
+  // file is pinned to, byte for byte after the CLI prefix. A file with no entry
+  // in EXPECTED_EXEC is a failure, not an unconcern — that is what makes an
+  // argument-taking shim impossible to add quietly.
+  const tail = EXPECTED_EXEC[rel];
+  check(tail !== undefined,
+    `${rel}: no pinned CLI call — add it to EXPECTED_EXEC, or this shim is not a relay-only surface`);
+  if (tail !== undefined) {
+    for (const cmd of execs) {
+      check(expectedExecRe(tail).test(cmd),
+        `${rel}: every exec must be \`vl.js ${tail}\` — found: ${cmd}`);
+      // The argv allowlist above already has no room for a substitution; this is
+      // the explicit statement of the ruling, so a future widening of that
+      // regex cannot silently re-open it.
+      const bad = findSubstitutions(cmd);
+      check(bad.length === 0,
+        `${rel}: an injected command substitutes ${bad.join(', ')} — only ${ALLOWED_SUBSTITUTION} may appear (Q34-A): ${cmd}`);
     }
   }
+}
+
+// ---- the guidance text: no command may be advertised with an argument ---------
+//
+// Q34-A and Q36-A are both about the same boundary: a shim cannot take an
+// argument, so telling a user to run one with an argument is telling them to run
+// something that does not exist — bare `/view-limits:setup` skips the Xiaomi route
+// entirely, and `/view-limits:dashboard stop` prints a usage. That is a text
+// property of the whole tree, so it is checked as one, over the shipped surfaces
+// and the docs alike. Terminal forms (`vl.js setup <route-id>`) stay legal: the
+// CLI still takes arguments, and says so.
+//
+// The patterns are written from fragments on purpose: a guard whose source
+// contains the string it hunts would fail on itself.
+const BANNED_GUIDANCE = [
+  { name: 'the pre-Q36 Xiaomi advice', re: new RegExp('/view-limits:setu' + 'p xiaomi-token-plan') },
+  { name: 'its template form', re: new RegExp('/view-limits:setu' + 'p \\$\\{XIAOMI_ROUTE_ID\\}') },
+  { name: 'the pre-Q34 dashboard verb-as-argument', re: new RegExp('/view-limits:dashboar' + 'd (stop|status)(?![A-Za-z0-9_-])') },
+];
+
+const GUIDANCE_ROOTS = ['bin', 'lib', 'docs', 'skills', 'commands', 'harness'];
+const GUIDANCE_FILES = ['README.md'];
+const GUIDANCE_EXT = new Set(['.js', '.cjs', '.mjs', '.md', '.json', '.sh']);
+const GUIDANCE_SKIP = new Set(['node_modules', '.git', 'graft', 'build', '.agent', '.pi']);
+
+function guidanceCorpus() {
+  const out = [];
+  const walk = (dir, relDir) => {
+    for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
+      if (entry.name.startsWith('.') && entry.name !== '.dev.json') continue;
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!GUIDANCE_SKIP.has(entry.name)) walk(path.join(dir, entry.name), rel);
+      } else if (GUIDANCE_EXT.has(path.extname(entry.name))) {
+        out.push({ rel: path.join(dir, entry.name), text: fs.readFileSync(path.join(root, dir, entry.name), 'utf8') });
+      }
+    }
+  };
+  for (const d of GUIDANCE_ROOTS) {
+    if (fs.existsSync(path.join(root, d))) walk(d, d);
+  }
+  for (const f of GUIDANCE_FILES) {
+    if (fs.existsSync(path.join(root, f))) out.push({ rel: f, text: fs.readFileSync(path.join(root, f), 'utf8') });
+  }
+  return out;
+}
+
+// → every `rel:line` in `corpus` that advertises a command with an argument.
+function bannedGuidanceHits(corpus) {
+  const hits = [];
+  for (const { rel, text } of corpus) {
+    text.split('\n').forEach((line, i) => {
+      for (const { name, re } of BANNED_GUIDANCE) {
+        if (re.test(line)) hits.push(`${rel}:${i + 1}: ${name} — ${line.trim().slice(0, 100)}`);
+      }
+    });
+  }
+  return hits;
+}
+
+const corpus = guidanceCorpus();
+check(corpus.length > 40, `the guidance corpus covers only ${corpus.length} files — the scan is not looking at the tree`);
+for (const hit of bannedGuidanceHits(corpus)) check(false, hit);
+
+// The controls: a rule that has stopped matching looks exactly like a clean
+// tree, so each pattern is shown catching its own phrase, in memory, against
+// the SAME function the corpus is run through.
+for (const [name, sample] of [
+  ['Xiaomi advice', 'rerun ' + '/view-limits:setu' + 'p xiaomi-token-plan to rebuild it'],
+  ['template form', 'err(\"run /view-limits:setu' + 'p ${XIAOMI_ROUTE_ID} first\")'],
+  ['dashboard argument, sentence-final', 'then run ' + '/view-limits:dashboar' + 'd stop in a terminal'],
+  ['dashboard argument, before a full stop', 'run ' + '/view-limits:dashboar' + 'd status.'],
+  // The shapes that MUST stay legal: the hyphenated commands, and the CLI forms
+  // a terminal still takes arguments on.
+  ['legal: hyphenated commands', 'run ' + '/view-limits:dashboar' + 'd-stop, then /view-limits:dashboar' + 'd-status'],
+  ['legal: terminal argv', 'run vl.js setup xiaomi-token-plan --profile 1, or vl.js update <route-id>'],
+].map((row) => row)) {
+  const hits = bannedGuidanceHits([{ rel: `control/${name.replace(/\W+/g, '-')}.md`, text: sample }]);
+  const legal = name.startsWith('legal:');
+  check(legal ? hits.length === 0 : hits.length === 1,
+    legal
+      ? `guidance control accepted a legal phrase: "${name}" → ${hits.join(' | ')} (the ban must not swallow the hyphenated commands or the terminal forms)`
+      : `the guidance control "${name}" was not caught (hits: ${hits.length})`);
 }
 
 if (failures.length) {

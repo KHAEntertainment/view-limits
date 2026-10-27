@@ -29,6 +29,10 @@ values live only in memory for a single operation.
 
 ### Commands
 
+Inside Claude Code, `/view-limits:setup-xiaomi` runs this setup with the defaults —
+the saved profile, or `Default`. Everything below is the terminal surface, which is
+also the only place the options can be given:
+
 ```sh
 vl.js setup xiaomi-token-plan [--chrome-source PATH] [--profile "Profile 1"]
 vl.js update xiaomi-token-plan [--chrome-source PATH] [--profile "Profile 1"]
@@ -106,7 +110,7 @@ refresh picks up new cookies when Chrome supplies them.
 | Fixed message | Recovery |
 |---|---|
 | `chrome cookie store unreadable` | The selected profile's cookie store is missing/unreadable — check `--profile`/`--chrome-source`. |
-| `Chrome key unavailable — rerun /view-limits:setup xiaomi-token-plan` | Helper missing or denied. Setup rebuilds it; deterministic helper failures are not retried until setup/update runs. |
+| `Chrome key unavailable — rerun /view-limits:setup-xiaomi` | Helper missing or denied. Setup rebuilds it; deterministic helper failures are not retried until setup/update runs. |
 | `console cookies missing — open … and log in` | Open the Xiaomi dashboard in the selected Chrome profile and log in. |
 | `Xiaomi private state is unsafe — …` | Delete the `xiaomi` folder under the view-limits data directory, then rerun setup (symlinked/foreign state is refused, never followed). |
 | `Xiaomi private state could not be cleared — …` | The `xiaomi` state folder exists but is not writable. Make it writable or delete it, then rerun setup. (Stricter than the old reset: an empty read-only `0500` folder is refused here too.) |

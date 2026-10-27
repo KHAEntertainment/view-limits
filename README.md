@@ -28,7 +28,7 @@ There's an optional gate too. A `PreToolUse` hook resolves each sub-agent dispat
 - It denies only a route whose status is fresh and unambiguously exhausted. Unknown, stale, unmapped and ambiguous routes are allowed.
 - Anything unreadable in its own config counts as `off`.
 
-An optional dashboard daemon keeps the status fresh in the background and serves a page on `127.0.0.1`, with an opt-in, read-only view for your phone. Built-in provider rows show the provider's logo (bundled with the plugin, nothing is fetched), and custom providers get a generic icon.
+An optional dashboard daemon keeps the status fresh in the background and serves a page on `127.0.0.1`, with an opt-in, read-only view for your phone. Built-in provider rows show the provider's logo (bundled with the plugin, nothing is fetched), and custom providers get a generic icon. `/view-limits:dashboard` brings it up: it starts the daemon if it isn't running, reuses it if it is, and opens the page in your browser, so you never have to go to a terminal to look at your limits.
 
 Your keys stay out of chat. `/view-limits:setup` opens a local browser form, and the keys go to the macOS Keychain, or to an AES-256-GCM encrypted file on other systems.
 
@@ -47,9 +47,40 @@ Your keys stay out of chat. `/view-limits:setup` opens a local browser form, and
 
 You'll see one block per route you added: its state, the quota windows or balance, and when it resets. A route whose numbers can't be proven fresh shows `unknown`, never `healthy`.
 
+Optional: run `/view-limits:dashboard` to keep that view in a page instead. It starts the background daemon if it isn't running, reuses it if it is, and opens `http://127.0.0.1:<port>/` in your browser. `/view-limits:dashboard-stop` shuts it down and `/view-limits:dashboard-status` reports what it last collected; `vl.js dashboard open --no-open` prints the address and opens nothing. The three commands take no arguments — a command that passes one would be handing shell text to a pre-approved call.
+
 Nothing is blocked yet. The gate starts off, and the cache refreshes when you run `/view-limits` (set `refreshOnSessionStart` to warm it at session start). To get advice in the model's context, or to turn blocking on, see [Hooks](docs/configuration.md#hooks).
 
 Codex and OpenCode run the same `vl.js view` command: [Codex setup](harness/codex/README.md), [OpenCode setup](harness/opencode/README.md). To run from a checkout, use `claude --plugin-dir /path/to/view-limits`. More in [Install](docs/install.md).
+
+Every command here runs its CLI without asking you first: each one declares
+`allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)`, which pre-approves
+this plugin's own `vl.js` and nothing else. Claude Code checks a command file's
+injected `` !`…` `` call against your permission rules while the file renders,
+and outside auto mode anything that is not allowed aborts the whole invocation,
+so the grant is what makes `/view-limits` print instead of failing. One honest
+caveat: the docs state that substitution inside `allowed-tools` for a plugin
+*skill*, and a plugin *command* file accepting the same field is documented
+adjacent to that, not spelled out — the first real session settles it.
+
+Those commands take no arguments, and that is deliberate rather than an
+oversight. A `!` exec is shell text, and Claude Code substitutes `$ARGUMENTS` as
+typed, so an argument in one of those files would be code running under the very
+grant above — not data for the CLI to read. So the surfaces that need a second
+verb got a second command (`/view-limits:dashboard-stop`,
+`/view-limits:dashboard-status`), and the things that genuinely take a route id
+are terminal commands: `vl.js setup <route-id>`, `vl.js update <route-id>`,
+`vl.js dashboard lan enable --interface <ip>`. `test/relay-only.test.js` and
+`test/shim-allowed-tools.test.js` pin the one fixed call per file and reject any
+substitution but `${CLAUDE_PLUGIN_ROOT}`.
+
+Each of those injected calls also carries `--relay`, because Claude Code aborts a
+command whose injected exec exits non-zero — and "the dashboard is not running"
+is a normal answer, not a failure (`dashboard status` exits `3`, `dashboard stop`
+exits `1`). The flag waives the exit code and nothing else: same bytes out, and
+every exit code in a terminal, in a hook and for the gate is unchanged. It is
+refused by any other command. See [the CLI
+reference](docs/cli-reference.md#the--relay-exit-waiver-shim-only).
 
 ## Works with
 
@@ -66,7 +97,7 @@ Codex and OpenCode run the same `vl.js view` command: [Codex setup](harness/code
 Also supported:
 
 - **Your own OpenAI- or Anthropic-compatible route.** Wire compatibility doesn't give you a quota API, so view-limits reads only the documented rate-limit headers from one read-only `GET` you point it at. Verified with documented-format fixtures, not a live account.
-- **Xiaomi Token Plan.** Experimental and opt-in, macOS only. It reads Xiaomi's console through your Chrome session. Two of three live acceptance checks have passed.
+- **Xiaomi Token Plan.** Experimental and opt-in, macOS only. Set it up with `/view-limits:setup-xiaomi` — its own command, because it reads Xiaomi's console through your Chrome session rather than a stored key. Two of three live acceptance checks have passed.
 - **Alibaba Cloud Coding Plan and StepFun Step Plan.** Implemented, not live-tested (awaiting owner accounts, [#53](https://github.com/KHAEntertainment/view-limits/issues/53)). StepFun documents no quota API, so that route is shown as unmonitored and never denies.
 - **GLM.** Authentication and error handling are verified live; the quota fields are still checked against fixtures only ([#1](https://github.com/KHAEntertainment/view-limits/issues/1)).
 
@@ -78,7 +109,7 @@ Kimi needs a `sk-kimi-*` Coding Plan key; a Moonshot `sk-*` key won't work. Kimi
 - [Xiaomi Token Plan](docs/xiaomi.md): requirements, setup, what the numbers mean, fixing access errors.
 - [Install](docs/install.md): the marketplace and checkout installs, and the Codex and OpenCode harnesses.
 - [Configuration](docs/configuration.md): credential storage, how `config.json` is assembled, hooks and gate modes.
-- [Dashboard](docs/dashboard.md): the daemon, the loopback page, the phone view.
+- [Dashboard](docs/dashboard.md): the daemon, the loopback page, the phone view, and `/view-limits:dashboard`.
 - [The view and its schema](docs/view-schema.md): `vl.js view`, the JSON envelope, what it guarantees.
 - [CLI reference](docs/cli-reference.md): every command and exit code.
 - [Development](docs/development.md): architecture, refresh and locking, tests, how releases are cut. Also see [credential receipts](docs/credential-receipts.md) (the first-run notice), [Jev recommendation](docs/jev-recommendation.md) and [Jev readiness](docs/jev-readiness.md) (the advisory model recommendation and its readiness gate).

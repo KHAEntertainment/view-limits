@@ -21,10 +21,11 @@
 //   vl.js dashboard start|stop|status  the persistent dashboard daemon (#61): one
 //                                     per data dir, loopback-only, interval
 //                                     collection, GET /api/status.
+//   vl.js dashboard open [--no-open]   start or reuse that daemon, print its
+//                                     address and open it in the browser (#136).
 //   vl.js recommend --json [--task J]  advisory harness/model/route/profile
 //           [--policy J]               recommendation over configured routes;
 //                                     deterministic + zero-I/O (Jev dormant).
-
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -511,7 +512,9 @@ async function check(routeId) {
   } catch (e) {
     // One line, no stack: provider bodies can carry newlines.
     const msg = String((e && e.message) || e).replace(/\s+/g, ' ').trim();
-    const hint = e && e.status === 401 ? ` (rotate via /view-limits:update ${routeId})` : '';
+    // Q34-A: the route id is context, not an argument — `/view-limits:update`
+    // takes none, and the command line below is what a user copies.
+    const hint = e && e.status === 401 ? ` (rotate ${routeId} via /view-limits:update)` : '';
     err(`check ${routeId} failed: ${msg}${hint}`);
   }
   process.stdout.write(JSON.stringify(withBasis(st), null, 2) + '\n');
@@ -1213,7 +1216,7 @@ async function grantInteractiveKeyOrFail() {
   try {
     await xiaomiSession.grantInteractiveKey(dataDir());
   } catch {
-    err('Chrome key access was not granted — rerun /view-limits:setup xiaomi-token-plan, then click "Always Allow" (not "Allow") in the macOS dialog.');
+    err('Chrome key access was not granted — rerun /view-limits:setup-xiaomi, then click "Always Allow" (not "Allow") in the macOS dialog.');
   }
 }
 
@@ -1272,9 +1275,9 @@ async function setupXiaomi(cfg, options) {
         err('helper build requires macOS — the Chrome cookie fallback is macOS-only.');
       }
       if (code === 'helper-build-failed') {
-        err('helper build failed — install the Xcode command line tools (xcode-select --install), then rerun /view-limits:setup xiaomi-token-plan.');
+        err('helper build failed — install the Xcode command line tools (xcode-select --install), then rerun /view-limits:setup-xiaomi.');
       }
-      err('helper build failed — rerun /view-limits:setup xiaomi-token-plan.');
+      err('helper build failed — rerun /view-limits:setup-xiaomi.');
     }
     log(built && built.skippedRebuild
       ? 'helper unchanged — identity preserved'
@@ -1307,10 +1310,10 @@ async function revalidateXiaomiSource(cfg, options) {
   const profile = options.profile !== null && options.profile !== undefined ? options.profile : current.chromeProfile;
   const source = options.chromeSource ? expandHome(options.chromeSource) : current.chromeSource;
   if (!validProfile(profile)) {
-    err('Chrome profile not configured — run /view-limits:setup xiaomi-token-plan (use "Default" or "Profile <number>").');
+    err('Chrome profile not configured — run /view-limits:setup-xiaomi (use "Default" or "Profile <number>").');
   }
   if (typeof source !== 'string' || !source.length) {
-    err('Chrome source not configured — run /view-limits:setup xiaomi-token-plan.');
+    err('Chrome source not configured — run /view-limits:setup-xiaomi.');
   }
   prevalidateXiaomiStateOrFail();
   await grantInteractiveKeyOrFail();
@@ -1321,7 +1324,7 @@ async function revalidateXiaomiSource(cfg, options) {
 
 async function updateXiaomi(cfg, options) {
   const route = cfg.routes.find((r) => r.id === options.routeId);
-  if (!route) err(`${XIAOMI_ROUTE_ID} is not configured — run /view-limits:setup ${XIAOMI_ROUTE_ID} first.`);
+  if (!route) err(`${XIAOMI_ROUTE_ID} is not configured — run /view-limits:setup-xiaomi first.`);
   if (options.key !== null) err('xiaomi-token-plan stores no key — no paste form.');
   if (options.headless) err('xiaomi-token-plan stores no key — --headless does not apply.');
   await revalidateXiaomiSource(cfg, options);
@@ -1934,7 +1937,9 @@ function failedRouteLines(result, what, withRotate) {
     const kept = (r.retained === true && observedAt)
       ? `showing the last observation from ${diagText(observedAt)}`
       : 'no cached observation to fall back to';
-    const rotate = withRotate ? ` (rotate via /view-limits:update ${diagText(r.id)})` : '';
+    // Q34-A: id first, command last — the slash command takes no argument, and
+    // `vl.js update <id>` remains the way to rotate exactly one route.
+    const rotate = withRotate ? ` (rotate ${diagText(r.id)} via /view-limits:update)` : '';
     lines.push(`view-limits: ${diagText(r.id)} ${what} failed (${error}); ${kept}${rotate}`);
   }
   return lines;
@@ -2181,9 +2186,10 @@ async function viewCmd(args) {
   if (result.outcome === collector.OUTCOME.FAILED) process.exitCode = 1;
 }
 
-// ---- dashboard (Issue #61) ---------------------------------------------------
+// ---- dashboard (Issue #61, launch path Issue #136) ---------------------------
 //
 //   vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
+//   vl.js dashboard open  [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open]
 //   vl.js dashboard stop
 //   vl.js dashboard status [--json]
 //
@@ -2194,12 +2200,17 @@ async function viewCmd(args) {
 // process `start` spawns; it is not a user command.
 
 const DASHBOARD_USAGE = 'usage: vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS] | stop | status [--json]\n' +
+  '       vl.js dashboard open [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open]\n' +
   '       vl.js dashboard lan enable --interface IP [--port N] | lan disable | lan rotate | lan url';
 
 // Exit codes: 0 ok · 1 failure or refusal · 2 usage · 3 status: not running
 // (stopped, stale or unverified) · 9/10 config refused (shared with view).
 const DASHBOARD_EXIT_USAGE = 2;
 const DASHBOARD_EXIT_NOT_RUNNING = 3;
+// How long `open` waits for the browser opener to answer. An opener that has
+// not answered by then already has the address, so `open` never blocks on a
+// browser; the child is detached and outlives this process.
+const OPENER_WAIT_MS = 3000;
 
 function dashboardUsage(msg) {
   process.stderr.write(`view-limits: ${msg}\n${DASHBOARD_USAGE}\n`);
@@ -2256,6 +2267,130 @@ function printDashboardStatus(info, asJson) {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
+// The browser opener for `dashboard open` (Issue #136). ONE argv array, never a
+// shell string: the URL is its own element, so nothing in it can be read back as
+// shell syntax. macOS `open`, Linux `xdg-open`, Windows `cmd /c start "" <url>`
+// — the empty element is `start`'s window title, which is what keeps the URL a
+// title argument rather than the thing to open. What is handed over is always
+// the loopback page URL: never the LAN link, the LAN read token or the control
+// nonce.
+//
+// This is a second opener rather than a reuse of the credential form's
+// `openBrowser` on purpose: that one fires the spawn and forgets it, so it can
+// neither report a missing browser (which `open` must do in one line without
+// failing the command) nor detach, and a browser process that outlives the CLI
+// would hold `dashboard open` in the foreground. Fixing that means editing the
+// setup path, which is not this command's file.
+function openerCommand(url, platform) {
+  if (platform === 'win32') return { file: 'cmd', args: ['/c', 'start', '', url] };
+  if (platform === 'darwin') return { file: 'open', args: [url] };
+  return { file: 'xdg-open', args: [url] };
+}
+
+// → { ok: true } | { ok: false, error }. Detached with no stdio, so the
+// opener cannot hold this process open, and a slow one is not waited on past
+// OPENER_WAIT_MS: the address has already been handed over.
+function openDashboardPage(url, { platform = process.platform, spawnFn = spawn, waitMs = OPENER_WAIT_MS } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      const cmd = openerCommand(url, platform);
+      child = spawnFn(cmd.file, cmd.args, { detached: true, stdio: 'ignore' });
+    } catch (e) {
+      resolve({ ok: false, error: escapeControlChars(openerProblem(e)) });
+      return;
+    }
+    let settled = false;
+    const settle = (outcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    // No answer in the window: treated as opened, and the detached child
+    // keeps the browser after this process exits.
+    const timer = setTimeout(() => settle({ ok: true }), waitMs);
+    child.on('error', (e) => settle({ ok: false, error: escapeControlChars(openerProblem(e)) }));
+    child.on('exit', (code) => settle(code === 0
+      ? { ok: true }
+      : { ok: false, error: `the browser opener exited ${code}` }));
+    if (typeof child.unref === 'function') child.unref();
+  });
+}
+
+// A diagnostic is one line and free of control characters: it reaches stdout
+// and, through the command shim, a chat transcript. Node names the failing
+// command in the message (`spawn open ENOENT`), which is what a user needs:
+// a bare errno code says only that something is missing, not what.
+function openerProblem(e) {
+  if (!e) return 'the browser opener could not be started';
+  return String(e.message || e.code || e).replace(/^Error:\s*/, '');
+}
+
+// The start path, shared by `dashboard start` and `dashboard open` (Issue
+// #136) so the two cannot drift: the confirmed config read, the LAN
+// validation, the daemon spawn and every refusal message, unchanged. A
+// failure still exits through `err` with the same text and the same code.
+// On success it returns the loopback URL. `opts.quiet` (set by `open`)
+// prints neither success line; `opts.reuse` (set by `open`) answers a
+// verified running instance with its URL instead of the refusal.
+async function dashboardStart(dir, rest, dashboard, lanLib, opts) {
+  const quiet = opts.quiet === true;
+  const reuse = opts.reuse === true;
+  const flags = parseDashboardFlags(rest, ['--port', '--host', '--interval']);
+  const port = flags['--port'] === undefined ? 0 : strictInteger(flags['--port']);
+  const flagInterval = flags['--interval'] === undefined ? undefined : strictInteger(flags['--interval']);
+  const bind = dashboard.validateBind({ host: flags['--host'], port });
+  if (!bind.ok) err(`dashboard start: ${bind.error}`);
+  // The confirmed config read: a configuration that cannot be proven
+  // refuses (exit 9 / 10) instead of starting a daemon on guessed defaults.
+  const cfg = loadConfig();
+  const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
+  if (!interval.ok) err(`dashboard start: ${interval.error}`);
+  // The LAN view (off unless config.dashboard.lan.enabled): a bad value or
+  // an interface not on this machine refuses; a missing or unsafe read
+  // token refuses with exit 10. The token itself never goes into argv.
+  const lanCfg = lanLib.resolveLanConfig(cfg);
+  if (!lanCfg.ok) err(`dashboard start: ${lanCfg.error}`);
+  if (lanCfg.enabled) {
+    const tok = lanLib.readToken(dir);
+    if (!tok.ok) exitLanToken(`dashboard start: ${lanLib.tokenProblem(tok.reason)}`);
+  }
+  const t = cfg.gate && cfg.gate.constrainedThreshold;
+  const started = await dashboard.startDaemon({
+    dir,
+    daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds),
+      ...(typeof t === 'number' && t > 0 && t < 1 ? ['--threshold', String(t)] : []),
+      ...(lanCfg.enabled ? ['--lan-address', lanCfg.address, '--lan-port', String(lanCfg.port)] : [])],
+  });
+  if (started.ok) {
+    if (!quiet) {
+      process.stdout.write(`dashboard: started at ${started.url} (pid ${started.pid}, interval ${started.intervalSeconds}s${interval.source === 'default' ? '' : `, from ${interval.source}`})\n`);
+      if (started.lan) process.stdout.write(`dashboard: LAN view (read-only) on http://${lanLib.hostFor(started.lan.address, started.lan.port)}/ — \`vl.js dashboard lan url\` prints the phone link\n`);
+    }
+    return started.url;
+  }
+  if (started.reason === 'already-running' || started.reason === 'held') {
+    const info = started.info || await waitForDashboard(dashboard, dir);
+    if (info && info.state === 'running') {
+      // `open` got here after `status` reported nothing running, so an
+      // instance that appeared in the meantime is reused, not refused.
+      if (reuse) return info.url;
+      err(`dashboard start: already running at ${info.url} (pid ${info.pid})`);
+    }
+    err('dashboard start: another start is in progress or holds the ownership lock; run `dashboard status`');
+  }
+  const reasons = {
+    unverified: 'a record names an instance that could not be verified; nothing was signalled — run `dashboard status`',
+    'bind-failed': `could not listen on ${bind.host}:${bind.port}${started.code ? ` (${started.code})` : ''}; nothing was published`,
+    'no-identity': 'the process start time could not be read (is `ps` available?), so the daemon would be unverifiable after a crash',
+    'ready-timeout': 'the daemon did not report ready in time (see dashboard.log in the data directory)',
+    'lan-bind-failed': `could not listen on the LAN interface${lanCfg.enabled ? ` ${lanLib.hostFor(lanCfg.address, lanCfg.port)}` : ''}${started.code ? ` (${started.code})` : ''}; nothing was published — run \`vl.js dashboard lan disable\`, or pick another port with \`vl.js dashboard lan enable --interface <ip> --port N\``,
+    'lan-token-unreadable': lanLib.tokenProblem('unreadable'),
+  };
+  err(`dashboard start: ${reasons[started.reason] || `${started.reason}${started.error ? ` (${started.error})` : ''}`}`);
+}
+
 async function dashboardCmd(args) {
   const sub = args[0];
   const rest = args.slice(1);
@@ -2283,58 +2418,41 @@ async function dashboardCmd(args) {
     err(`dashboard stop: refused (${res.reason}${res.status ? ` ${res.status}` : ''})`);
   }
 
-  if (sub === 'start' || sub === '__daemon') {
+  if (sub === 'start') { await dashboardStart(dir, rest, dashboard, lanLib, {}); return; }
+
+  if (sub === 'open') {
+    // Issue #136: start-or-reuse, print the address, then hand it to the
+    // browser. `--no-open` is the headless form: the address and nothing
+    // else, and it launches nothing.
+    const flags = parseDashboardFlags(rest.map((a) => (a === '--no-open' ? '--no-open=1' : a)),
+      ['--port', '--host', '--interval', '--no-open']);
+    const startArgs = rest.filter((a) => a !== '--no-open' && !a.startsWith('--no-open='));
+    // Reuse only a VERIFIED running instance: statusDaemon confirms the
+    // process identity and the loopback answer before it reports `running`
+    // (C-002), and reuse starts nothing. A stale record, an absent one and a
+    // corrupt one all go through the start path, which recovers the stale
+    // record and refuses an unverified one with the existing message and code.
+    const info = await dashboard.statusDaemon(dir);
+    const url = info.state === 'running'
+      ? info.url
+      : await dashboardStart(dir, startArgs, dashboard, lanLib, { quiet: true, reuse: true });
+    process.stdout.write(`dashboard: running at ${url}\n`);
+    if (flags['--no-open'] === undefined) {
+      // A missing or failing opener is not a failed command: the address is
+      // printed, the daemon stays running, and the exit stays 0.
+      const opened = await openDashboardPage(url);
+      if (!opened.ok) process.stdout.write(`dashboard: browser not opened (${opened.error})\n`);
+    }
+    return;
+  }
+
+  if (sub === '__daemon') {
     // `--threshold` is internal: `start` hands the daemon the gate's threshold
     // from the config it has already confirmed, so the page colours bars at it.
-    const flags = parseDashboardFlags(rest, sub === '__daemon'
-      ? ['--port', '--host', '--interval', '--threshold', '--lan-address', '--lan-port']
-      : ['--port', '--host', '--interval']);
+    const flags = parseDashboardFlags(rest, ['--port', '--host', '--interval', '--threshold', '--lan-address', '--lan-port']);
     const port = flags['--port'] === undefined ? 0 : strictInteger(flags['--port']);
-    const flagInterval = flags['--interval'] === undefined ? undefined : strictInteger(flags['--interval']);
     const bind = dashboard.validateBind({ host: flags['--host'], port });
-    if (!bind.ok) err(`dashboard ${sub === 'start' ? 'start' : 'daemon'}: ${bind.error}`);
-    if (sub === 'start') {
-      // The confirmed config read: a configuration that cannot be proven
-      // refuses (exit 9 / 10) instead of starting a daemon on guessed defaults.
-      const cfg = loadConfig();
-      const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
-      if (!interval.ok) err(`dashboard start: ${interval.error}`);
-      // The LAN view (off unless config.dashboard.lan.enabled): a bad value or
-      // an interface not on this machine refuses; a missing or unsafe read
-      // token refuses with exit 10. The token itself never goes into argv.
-      const lanCfg = lanLib.resolveLanConfig(cfg);
-      if (!lanCfg.ok) err(`dashboard start: ${lanCfg.error}`);
-      if (lanCfg.enabled) {
-        const tok = lanLib.readToken(dir);
-        if (!tok.ok) exitLanToken(`dashboard start: ${lanLib.tokenProblem(tok.reason)}`);
-      }
-      const t = cfg.gate && cfg.gate.constrainedThreshold;
-      const started = await dashboard.startDaemon({
-        dir,
-        daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds),
-          ...(typeof t === 'number' && t > 0 && t < 1 ? ['--threshold', String(t)] : []),
-          ...(lanCfg.enabled ? ['--lan-address', lanCfg.address, '--lan-port', String(lanCfg.port)] : [])],
-      });
-      if (started.ok) {
-        process.stdout.write(`dashboard: started at ${started.url} (pid ${started.pid}, interval ${started.intervalSeconds}s${interval.source === 'default' ? '' : `, from ${interval.source}`})\n`);
-        if (started.lan) process.stdout.write(`dashboard: LAN view (read-only) on http://${lanLib.hostFor(started.lan.address, started.lan.port)}/ — \`vl.js dashboard lan url\` prints the phone link\n`);
-        return;
-      }
-      if (started.reason === 'already-running' || started.reason === 'held') {
-        const info = started.info || await waitForDashboard(dashboard, dir);
-        if (info && info.state === 'running') err(`dashboard start: already running at ${info.url} (pid ${info.pid})`);
-        err('dashboard start: another start is in progress or holds the ownership lock; run `dashboard status`');
-      }
-      const reasons = {
-        unverified: 'a record names an instance that could not be verified; nothing was signalled — run `dashboard status`',
-        'bind-failed': `could not listen on ${bind.host}:${bind.port}${started.code ? ` (${started.code})` : ''}; nothing was published`,
-        'no-identity': 'the process start time could not be read (is `ps` available?), so the daemon would be unverifiable after a crash',
-        'ready-timeout': 'the daemon did not report ready in time (see dashboard.log in the data directory)',
-        'lan-bind-failed': `could not listen on the LAN interface${lanCfg.enabled ? ` ${lanLib.hostFor(lanCfg.address, lanCfg.port)}` : ''}${started.code ? ` (${started.code})` : ''}; nothing was published — run \`vl.js dashboard lan disable\`, or pick another port with \`vl.js dashboard lan enable --interface <ip> --port N\``,
-        'lan-token-unreadable': lanLib.tokenProblem('unreadable'),
-      };
-      err(`dashboard start: ${reasons[started.reason] || `${started.reason}${started.error ? ` (${started.error})` : ''}`}`);
-    }
+    if (!bind.ok) err(`dashboard daemon: ${bind.error}`);
 
     // __daemon: the detached process. It reports through fd 3 (the ready
     // channel) and logs to stderr, which `start` pointed at dashboard.log.
@@ -2719,9 +2837,64 @@ function sessionStart() {
 
 // ---- dispatch ---------------------------------------------------------------
 
+// ---- the shim-only exit waiver (`--relay`, D2-a) -----------------------------
+//
+// A command shim's injected `!` exec is run by Claude Code while the file
+// renders, and the skills docs are explicit about what a non-zero exit means
+// there: "A failed command aborts the entire skill invocation, not just its own
+// placeholder. Claude never sees the skill content for that invocation." (See
+// https://code.claude.com/docs/en/skills#when-an-injected-command-fails.) For a
+// surface whose whole job is to REPORT state, that turns the ordinary answers
+// into an error banner: `dashboard status` exits 3 when nothing runs, `dashboard
+// stop` exits 1, and `view`/`setup`/`update` exit 8/9/10 when the configuration
+// is refused. Those exit codes are a contract for terminals, scripts and the
+// gate, so they cannot change. `--relay` is a per-invocation waiver for the
+// surfaces that cannot read an exit code:
+//
+//   · the output is byte-identical — same bytes, same order, same streams:
+//     nothing in the flag touches rendering, collection or side effects;
+//   · the process exit is 0 whatever the command decided;
+//   · it is accepted ONLY on the six calls the shims actually make. Everywhere
+//     else it is a usage refusal that itself exits 2, before the waiver is
+//     installed — a waiver that also covered `serve`, `provider`, `check` or the
+//     detached `__daemon` would silently change behaviour those paths depend on,
+//     which is more than an exit code.
+const RELAY_FLAG = '--relay';
+const RELAY_COMMANDS = new Set(['view', 'setup', 'update']);
+const RELAY_DASHBOARD_SUBS = new Set(['open', 'stop', 'status']);
+
+// Validate the waiver before anything else runs. Not allowed → one line and exit
+// 2, with the process untouched, so the refusal behaves like any other usage
+// error rather than a waived one.
+function relayWanted(cmdName, argv) {
+  const at = argv.indexOf(RELAY_FLAG);
+  if (at === -1) return -1;
+  const allowed = RELAY_COMMANDS.has(cmdName)
+    || (cmdName === 'dashboard' && RELAY_DASHBOARD_SUBS.has(argv[0]));
+  if (!allowed) {
+    process.stderr.write(`view-limits: ${RELAY_FLAG} is the command-surface exit waiver only — it belongs on view, setup, update or dashboard open|stop|status\n`);
+    process.exit(2);
+  }
+  return at;
+}
+
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
 const hasFlag = (n) => args.includes(n);
+
+// The waiver: taken out of argv so no command's own flag parser sees an unknown
+// option, then `process.exit` reports 0 for every explicit exit. Sites that set
+// `process.exitCode` and return are handled at the foot of the dispatch, where
+// the code is reset before the event loop drains — so stdout/stderr still flush
+// in full and the bytes a user sees are exactly the bytes the unflagged run
+// wrote.
+const RELAY_AT = relayWanted(cmd, args);
+const RELAY = RELAY_AT !== -1;
+if (RELAY) {
+  args.splice(RELAY_AT, 1);
+  const realExit = process.exit;
+  process.exit = function relayExit() { return realExit.call(process, 0); };
+}
 
 // Commands that may run the one-time route migration (see
 // lib/provider-lifecycle.js migrateFromVault). The list is an ALLOWLIST, not an exclusion, because
@@ -2871,6 +3044,12 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     case 'recommend': return recommendCmd(args);
     case 'dashboard': return dashboardCmd(args);
     default:
-      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|open [--no-open]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
   }
-})();
+})().then(() => {
+  // D2-a: the commands that report a state through `process.exitCode` (status
+  // not running = 3, a refused configuration = 8/9/10, a store failure = 1) are
+  // waived here rather than at the writer, so no call site has to remember the
+  // flag and no unflagged path can be affected by it.
+  if (RELAY) process.exitCode = 0;
+});

@@ -125,11 +125,17 @@ function codexSh() {
   assert.strictEqual(m.length, 1, 'the Codex skill runs exactly one command');
   return m[0][1].trim();
 }
+// The OpenCode command files inject nothing (a bang-backtick in one would be
+// expanded with the user's arguments already merged into it, so OpenCode would
+// run whatever the argument added). Their fixed call is the one in the `sh`
+// block, which is what the model is told to run — read it the same way the
+// Codex skill is read.
 function openCodeExec() {
   const src = fs.readFileSync(
     path.join(ROOT, 'harness', 'opencode', 'command', 'view-limits.md'), 'utf8');
-  const m = [...src.matchAll(/!`([^`]+)`/g)];
-  assert.strictEqual(m.length, 1, 'the OpenCode command has exactly one exec line');
+  assert.ok(!/!`/.test(src), 'the OpenCode command must contain no bang-backtick sequence');
+  const m = [...src.matchAll(/```sh\n([\s\S]*?)```/g)];
+  assert.strictEqual(m.length, 1, 'the OpenCode command names exactly one fixed CLI call');
   return m[0][1].trim();
 }
 
@@ -199,10 +205,17 @@ test('Claude, Codex and OpenCode surfaces all resolve to the identical bin/vl.js
 
   // Each surface gets the ONE subcommand it is documented to dispatch, and
   // nothing else — a harness may not grow private arguments. Since #60 every
-  // user surface resolves the SAME live view.
-  assert.deepStrictEqual(claude, ['view'], 'Claude dispatches exactly `view`');
-  assert.deepStrictEqual(codex, ['view'], 'Codex dispatches exactly `view`');
-  assert.deepStrictEqual(opencode, ['view'], 'OpenCode dispatches exactly `view`');
+  // user surface resolves the SAME live view. The one thing all three may
+  // carry is `--relay`, the shim-only exit waiver (D2-a): identical on every
+  // surface, never an argument, and never anything but the exit code. If it
+  // ever differs between them, this fails.
+  assert.deepStrictEqual(claude, ['view', '--relay'], 'Claude dispatches exactly `view --relay`');
+  assert.deepStrictEqual(codex, ['view', '--relay'], 'Codex dispatches exactly `view --relay`');
+  assert.deepStrictEqual(opencode, ['view', '--relay'], 'OpenCode dispatches exactly `view --relay`');
+  for (const argv of [claude, codex, opencode]) {
+    assert.ok(!argv.some((a) => a.includes('ARGUMENTS') || /^\$/.test(a)),
+      'a surface may pass no substituted argument (Q34-A)');
+  }
 });
 
 test('the harness surfaces resolve their own checkout outside a git repo (no Claude vars needed)', () => {

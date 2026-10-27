@@ -206,7 +206,10 @@ async function funnel(body, { collectionOutcome = 'completed' } = {}) {
   const unknownFact = (reason) => ({
     value: null, provenance: 'unknown', source: null, observedAt: null, freshUntil: null, reason,
   });
-  function row(reason) {
+  // `reason` lands on the state FACT (code-authored by the snapshot);
+  // `adapterReason` lands on the RESOURCE (`detail.reason` after the snapshot's
+  // whitelisted carry) — the provider-controlled path.
+  function row(reason, adapterReason = null) {
     return {
       id: ROUTE_ID,
       configured: true,
@@ -219,6 +222,7 @@ async function funnel(body, { collectionOutcome = 'completed' } = {}) {
         windows: [],
         balance: null,
         error: null,
+        reason: adapterReason,
         basis: unknownFact('cached-field-absent'),
         periodEnd: unknownFact('cached-field-absent'),
         resetAt: unknownFact('cached-field-absent'),
@@ -261,6 +265,56 @@ async function funnel(body, { collectionOutcome = 'completed' } = {}) {
     const r = view.routes[0];
     assert.ok(!r.reasonCodes.includes('some-provider-reason'));
     assert.ok(r.reasonCodes.includes('no-windows-reported'), JSON.stringify(r.reasonCodes));
+  });
+
+  // PR #143 review finding — the ADAPTER-declared reason (`detail.reason`) is
+  // provider-controlled text. Filtering reasonCodes downstream was not enough:
+  // `stateReason` is ALSO the route's rendered note, so an unregistered value
+  // reached the text view. The vocabulary check now happens at the assignment.
+  test('an unregistered ADAPTER reason reaches no surface at all (JSON, text, LAN)', () => {
+    const SENTINEL = 'provider-said-something';
+    const view = vm.buildViewSchema(
+      { routes: [row(null, SENTINEL)] },
+      { now: NOW, collection: collection('completed') },
+    );
+    const r = view.routes[0];
+    assert.strictEqual(r.state, 'unknown');
+    assert.strictEqual(r.stateReason, null, 'the rendered note is not the provider string');
+    assert.ok(r.reasonCodes.includes('no-windows-reported'), JSON.stringify(r.reasonCodes));
+    assert.ok(!r.reasonCodes.includes(SENTINEL));
+    assert.ok(!JSON.stringify(view).includes(SENTINEL), 'the JSON envelope carries no provider text');
+    assert.ok(!vm.renderViewText(view).join('\n').includes(SENTINEL), 'the text view carries no provider text');
+
+    const lan = redactForLan({
+      schemaVersion: view.schemaVersion, status: 'ok', daemon: { intervalSeconds: 60 },
+      collection: { state: 'idle', lastAttempt: { outcome: 'completed' } }, view,
+    });
+    assert.ok(!JSON.stringify(lan).includes(SENTINEL), 'the LAN projection carries no provider text');
+    assert.ok(lan.view.routes[0].reasonCodes.includes('no-windows-reported'));
+  });
+
+  test('an adapter reason INSIDE the vocabulary still names the route and suppresses the fallback', () => {
+    // The same path, with a registered code: this is what MiniMax publishes.
+    const view = vm.buildViewSchema(
+      { routes: [row(null, 'quota-list-empty')] },
+      { now: NOW, collection: collection('completed') },
+    );
+    const r = view.routes[0];
+    assert.strictEqual(r.stateReason, 'quota-list-empty');
+    assert.ok(r.reasonCodes.includes('quota-list-empty'));
+    assert.ok(!r.reasonCodes.includes('no-windows-reported'), JSON.stringify(r.reasonCodes));
+    assert.ok(vm.renderViewText(view).join('\n').includes('quota-list-empty'), 'the note names the registered reason');
+  });
+
+  test('a REFUSAL code in the adapter reason stays in its own block, never as a state reason', () => {
+    const view = vm.buildViewSchema(
+      { routes: [row(null, 'built-in-endpoint-refused')] },
+      { now: NOW, collection: collection('completed') },
+    );
+    const r = view.routes[0];
+    assert.strictEqual(r.stateReason, null);
+    assert.strictEqual(r.refusal.reason, 'built-in-endpoint-refused', 'the refusal block still claims it');
+    assert.ok(r.reasonCodes.includes('no-windows-reported'), 'a refusal is not a no-window explanation');
   });
 
   console.log('\ngate — fail-open, asserted through lib/gate.js');

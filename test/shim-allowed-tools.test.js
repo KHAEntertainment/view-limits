@@ -101,62 +101,37 @@ function listShims() {
   return found;
 }
 
-// Every shape an injected command takes in a command or skill file, per the
-// current Claude Code skills docs: the inline form `!<backtick>command<backtick>`
-// — recognised at the start of a line OR immediately after whitespace, which is
-// what makes an indented or mid-sentence injection run — and a fenced block
-// opened with ```!, whose lines are the commands. A `!` that follows another
-// character is literal text and does not run, so it is deliberately not counted.
-//
-// Anything that looks like an injection but cannot be read FAILS the file: an
-// unclosed backtick or an empty command is exactly the shape that would
-// otherwise slip past this guard unnoticed.
-function extractExecs(rel, text) {
-  const out = [];
-  const markers = (text.match(/(?:^|(?<=\s))!`/gm) || []).length;
-  for (const m of text.matchAll(/(?:^|(?<=\s))!`([^`]*)`/gm)) {
-    assert.ok(m[1].trim() !== '', `${rel}: an injected command is empty: ${m[0]}`);
-    out.push(m[1]);
-  }
-  assert.strictEqual(out.length, markers,
-    `${rel}: ${markers} injected \`!\` marker(s) but only ${out.length} parsed — an inline command with no closing backtick?`);
-  for (const block of text.matchAll(/^[ \t]*```![^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*$/gm)) {
-    for (const line of block[1].split('\n')) {
-      if (line.trim() === '') continue;
-      out.push(line.trim());
-    }
-  }
-  return out;
-}
+// Every shape an injected command takes in a command or skill file is recognised
+// through ONE module, test/helpers/injected-commands.cjs, shared with
+// test/relay-only.test.js so the two guards cannot drift into disagreeing about
+// what counts as an exec: a line-initial `!`-exec, the inline form at the start
+// of a line or immediately after whitespace, and a ```! fenced block whose lines
+// are the commands.
+const { extractExecs, execProgram } = require('./helpers/injected-commands.cjs');
 
-// The program token of one injected command: the first word, quoted or not.
-function execProgram(cmd) {
-  const quoted = cmd.match(/^("[^"]*")(\s|$)/);
-  if (quoted) return { token: quoted[1].slice(1, -1), wasQuoted: true };
-  const bare = cmd.match(/^(\S+)(\s|$)/);
-  assert.ok(bare, `injected command starts with nothing recognisable: ${cmd}`);
-  return { token: bare[1], wasQuoted: false };
-}
-
-const shims = listShims();
-assert.ok(shims.length >= 4, `expected the four known shims, discovered ${shims.length}: ${shims.join(', ')}`);
-// The four shims that ship a CLI call. A file losing its injection silently is
-// the same hole as a file never having had the field, so the set is pinned too.
+// The four known shims that must keep injecting the CLI: a file losing its
+// injection silently is the same hole as one that never carried the field.
 const MUST_INJECT = [
   'commands/view-limits.md',
   'commands/dashboard.md',
   'skills/setup/SKILL.md',
   'skills/update/SKILL.md',
 ];
+
+let withExec = 0;
+const injected = [];
+const shims = listShims();
+assert.ok(shims.length >= 4, `expected the four known shims, discovered ${shims.length}: ${shims.join(', ')}`);
 const pair = PAIRS.quoted;
 assert.strictEqual(pair.rule, ALLOWED_TOOLS,
   'the shipped rule must be the pair this test derives from: to switch between the quoted and the bare form, point ALLOWED_TOOLS at the PAIRS entry you want — the exec lines have to move with it');
 
-let withExec = 0;
-const injected = [];
 for (const rel of shims) {
   const text = fs.readFileSync(path.join(ROOT, rel), 'utf8');
-  const execs = extractExecs(rel, text);
+  const problems = [];
+  const execs = extractExecs(rel, text, problems);
+  // A file this guard cannot read is a failure, never a skip.
+  for (const problem of problems) assert.fail(problem);
   if (execs.length === 0) {
     assert.ok(!MUST_INJECT.includes(rel), `${rel}: known CLI shim with no injected command at all`);
     continue; // no injection anywhere in the file — nothing to pre-approve
@@ -190,7 +165,14 @@ for (const rel of shims) {
   // The rule and the command cannot drift: every injected command's program
   // token must be the path the rule names, quoted the same way.
   for (const cmd of execs) {
-    const p = execProgram(cmd);
+    let p;
+    try {
+      p = execProgram(cmd);
+    } catch (e) {
+      // An injected command this test cannot read names its file and fails the
+      // run; it never becomes "no exec".
+      assert.fail(`${rel}: ${e.message}`);
+    }
     assert.strictEqual(p.token, CLI_PATH,
       `${rel}: an injected command runs ${p.token}, which the rule does not name: ${cmd}`);
     assert.strictEqual(p.wasQuoted, pair.execQuoted,

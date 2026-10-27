@@ -11,8 +11,12 @@
 //
 // "Formatting logic" here means field-shaping CODE or agent-facing
 // reformatting instructions:
-//   - an exec line outside the argv allowlist (pipes, `;`, redirects,
-//     subshells, sed/awk/jq/printf all fail closed by construction),
+//   - an injected command outside the argv allowlist (pipes, `;`, redirects,
+//     subshells, sed/awk/jq/printf all fail closed by construction), in ANY of
+//     the shapes the docs support — its own line, inline or indented, or a ```!
+//     fenced block — and a marker that cannot be parsed fails the file instead
+//     of being skipped (test/helpers/injected-commands.cjs is the one reader of
+//     those shapes, shared with test/shim-allowed-tools.test.js),
 //   - text-processing tools or pipeline metacharacters in any code span, or
 //     formatting tools / piping instructions in shim prose (ambiguous English
 //     words such as "paste" or "cut" are excluded from the prose scan so
@@ -94,6 +98,18 @@ function check(cond, msg) {
   if (!cond) failures.push(msg);
 }
 
+// ---- the injected-command shapes ---------------------------------------------
+//
+// Both relay-only guards read a shim's injections through ONE module,
+// test/helpers/injected-commands.cjs, so they cannot drift into disagreeing about
+// what counts as an exec: a line-initial `!`-exec, the inline form at the start
+// of a line or after whitespace (which is what makes an indented or mid-sentence
+// injection run), and a fenced block opened with ```!, whose lines are the
+// commands. A marker that cannot be parsed is a MALFORMED injection, not an
+// absent one, and is reported as a failure rather than skipping the file —
+// skipping is how a shim escapes a guard without anyone noticing.
+const { extractExecs, withoutInjections } = require('./helpers/injected-commands.cjs');
+
 function listShims() {
   const found = [];
   const commandsDir = path.join(root, 'commands');
@@ -123,20 +139,20 @@ for (const required of REQUIRED_SHIMS) {
 
 for (const rel of shims) {
   const text = fs.readFileSync(path.join(root, rel), 'utf8');
-  const lines = text.split('\n');
 
-  // [AC1] relay source: at least one `!` exec line, each strictly allowlisted
-  // so the shim only invokes the rendering CLI and never shapes its output.
-  const execLines = lines.filter((l) => l.startsWith('!'));
-  check(execLines.length >= 1, `${rel}: no \`!\` exec line — a relay-only shim must invoke bin/vl.js`);
-  for (const line of execLines) {
-    const m = line.match(/^!`(.+)`$/);
-    check(!!m, `${rel}: exec line is not \`!\`<command>\` form: ${line.trim()}`);
-    if (!m) continue;
-    check(CLI_PREFIX.test(m[1]), `${rel}: exec line does not invoke the rendering CLI (bin/vl.js): ${m[1]}`);
-    check(EXEC_BODY_RE.test(m[1]),
-      `${rel}: exec argv outside the relay allowlist (CLI + plain args + optional $ARGUMENTS + optional 2>&1 only — no pipes, redirects, subshells, or other commands): ${m[1]}`);
+  // [AC1] relay source: at least one injected command, in any of the documented
+  // shapes, each strictly allowlisted so the shim only invokes the rendering CLI
+  // and never shapes its output.
+  const problems = [];
+  const execs = extractExecs(rel, text, problems);
+  check(execs.length >= 1, `${rel}: no injected \`!\` command — a relay-only shim must invoke bin/vl.js`);
+  for (const cmd of execs) {
+    check(CLI_PREFIX.test(cmd), `${rel}: exec line does not invoke the rendering CLI (bin/vl.js): ${cmd}`);
+    check(EXEC_BODY_RE.test(cmd),
+      `${rel}: exec argv outside the relay allowlist (CLI + plain args + optional $ARGUMENTS + optional 2>&1 only — no pipes, redirects, subshells, or other commands): ${cmd}`);
   }
+  // A file this guard cannot read is a failure, never a skip.
+  for (const problem of problems) check(false, problem);
 
   // [AC3] relay-only property: the verbatim-relay instruction must be present,
   // so a future edit cannot quietly turn the shim into "summarize/format it".
@@ -144,10 +160,11 @@ for (const rel of shims) {
     `${rel}: missing the verbatim-relay instruction ("Relay the output above verbatim")`);
 
   // [AC1] no formatting logic: code fences, shaping tools, or pipeline
-  // metacharacters anywhere in the shim's code. Exec lines are already
-  // argv-allowlisted above, so they are excluded from these scans.
-  const body = lines.filter((l) => !l.startsWith('!')).join('\n');
-  check(!text.includes('```'),
+  // metacharacters anywhere in the shim's code. Injected commands are already
+  // argv-allowlisted above, so they are taken out of this scan by shape, not by
+  // whether the line happens to start with `!`.
+  const body = withoutInjections(text);
+  check(!body.includes('```'),
     `${rel}: code fences are not allowed in a relay-only shim (formatting code belongs in the CLI / view model)`);
   const spans = body.match(/`[^`\n]+`/g) || [];
   for (const span of spans) {
@@ -172,22 +189,21 @@ for (const rel of shims) {
   // [AC2] /view-limits stays a live surface: EVERY exec line in the command
   // shim must run `vl.js view` — a second "extra" exec line must not
   // smuggle in a different display path such as `vl.js report`.
+  // [AC2] /view-limits stays a live surface: EVERY exec in the command shim must
+  // run `vl.js view` — a second "extra" exec must not smuggle in a different
+  // display path such as `vl.js report`.
   if (rel === 'commands/view-limits.md') {
-    for (const line of execLines) {
-      const m = line.match(/^!`(.+)`$/);
-      if (!m) continue; // malformed form already failed above
-      check(VIEW_EXEC_RE.test(m[1]),
-        `${rel}: every exec must remain the live view — expected \`vl.js view\`, found: ${m[1]}`);
+    for (const cmd of execs) {
+      check(VIEW_EXEC_RE.test(cmd),
+        `${rel}: every exec must remain the live view — expected \`vl.js view\`, found: ${cmd}`);
     }
   }
 
   // [AC2] same for the dashboard shim: it may only reach the bounded mapper.
   if (rel === 'commands/dashboard.md') {
-    for (const line of execLines) {
-      const m = line.match(/^!`(.+)`$/);
-      if (!m) continue;
-      check(DASHBOARD_EXEC_RE.test(m[1]),
-        `${rel}: every exec must run the bounded dashboard mapper — expected \`vl.js dashboard slash $ARGUMENTS\`, found: ${m[1]}`);
+    for (const cmd of execs) {
+      check(DASHBOARD_EXEC_RE.test(cmd),
+        `${rel}: every exec must run the bounded dashboard mapper — expected \`vl.js dashboard slash $ARGUMENTS\`, found: ${cmd}`);
     }
   }
 }

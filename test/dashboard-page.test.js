@@ -358,8 +358,10 @@ test('LAN preview: no controls, no links, no identifiers, every route in order',
   const tree = R.renderPage(doc, ctx({ mode: 'lan', preview: true }));
   const text = textOf(tree);
   assert.strictEqual(findAll(tree, (n) => n.tag === 'a').length, 0, 'no links on the LAN view');
-  assert.strictEqual(findAll(tree, (n) => n.tag === 'button').length, 0, 'no controls on the LAN view');
-  assert.strictEqual(findAll(tree, (n) => hasClass(n, 'elig')).length, 0, 'no dispatch chips');
+  // Issue #141: the theme switch is the one control, and it stays in the page.
+  assert.deepStrictEqual(findAll(tree, (n) => n.tag === 'button').map((n) => n.attrs['data-key']),
+    ['theme:system', 'theme:light', 'theme:dark'], 'no controls on the LAN view but the theme switch');
+  assert.strictEqual(findAll(tree, (n) => hasClass(n, 'elig')).length, 0, 'no dispatch chips while eligible');
   for (const secret of ['acct-secret', 'ProfileHintZ', 'host-name-q', 'profile-id-q', 'raw provider error text', 'platform.xiaomimimo.com']) {
     assert.ok(!text.includes(secret), secret);
   }
@@ -437,6 +439,113 @@ test('Q9: wrapped "A · B" lines carry no stray separator; the pane header keeps
   assert.strictEqual(textOf(whole[0]), '1 needs attention');
   const css = fs.readFileSync(path.join(__dirname, '..', 'lib', 'dashboard', 'page', 'app.css'), 'utf8');
   assert.ok(css.includes('.segs { display: block; overflow: hidden; }') && css.includes('.seg.nowrap { white-space: nowrap; }'));
+});
+
+// ---- Issue #140: card fixes --------------------------------------------------
+
+console.log('card fixes (#140)');
+
+test('#140 "<1% left": 0 < ratio < 0.01 never reads 0%; exactly 0 does; bars keep a real CSS width', () => {
+  assert.strictEqual(L.formatPct(0.0027), '<1%');
+  assert.strictEqual(L.formatPct(0.0099), '<1%');
+  assert.strictEqual(L.formatPct(0.01), '1%');
+  assert.strictEqual(L.formatPct(0), '0%');
+  assert.strictEqual(L.formatPct(-0.2), '0%');
+  assert.strictEqual(L.formatPct(0.5), '50%');
+  assert.strictEqual(L.formatPct(null), null);
+  assert.strictEqual(L.barWidth(0.0027), '0.27%');
+  assert.strictEqual(L.barWidth(0), '0%');
+  assert.strictEqual(L.barWidth(1.4), '100%');
+  const card = (ratio) => R.routeCard(route({ state: 'constrained', windows: [{ type: 'rolling-5h', remainingRatio: ratio }] }), ctx());
+  for (const [ratio, label] of [[0.0027, '<1% left'], [0, '0% left'], [0.5, '50% left']]) {
+    const tree = card(ratio);
+    assert.ok(textOf(tree).includes(label), `${ratio} → ${label}`);
+    const [track] = findAll(tree, (n) => hasClass(n, 'track'));
+    assert.strictEqual(track.attrs['aria-label'].split(',')[0], `5 hour: ${label}`);
+    const [fill] = findAll(tree, (n) => hasClass(n, 'fill'));
+    assert.ok(/^[\d.]+%$/.test(fill.attrs.style.width), `a CSS length, not a label: ${fill.attrs.style.width}`);
+  }
+  assert.ok(!textOf(card(0.0027)).includes('0% left'));
+  // The same rule on the narrow line and the LAN/phone cards.
+  const line = R.routeLine(route({ windows: [{ type: 'weekly', remainingRatio: 0.004 }] }), ctx({ narrow: true }));
+  assert.ok(textOf(line).includes('<1%'));
+  assert.ok(!textOf(line).includes('0%'));
+  const phone = R.routeCard(route({ windows: [{ type: 'weekly', remainingRatio: 0.004 }] }), ctx({ mode: 'lan' }));
+  assert.ok(textOf(phone).includes('<1% left'));
+});
+
+test('#140 placeholder: an unknown route with no windows shows grey placeholder bars and its reason; a balance card has no bar', () => {
+  const empty = route({ state: 'unknown', windows: [], reasonCodes: ['quota-list-empty', 'state-unknown'] });
+  assert.strictEqual(L.hasReading(empty), false);
+  for (const c of [ctx(), ctx({ mode: 'lan' }), ctx({ mode: 'lan', preview: true })]) {
+    const tree = R.routeCard(empty, c);
+    const placeholders = findAll(tree, (n) => hasClass(n, 'placeholder'));
+    assert.strictEqual(placeholders.length, 2, c.mode);
+    for (const p of placeholders) { assert.ok(hasClass(p, 'track')); assert.strictEqual(p.attrs['aria-hidden'], 'true'); }
+    assert.strictEqual(findAll(tree, (n) => hasClass(n, 'fill')).length, 0, 'no fill: nothing is claimed');
+    assert.ok(textOf(tree).includes('No reading: provider listed no quotas'), c.mode);
+    assert.strictEqual(findAll(tree, (n) => hasClass(n, 'reason')).length, 0, 'the reason is said once, under the bars');
+  }
+  // The second new code, and no wordable code at all.
+  assert.ok(textOf(R.routeCard(route({ state: 'unknown', reasonCodes: ['no-windows-reported'] }), ctx())).includes('No reading: no usage windows reported'));
+  assert.ok(textOf(R.routeCard(route({ state: 'unknown', reasonCodes: ['state-unknown'] }), ctx())).includes('No reading reported'));
+  // A window with no numbers is no reading either: never a "—" row.
+  assert.strictEqual(findAll(R.routeCard(route({ state: 'unknown', windows: [{ type: 'weekly' }] }), ctx()), (n) => hasClass(n, 'placeholder')).length, 2);
+  // The provider's error text stays a local-only chip beside the placeholder.
+  const failed = R.routeCard(route({ state: 'unknown', reasonCodes: ['collection-failed'], error: 'HTTP 500' }), ctx());
+  assert.ok(textOf(failed).includes('No reading: collection failed'));
+  assert.ok(textOf(failed).includes('HTTP 500'));
+
+  const balance = route({ provider: 'deepseek', windows: [], balance: { amount: 12.5, currency: 'USD', spent: null } });
+  assert.strictEqual(L.hasReading(balance), true);
+  const tree = R.routeCard(balance, ctx());
+  assert.strictEqual(findAll(tree, (n) => hasClass(n, 'track')).length, 0, 'a balance card has no bar');
+  assert.ok(textOf(tree).includes('$12.50'));
+  // Pending keeps its own "waiting" skeleton, not the no-reading placeholder.
+  const pending = R.routeCard(route({ state: 'unknown', observedAt: null, reasonCodes: ['collection-pending'] }), ctx());
+  assert.strictEqual(findAll(pending, (n) => hasClass(n, 'placeholder')).length, 0);
+  assert.ok(textOf(pending).includes('Waiting for the first check'));
+});
+
+test('#140 placeholder on the narrow line: a grey mini track and the reason word', () => {
+  const tree = R.routeLine(route({ state: 'unknown', windows: [], reasonCodes: ['no-windows-reported'] }), ctx({ narrow: true }));
+  assert.strictEqual(findAll(tree, (n) => hasClass(n, 'mini-track') && hasClass(n, 'placeholder')).length, 1);
+  assert.ok(textOf(tree).includes('no usage windows reported'));
+});
+
+test('#140 chips: the state chip always shows; the eligibility chip only when ineligible (every mode)', () => {
+  for (const c of [ctx(), ctx({ mode: 'lan' }), ctx({ mode: 'lan', preview: true })]) {
+    for (const [elig, shown] of [['eligible', false], ['unresolved', false], [null, false], ['ineligible', true]]) {
+      for (const state of ['healthy', 'constrained', 'exhausted', 'unknown']) {
+        const tree = R.routeCard(route({ state, quotaEligibility: elig }), c);
+        const states = findAll(tree, (n) => hasClass(n, 'chip') && hasClass(n, 'state'));
+        assert.strictEqual(states.length, 1, `${c.mode} ${state}`);
+        assert.strictEqual(textOf(states[0]), state);
+        const eligs = findAll(tree, (n) => hasClass(n, 'elig'));
+        assert.strictEqual(eligs.length, shown ? 1 : 0, `${c.mode} ${state} ${elig}`);
+        if (shown) assert.strictEqual(textOf(eligs[0]), 'ineligible');
+      }
+    }
+  }
+});
+
+test('#140 new reason words: quota-list-empty and no-windows-reported read plainly', () => {
+  assert.strictEqual(L.REASON_WORDS['quota-list-empty'], 'provider listed no quotas');
+  assert.strictEqual(L.REASON_WORDS['no-windows-reported'], 'no usage windows reported');
+  assert.deepStrictEqual(L.reasonChips(route({ reasonCodes: ['quota-list-empty', 'no-windows-reported'] })), ['provider listed no quotas', 'no usage windows reported']);
+});
+
+test('#140 equal heights: grid rows stretch, and every card has a minimum height', () => {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'lib', 'dashboard', 'page', 'app.css'), 'utf8');
+  const rule = (sel) => { const m = new RegExp(`(?:^|\\n)${sel.replace('.', '\\.')} \\{([^}]*)\\}`).exec(css); return m ? m[1] : ''; };
+  assert.ok(/align-items: stretch/.test(rule('.grid')), rule('.grid'));
+  assert.ok(!/align-items: start/.test(rule('.grid')));
+  assert.ok(/min-height: \d+px/.test(rule('.card')), rule('.card'));
+  assert.ok(/margin-top: auto/.test(rule('.foot-meta')), 'the footer sits at the bottom of a stretched card');
+  // The rendered markup carries the classes the rules target.
+  const tree = R.renderPage(statusDoc([route({ id: 'a' }), route({ id: 'b' })]), ctx());
+  const [grid] = findAll(tree, (n) => hasClass(n, 'grid'));
+  assert.deepStrictEqual(grid.children.map((c) => c.attrs.class), ['card', 'card']);
 });
 
 // ---- escaping, end to end through the real browser script --------------------
@@ -729,7 +838,7 @@ test('#116 logos come only from the fixed allowlist on loopback and LAN', async 
 });
 
 test('the browser scripts never use HTML-string sinks', () => {
-  for (const file of ['logic.js', 'render.js', 'app.js']) {
+  for (const file of ['theme.js', 'logic.js', 'render.js', 'app.js']) {
     const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'dashboard', 'page', file), 'utf8');
     for (const sink of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'eval(', 'new Function']) {
       assert.ok(!src.includes(sink), `${file}: ${sink}`);

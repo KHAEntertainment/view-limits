@@ -1,6 +1,7 @@
 /* view-limits dashboard (Issue #62). Tokens from the approved Stitch direction
    (M1-A): neutral zinc, one steel-teal accent, muted status colours, Geist /
-   Geist Mono. The theme follows the system (D5).
+   Geist Mono. The theme follows the system unless the page's theme switch
+   says otherwise (Issue #141, superseding D5).
    Fonts: Vercel's Geist, bundled under /assets/fonts/ (SIL OFL 1.1, see
    fonts/OFL.txt). The page fetches nothing from outside this machine. */
 @font-face { font-family: "Geist"; src: url("/assets/fonts/Geist-Regular.woff2") format("woff2"); font-weight: 400; font-style: normal; font-display: swap; }
@@ -25,8 +26,13 @@
   --mono: "Geist Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light dark;
 }
+/* Issue #141: ./theme.js sets data-theme (system | light | dark) on the root
+   before the first paint. System keeps following prefers-color-scheme; a
+   light or dark choice overrides it. The dark tokens appear twice on purpose:
+   once for "system on a dark OS", once for an explicit dark choice. */
+:root[data-theme="light"] { color-scheme: light; }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --canvas: #0F0F11;
     --surface: #18181B;
     --surface-2: #1F1F23;
@@ -36,8 +42,20 @@
     --track: #2A2A2E;
     --unknown: #A1A1AA;
   }
-  .tip { background: #3F3F46; color: #F4F4F5; box-shadow: 0 0 0 1px #52525B; }
+  :root:not([data-theme="light"]) .tip { background: #3F3F46; color: #F4F4F5; box-shadow: 0 0 0 1px #52525B; }
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --canvas: #0F0F11;
+  --surface: #18181B;
+  --surface-2: #1F1F23;
+  --ink: #F4F4F5;
+  --muted: #A1A1AA;
+  --line: #27272A;
+  --track: #2A2A2E;
+  --unknown: #A1A1AA;
+}
+:root[data-theme="dark"] .tip { background: #3F3F46; color: #F4F4F5; box-shadow: 0 0 0 1px #52525B; }
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
@@ -106,6 +124,24 @@ a { color: var(--accent); }
 .refresh.icon { padding: 3px 8px; background: transparent; color: var(--accent); }
 .refresh-note { font-size: 12px; color: var(--muted); }
 
+/* Issue #141: the theme switch. Three marks: half (system), open (light),
+   filled (dark); the pressed one sits on a raised chip. */
+.theme {
+  display: inline-flex; gap: 2px; padding: 2px; flex: none;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+}
+.theme-opt {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 0; border-radius: 4px; padding: 2px 8px; background: transparent;
+  color: var(--muted); font: 12px/1.5 var(--mono); cursor: pointer;
+}
+.theme-opt:hover { color: var(--ink); }
+.theme-opt[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
+.theme-mark { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid currentColor; flex: none; }
+.mark-system { background: linear-gradient(90deg, currentColor 50%, transparent 50%); }
+.mark-dark { background: currentColor; }
+.top.narrow .theme-opt { padding: 4px 6px; }
+
 .preview-note {
   margin: 12px 28px 0; padding: 8px 12px; border: 1px dashed var(--line); border-radius: 8px;
   color: var(--muted); font-size: 12px; background: var(--surface);
@@ -114,7 +150,8 @@ a { color: var(--accent); }
 /* ---- layout ---- */
 .wrap { padding: 18px 28px 8px; }
 .grid {
-  display: grid; gap: 14px; align-items: start;
+  /* Issue #140: cards in a row stretch to the tallest one. */
+  display: grid; gap: 14px; align-items: stretch;
   /* At most three columns (Q9): a column is never narrower than a third. */
   grid-template-columns: repeat(auto-fill, minmax(max(320px, calc((100% - 28px) / 3)), 1fr));
 }
@@ -162,9 +199,11 @@ a { color: var(--accent); }
 /* ---- cards ---- */
 .card {
   background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
-  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 168px;
 }
-.ch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; }
+/* min-height: a card without the dashboard button keeps its rows level with
+   its neighbours' (Issue #140). */
+.ch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 2px; min-height: 28px; }
 /* Issue #116: a fixed 18px mark. The provider's name is always next to it, so
    the image is decorative (aria-hidden, empty alt). object-fit keeps every
    vendored viewBox from distorting. */
@@ -204,6 +243,14 @@ a { color: var(--accent); }
   font-family: var(--mono); font-size: 12px; background: var(--surface-2);
 }
 .hint { margin: 0; font-size: 12px; }
+/* Issue #140: a card with no reading. The hatching is the usual "no data"
+   mark, so an empty placeholder never reads as an exhausted (0%) bar. */
+.no-reading { display: flex; flex-direction: column; gap: 9px; padding-top: 2px; }
+.no-reading .meta { margin: 0; }
+.track.placeholder, .mini-track.placeholder {
+  background: repeating-linear-gradient(135deg, var(--track) 0 4px, color-mix(in srgb, var(--muted) 22%, var(--track)) 4px 6px);
+}
+.track.placeholder.short { width: 62%; }
 .skeleton { height: 6px; border-radius: 3px; background: var(--track); margin: 6px 0; }
 .w-full { width: 100%; }
 .w-3q { width: 75%; }

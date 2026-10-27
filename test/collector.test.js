@@ -605,6 +605,45 @@ await testAsync('B3: a native-only setup whose native source fails is a classifi
   assert.strictEqual(result.reason, collector.REASON.NATIVE_UNAVAILABLE);
 });
 
+// Issue #133 (Q27-A) — a collection with ZERO configured routes is never
+// failed by the native read. Nothing is configured, so nothing a failed read
+// could invalidate: the failure is disclosed beside the outcome (R2-1)
+// instead of becoming the outcome.
+const TIMED_OUT_NATIVE = {
+  generatedAt: '2026-10-24T12:00:00Z',
+  sessions: [],
+  harnesses: [],
+  profiles: [],
+  routes: [],
+  diagnostics: [{ code: 'traycer-read-timeout', scope: 'profiles' }],
+};
+
+await testAsync('#133: a route-less collection with a failed native read stays no-credentials', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [] });
+  const { io, calls } = world({ native: TIMED_OUT_NATIVE });
+  const result = await collector.collectView({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.NO_CREDENTIALS, 'the native read does not fail a route-less collection');
+  assert.strictEqual(result.reason, null, 'no collection-level reason is raised');
+  assert.strictEqual(result.error, null, 'no collection-level error is raised');
+  assert.deepStrictEqual(result.routes, []);
+  assert.strictEqual(calls.native, 1, 'the native observation still runs for zero routes');
+  assert.strictEqual(result.native.outcome, 'failed', 'the native failure is still classified');
+  assert.deepStrictEqual(result.native.codes, ['traycer-read-timeout'], 'and disclosed with its codes');
+});
+
+await testAsync('#133: routes that are merely ineligible are NOT route-less', async () => {
+  scratch();
+  const cfg = Object.assign({}, CFG, { routes: [route('minimax-token-plan', 'minimax')] });
+  // Configured but with no credential: the native read is the only source
+  // this setup has, so its failure stays a classified failure. "Zero routes"
+  // is literally zero configured routes.
+  const { io } = world({ vault: { has: () => false, get: () => null }, native: TIMED_OUT_NATIVE });
+  const result = await collector.collectView({ cfg, io });
+  assert.strictEqual(result.outcome, collector.OUTCOME.FAILED, 'an unmonitorable route keeps the native-only failure rule');
+  assert.strictEqual(result.reason, collector.REASON.NATIVE_UNAVAILABLE);
+});
+
 // R2-1 — the REAL runtime snapshot service and the REAL Traycer adapter, with
 // a fake RUNNER: the service degrades source failures into diagnostics, and
 // the classification must read those diagnostics, not a throw.

@@ -87,6 +87,11 @@ function envFor(dir, j, extra = {}) {
     CLAUDE_PLUGIN_DATA: dir,
     VIEW_LIMITS_MASTER_KEY: MASTER,
     NODE_OPTIONS: `--require=${preload}`,
+    // [#106] `setup`/`update` otherwise run a real `npm ci` for the view's
+    // banner dependency, which on a tree without node_modules stalls until the
+    // per-child budget kills it. The preload stubs the installer, gated on this
+    // flag: no case here asserts on it.
+    VL_TEST_STUB_DEPENDENCY_INSTALL: '1',
     VL_NET_JOURNAL: j.net,
     VL_BROWSER_JOURNAL: j.browser,
     ...extra,

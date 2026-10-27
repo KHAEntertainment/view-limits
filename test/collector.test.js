@@ -644,6 +644,26 @@ await testAsync('#133: routes that are merely ineligible are NOT route-less', as
   assert.strictEqual(result.reason, collector.REASON.NATIVE_UNAVAILABLE);
 });
 
+await testAsync('#133: a malformed external result (no routes array) still fails loudly', async () => {
+  // `collect()` always materializes `routes` (`result()` defaults it to []),
+  // so an external result WITHOUT a routes array did not come from it. Such a
+  // result must not be excused as route-less: a malformed result keeps the
+  // native-only failure (charter: fail loudly by default).
+  const nativeVerdict = { outcome: 'failed', codes: ['traycer-read-timeout'], error: 'traycer-read-timeout' };
+  const malformed = collector.applyNativeVerdict({ outcome: collector.OUTCOME.NO_CREDENTIALS }, nativeVerdict);
+  assert.strictEqual(malformed.outcome, collector.OUTCOME.FAILED, 'a missing routes array does not excuse the native failure');
+  assert.strictEqual(malformed.reason, collector.REASON.NATIVE_UNAVAILABLE);
+  assert.strictEqual(malformed.error, 'traycer-read-timeout');
+  // The two arms the guard actually distinguishes, on the same decision.
+  const routeLess = collector.applyNativeVerdict({ outcome: collector.OUTCOME.NO_CREDENTIALS, routes: [] }, nativeVerdict);
+  assert.strictEqual(routeLess.outcome, collector.OUTCOME.NO_CREDENTIALS, 'zero configured routes is route-less');
+  const routed = collector.applyNativeVerdict({ outcome: collector.OUTCOME.NO_CREDENTIALS, routes: [{ id: 'r', outcome: 'skipped' }] }, nativeVerdict);
+  assert.strictEqual(routed.outcome, collector.OUTCOME.FAILED, 'a configured route that is skipped is not route-less');
+  // A native success keeps the pre-existing native-only rule, whatever routes say.
+  const success = collector.applyNativeVerdict({ outcome: collector.OUTCOME.NO_CREDENTIALS, routes: [] }, { outcome: 'completed', codes: [], error: null });
+  assert.strictEqual(success.outcome, collector.OUTCOME.COMPLETED, 'a native-only success is completed');
+});
+
 // R2-1 — the REAL runtime snapshot service and the REAL Traycer adapter, with
 // a fake RUNNER: the service degrades source failures into diagnostics, and
 // the classification must read those diagnostics, not a throw.

@@ -237,6 +237,89 @@ for (const rel of shims) {
   }
 }
 
+// ---- the guidance text: no command may be advertised with an argument ---------
+//
+// Q34-A and Q36-A are both about the same boundary: a shim cannot take an
+// argument, so telling a user to run one with an argument is telling them to run
+// something that does not exist — bare `/view-limits:setup` skips the Xiaomi route
+// entirely, and `/view-limits:dashboard stop` prints a usage. That is a text
+// property of the whole tree, so it is checked as one, over the shipped surfaces
+// and the docs alike. Terminal forms (`vl.js setup <route-id>`) stay legal: the
+// CLI still takes arguments, and says so.
+//
+// The patterns are written from fragments on purpose: a guard whose source
+// contains the string it hunts would fail on itself.
+const BANNED_GUIDANCE = [
+  { name: 'the pre-Q36 Xiaomi advice', re: new RegExp('/view-limits:setu' + 'p xiaomi-token-plan') },
+  { name: 'its template form', re: new RegExp('/view-limits:setu' + 'p \\$\\{XIAOMI_ROUTE_ID\\}') },
+  { name: 'the pre-Q34 dashboard verb-as-argument', re: new RegExp('/view-limits:dashboar' + 'd (stop|status)(?![A-Za-z0-9_-])') },
+];
+
+const GUIDANCE_ROOTS = ['bin', 'lib', 'docs', 'skills', 'commands', 'harness'];
+const GUIDANCE_FILES = ['README.md'];
+const GUIDANCE_EXT = new Set(['.js', '.cjs', '.mjs', '.md', '.json', '.sh']);
+const GUIDANCE_SKIP = new Set(['node_modules', '.git', 'graft', 'build', '.agent', '.pi']);
+
+function guidanceCorpus() {
+  const out = [];
+  const walk = (dir, relDir) => {
+    for (const entry of fs.readdirSync(path.join(root, dir), { withFileTypes: true })) {
+      if (entry.name.startsWith('.') && entry.name !== '.dev.json') continue;
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!GUIDANCE_SKIP.has(entry.name)) walk(path.join(dir, entry.name), rel);
+      } else if (GUIDANCE_EXT.has(path.extname(entry.name))) {
+        out.push({ rel: path.join(dir, entry.name), text: fs.readFileSync(path.join(root, dir, entry.name), 'utf8') });
+      }
+    }
+  };
+  for (const d of GUIDANCE_ROOTS) {
+    if (fs.existsSync(path.join(root, d))) walk(d, d);
+  }
+  for (const f of GUIDANCE_FILES) {
+    if (fs.existsSync(path.join(root, f))) out.push({ rel: f, text: fs.readFileSync(path.join(root, f), 'utf8') });
+  }
+  return out;
+}
+
+// → every `rel:line` in `corpus` that advertises a command with an argument.
+function bannedGuidanceHits(corpus) {
+  const hits = [];
+  for (const { rel, text } of corpus) {
+    text.split('\n').forEach((line, i) => {
+      for (const { name, re } of BANNED_GUIDANCE) {
+        if (re.test(line)) hits.push(`${rel}:${i + 1}: ${name} — ${line.trim().slice(0, 100)}`);
+      }
+    });
+  }
+  return hits;
+}
+
+const corpus = guidanceCorpus();
+check(corpus.length > 40, `the guidance corpus covers only ${corpus.length} files — the scan is not looking at the tree`);
+for (const hit of bannedGuidanceHits(corpus)) check(false, hit);
+
+// The controls: a rule that has stopped matching looks exactly like a clean
+// tree, so each pattern is shown catching its own phrase, in memory, against
+// the SAME function the corpus is run through.
+for (const [name, sample] of [
+  ['Xiaomi advice', 'rerun ' + '/view-limits:setu' + 'p xiaomi-token-plan to rebuild it'],
+  ['template form', 'err(\"run /view-limits:setu' + 'p ${XIAOMI_ROUTE_ID} first\")'],
+  ['dashboard argument, sentence-final', 'then run ' + '/view-limits:dashboar' + 'd stop in a terminal'],
+  ['dashboard argument, before a full stop', 'run ' + '/view-limits:dashboar' + 'd status.'],
+  // The shapes that MUST stay legal: the hyphenated commands, and the CLI forms
+  // a terminal still takes arguments on.
+  ['legal: hyphenated commands', 'run ' + '/view-limits:dashboar' + 'd-stop, then /view-limits:dashboar' + 'd-status'],
+  ['legal: terminal argv', 'run vl.js setup xiaomi-token-plan --profile 1, or vl.js update <route-id>'],
+].map((row) => row)) {
+  const hits = bannedGuidanceHits([{ rel: `control/${name.replace(/\W+/g, '-')}.md`, text: sample }]);
+  const legal = name.startsWith('legal:');
+  check(legal ? hits.length === 0 : hits.length === 1,
+    legal
+      ? `guidance control accepted a legal phrase: "${name}" → ${hits.join(' | ')} (the ban must not swallow the hyphenated commands or the terminal forms)`
+      : `the guidance control "${name}" was not caught (hits: ${hits.length})`);
+}
+
 if (failures.length) {
   for (const f of failures) console.error(`  ✗ ${f}`);
   console.error(`\n${failures.length} relay-only check(s) failed`);

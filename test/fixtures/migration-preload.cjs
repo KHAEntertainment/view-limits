@@ -1,5 +1,7 @@
 'use strict';
-// Preload for the real-CLI cases in test/empty-defaults.test.js (Issue #81).
+// Preload for the real-CLI cases in the Issue #81 empty-defaults suite
+// (test/empty-defaults.test.js and its real-CLI half,
+// test/empty-defaults-cli.test.js — #106 split the one file in two).
 //
 // The one-time migration runs BEFORE config.json exists, so the vault backend
 // it sees is the built-in default — the macOS Keychain on darwin. A test must
@@ -34,35 +36,6 @@ require('../../lib/config').DEFAULTS.vault.backend = 'file';
 function journal(file, line) {
   if (!file) return;
   try { fs.appendFileSync(file, `${line}\n`); } catch { /* best effort */ }
-}
-
-// [#106] `setup` and `update` install the view's banner dependency on every
-// user-invoked run (bin/vl.js:1370 -> lib/npm-install.js:81). On a tree where
-// the pinned `ascii.rest` is not installed under the plugin root — every fresh
-// worktree, every machine without network — that is a real `npm ci --omit=dev`.
-// The install's own budget is 120 s and the per-child budget here is 20 s, so
-// each such case spent 20 s waiting and then failed on `status === null`.
-//
-// This is not a weakened assertion: no case in this file asserts on the
-// installer, the banner, or the install's notice. It only stops a test child
-// from depending on the machine's node_modules and network. Everything else
-// about lib/npm-install.js is kept — `pinnedVersion`, `installedVersion`,
-// `DEPENDENCY` and `INSTALL_TIMEOUT_MS` still come from the real module.
-if (process.env.VL_TEST_STUB_DEPENDENCY_INSTALL === '1') {
-  const Module = require('module');
-  const { isModuleId } = require('./module-id.cjs');
-  const realLoad = Module._load;
-  Module._load = function loadWithInstalledDependency(id, ...args) {
-    if (isModuleId(id, 'npm-install')) {
-      return Object.assign({}, realLoad.call(this, id, ...args), {
-        // The steady state after a first setup: the pin is present.
-        dependencySatisfied: () => true,
-        // Never spawn a package manager; report what a satisfied pin reports.
-        installDependencies: () => ({ ok: true, status: 0, skipped: true }),
-      });
-    }
-    return realLoad.call(this, id, ...args);
-  };
 }
 
 // Network: record, then refuse. A probe that fetched would surface here.
@@ -168,4 +141,33 @@ if (process.env.VL_TEST_DELETE_CONFIG_AT) {
 // A form server that dies before it listens.
 if (process.argv[2] === 'serve' && process.env.VL_TEST_SERVE_EXIT) {
   process.exit(Number(process.env.VL_TEST_SERVE_EXIT));
+}
+
+// [#106] `setup` and `update` install the view's banner dependency on every
+// user-invoked run (bin/vl.js:1370 -> lib/npm-install.js:81). On a tree where
+// the pinned `ascii.rest` is not installed under the plugin root — every fresh
+// worktree, every machine without network — that is a real `npm ci --omit=dev`.
+// The install's own budget is 120 s and the per-child budget here is 20 s, so
+// each such case spent 20 s waiting and then failed on `status === null`.
+//
+// This is not a weakened assertion: no case in this file asserts on the
+// installer, the banner, or the install's notice. It only stops a test child
+// from depending on the machine's node_modules and network. Everything else
+// about lib/npm-install.js is kept — `pinnedVersion`, `installedVersion`,
+// `DEPENDENCY` and `INSTALL_TIMEOUT_MS` still come from the real module.
+if (process.env.VL_TEST_STUB_DEPENDENCY_INSTALL === '1') {
+  const Module = require('module');
+  const { isModuleId } = require('./module-id.cjs');
+  const realLoad = Module._load;
+  Module._load = function loadWithInstalledDependency(id, ...args) {
+    if (isModuleId(id, 'npm-install')) {
+      return Object.assign({}, realLoad.call(this, id, ...args), {
+        // The steady state after a first setup: the pin is present.
+        dependencySatisfied: () => true,
+        // Never spawn a package manager; report what a satisfied pin reports.
+        installDependencies: () => ({ ok: true, status: 0, skipped: true }),
+      });
+    }
+    return realLoad.call(this, id, ...args);
+  };
 }

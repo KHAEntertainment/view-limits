@@ -15,8 +15,11 @@
 //      rule names — so the rule can never drift away from the command it
 //      approves, which is what makes the match hold.
 //
-// Scanned set: every commands/*.md and skills/*/SKILL.md that carries a `!` exec
-// (discovered, not listed, so a new shim is covered the moment it appears).
+// Scanned set: every commands/*.md and skills/*/SKILL.md, discovered rather than
+// listed, so a new shim is covered the moment it appears. "Injects a command"
+// means any of the shapes the docs support — a line-initial `!` exec, an
+// indented or mid-sentence one, or a ```! fenced block — and a marker that
+// cannot be parsed fails the run instead of skipping the file.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -98,36 +101,69 @@ function listShims() {
   return found;
 }
 
-// The program token of a shim's `!` exec lines: the first word, quoted or not.
-function execPrograms(text) {
-  const execs = [...text.matchAll(/^!`(.+)`$/gm)];
-  assert.ok(execs.length >= 1, 'no `!` exec line');
-  return execs.map((m) => {
-    const quoted = m[1].match(/^"([^"]+)"(\s|$)/);
-    if (quoted) return { token: quoted[1], wasQuoted: true };
-    const bare = m[1].match(/^(\S+)(\s|$)/);
-    assert.ok(bare, `exec line starts with nothing recognisable: ${m[1]}`);
-    return { token: bare[1], wasQuoted: false };
-  });
+// Every shape an injected command takes in a command or skill file, per the
+// current Claude Code skills docs: the inline form `!<backtick>command<backtick>`
+// — recognised at the start of a line OR immediately after whitespace, which is
+// what makes an indented or mid-sentence injection run — and a fenced block
+// opened with ```!, whose lines are the commands. A `!` that follows another
+// character is literal text and does not run, so it is deliberately not counted.
+//
+// Anything that looks like an injection but cannot be read FAILS the file: an
+// unclosed backtick or an empty command is exactly the shape that would
+// otherwise slip past this guard unnoticed.
+function extractExecs(rel, text) {
+  const out = [];
+  const markers = (text.match(/(?:^|(?<=\s))!`/gm) || []).length;
+  for (const m of text.matchAll(/(?:^|(?<=\s))!`([^`]*)`/gm)) {
+    assert.ok(m[1].trim() !== '', `${rel}: an injected command is empty: ${m[0]}`);
+    out.push(m[1]);
+  }
+  assert.strictEqual(out.length, markers,
+    `${rel}: ${markers} injected \`!\` marker(s) but only ${out.length} parsed — an inline command with no closing backtick?`);
+  for (const block of text.matchAll(/^[ \t]*```![^\n]*\n([\s\S]*?)^[ \t]*```[ \t]*$/gm)) {
+    for (const line of block[1].split('\n')) {
+      if (line.trim() === '') continue;
+      out.push(line.trim());
+    }
+  }
+  return out;
+}
+
+// The program token of one injected command: the first word, quoted or not.
+function execProgram(cmd) {
+  const quoted = cmd.match(/^("[^"]*")(\s|$)/);
+  if (quoted) return { token: quoted[1].slice(1, -1), wasQuoted: true };
+  const bare = cmd.match(/^(\S+)(\s|$)/);
+  assert.ok(bare, `injected command starts with nothing recognisable: ${cmd}`);
+  return { token: bare[1], wasQuoted: false };
 }
 
 const shims = listShims();
 assert.ok(shims.length >= 4, `expected the four known shims, discovered ${shims.length}: ${shims.join(', ')}`);
+// The four shims that ship a CLI call. A file losing its injection silently is
+// the same hole as a file never having had the field, so the set is pinned too.
+const MUST_INJECT = [
+  'commands/view-limits.md',
+  'commands/dashboard.md',
+  'skills/setup/SKILL.md',
+  'skills/update/SKILL.md',
+];
 const pair = PAIRS.quoted;
 assert.strictEqual(pair.rule, ALLOWED_TOOLS,
   'the shipped rule must be the pair this test derives from: to switch between the quoted and the bare form, point ALLOWED_TOOLS at the PAIRS entry you want — the exec lines have to move with it');
 
 let withExec = 0;
+const injected = [];
 for (const rel of shims) {
   const text = fs.readFileSync(path.join(ROOT, rel), 'utf8');
-  const fm = frontmatterLines(text);
-  let programs;
-  try {
-    programs = execPrograms(text);
-  } catch {
-    continue; // no `!` exec — nothing to pre-approve
+  const execs = extractExecs(rel, text);
+  if (execs.length === 0) {
+    assert.ok(!MUST_INJECT.includes(rel), `${rel}: known CLI shim with no injected command at all`);
+    continue; // no injection anywhere in the file — nothing to pre-approve
   }
+  injected.push(rel);
   withExec += 1;
+  const fm = frontmatterLines(text);
   assert.ok(fm, `${rel}: no frontmatter block, so no allowed-tools grant for its \`!\` exec`);
 
   const value = frontmatterValue(fm, 'allowed-tools');
@@ -151,13 +187,22 @@ for (const rel of shims) {
   assert.strictEqual(m[1].replace(/ \*$/, '').includes('"'), pair.execQuoted,
     `${rel}: the rule's quoting must be the pair of the exec line's quoting`);
 
-  for (const p of programs) {
+  // The rule and the command cannot drift: every injected command's program
+  // token must be the path the rule names, quoted the same way.
+  for (const cmd of execs) {
+    const p = execProgram(cmd);
     assert.strictEqual(p.token, CLI_PATH,
-      `${rel}: the exec line runs ${p.token}, which the rule does not name`);
+      `${rel}: an injected command runs ${p.token}, which the rule does not name: ${cmd}`);
     assert.strictEqual(p.wasQuoted, pair.execQuoted,
-      `${rel}: exec line quoting (${p.wasQuoted ? 'quoted' : 'bare'}) does not pair with the ${ALLOWED_TOOLS} rule`);
+      `${rel}: injected command quoting (${p.wasQuoted ? 'quoted' : 'bare'}) does not pair with the ${ALLOWED_TOOLS} rule: ${cmd}`);
   }
 }
 
 assert.ok(withExec >= 4, `expected at least four exec-carrying shims, found ${withExec}`);
-console.log(`shim allowed-tools: ok (${withExec} exec-carrying file(s) pinned to ${ALLOWED_TOOLS})`);
+// Each known CLI shim must still inject something: a file losing its injection
+// silently is the same hole as one that never had the field. A NEW injecting
+// file is welcome — it is pinned by the loop above the moment it appears.
+for (const rel of MUST_INJECT) {
+  assert.ok(injected.includes(rel), `${rel}: known CLI shim with no injected command at all`);
+}
+console.log(`shim allowed-tools: ok (${withExec} injecting file(s) pinned to ${ALLOWED_TOOLS})`);

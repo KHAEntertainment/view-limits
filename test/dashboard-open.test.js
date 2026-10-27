@@ -2,10 +2,15 @@
 // Issue #136 — `vl.js dashboard open`, the `slash` mapper and the browser
 // opener, run through the real CLI against a scratch CLAUDE_PLUGIN_DATA.
 //
-// The opener is a STUB, always: a script on PATH that records the argv it was
-// handed and exits with the code the case asked for. No real browser is ever
-// launched by this file, and every daemon it starts lives in a scratch data
-// directory and is stopped (or killed) in `cleanup`.
+// The opener is a STUB, always, and the stubbing is hermetic: every name the
+// opener can be asked for on ANY platform (`open`, `xdg-open`, `cmd`,
+// `cmd.exe`) is written into the stub dir, and the run's PATH is that dir plus
+// a dir holding `ps` — nothing else. A host `xdg-open` on a Linux box, or the
+// real `open` on macOS, is therefore unreachable rather than merely shadowed,
+// so no case can pass by launching the owner's browser. Each stub records the
+// argv it was handed and the name it answered as, which is how the cases prove
+// the capture came from the stub. Every daemon this file starts lives in a
+// scratch data directory and is stopped (or killed) in `cleanup`.
 //
 // What the cases hold the surface to:
 //   start-or-reuse with the same rules as `dashboard start` (C-002 verification,
@@ -46,20 +51,44 @@ function test(name, fn) { cases.push({ name, fn }); }
 
 // ---- the opener stub ---------------------------------------------------------
 
+// Every file name the opener can be asked for, per platform, as bin/vl.js
+// picks it. Windows is listed with both `cmd` and the `cmd.exe` Node resolves
+// it to, because that resolution happens below our code and a stub answering as
+// `cmd.exe` is still the stub.
+const OPENER_FILES = {
+  darwin: ['open'],
+  linux: ['xdg-open'],
+  freebsd: ['xdg-open'],
+  win32: ['cmd', 'cmd.exe'],
+};
+// Every platform's files, so a run can never reach a host binary whatever the
+// host or the shimmed platform turns out to be.
+const ALL_OPENER_FILES = ['open', 'xdg-open', 'cmd', 'cmd.exe'];
+const openerFilesFor = (platform) => OPENER_FILES[platform] || ['xdg-open'];
+
+// A stub opener: records the argv it was handed, one element per line, then a
+// marker naming WHICH stub answered. `$0` is what the CLI resolved, so the
+// marker also shows the platform's own lookup; nothing but the stub can write
+// this file, which is what makes "the capture exists" a proof no real browser
+// was asked.
 function stubScript(target, exitCode) {
   fs.writeFileSync(target,
     '#!/bin/sh\n'
+    + 'name="${0##*/}"\n'
     + 'for a in "$@"; do printf "ARG:%s\\n" "$a" >> "$CAPTURE"; done\n'
-    + 'printf "RUNS:1\\n" >> "$CAPTURE"\n'
+    + 'printf "STUB:%s\\n" "$name" >> "$CAPTURE"\n'
     + `exit ${exitCode}\n`,
     { mode: 0o755 });
 }
 
-// The environment for ONE CLI run: a PATH holding only the stub opener(s) and
-// `ps`, the capture file named through $CAPTURE, and optionally a platform shim
-// so the Windows/Linux branches are exercised on this machine. `withOpener:
-// false` removes the opener entirely — the missing-binary case.
-function stubbed(dir, { openers = ['open'], exitCode = 0, withOpener = true, platform = null, blindPid = null } = {}) {
+// The environment for ONE CLI run. PATH holds the stub dir and a dir with `ps`
+// (the one external the dashboard's identity read needs) and NOTHING ELSE: no
+// host PATH, so no real `open`, `xdg-open` or `cmd` is reachable on any
+// platform, and the case cannot pass by launching the owner's browser. `bin/vl
+// .js` is run by absolute path and the daemon spawns node the same way, so
+// nothing else needs lookup. `withOpener: false` is the missing-binary case: no
+// stub at all, still only `ps` reachable.
+function stubbed(dir, { openers = ALL_OPENER_FILES, exitCode = 0, withOpener = true, platform = null, blindPid = null } = {}) {
   const bin = path.join(dir, 'stub-bin');
   const tools = path.join(dir, 'stub-tools');
   fs.mkdirSync(bin, { recursive: true });
@@ -68,38 +97,45 @@ function stubbed(dir, { openers = ['open'], exitCode = 0, withOpener = true, pla
   const capture = path.join(dir, 'opener-argv.txt');
   // One case, one capture: start from empty, so "no lines" means "never ran".
   if (fs.existsSync(capture)) fs.truncateSync(capture);
-  if (withOpener) for (const name of openers) stubScript(path.join(bin, name), exitCode);
-  // The stub dir comes FIRST, so it shadows the host's real opener; the host
-  // PATH stays behind it because a faked process.platform also changes how Node
-  // resolves the executable, and the only thing under test is the argv the
-  // dashboard branch builds. `withOpener: false` is the missing-binary case, so
-  // there nothing but `ps` may be reachable — a real opener must stay findable-
-  // nowhere, never shadowed-and-found.
-  const env = {
-    PATH: withOpener ? `${bin}${path.delimiter}${tools}${path.delimiter}${process.env.PATH}` : tools,
-    CAPTURE: capture,
-  };
+  if (withOpener) {
+    assert.ok(!openers.some((n) => !ALL_OPENER_FILES.includes(n)), `unknown opener name stubbed: ${openers.join(', ')}`);
+    for (const name of openers) stubScript(path.join(bin, name), exitCode);
+  }
+  const env = { PATH: withOpener ? `${bin}${path.delimiter}${tools}` : tools, CAPTURE: capture };
   const preloads = [PRELOAD];
   if (platform) { env.VL_TEST_PLATFORM = platform; preloads.push(PLATFORM_SHIM); }
   if (blindPid) { env.VL_PS_BLIND_PID = String(blindPid); preloads.push(PS_BLIND); }
   if (preloads.length > 1) env.NODE_OPTIONS = preloads.map((f) => `--require=${f}`).join(' ');
-  return { env, capture };
+  return { env, capture, bin, tools };
 }
 
-// What the stubs were handed: one entry per opener invocation, each the full
-// argv as separate elements. `null` when nothing ran.
+// What the stubs were handed: one entry per opener invocation, each naming the
+// stub that ran and its full argv as separate elements. `null` when nothing ran.
 function captures(file) {
   if (!fs.existsSync(file)) return null;
   const lines = fs.readFileSync(file, 'utf8').split('\n').filter((l) => l !== '');
   const runs = [];
   let cur = [];
   for (const line of lines) {
-    if (line.startsWith('RUNS:')) { runs.push(cur); cur = []; continue; }
+    if (line.startsWith('STUB:')) {
+      runs.push({ name: line.slice(5), argv: cur });
+      cur = [];
+      continue;
+    }
     assert.ok(line.startsWith('ARG:'), `unexpected stub line: ${line}`);
     cur.push(line.slice(4));
   }
-  assert.deepStrictEqual(cur, [], 'an opener run without its RUNS marker');
+  assert.deepStrictEqual(cur, [], 'an opener run without its STUB marker');
   return runs;
+}
+
+// The one entry a case expects: the platform's own stub, handed exactly `argv`.
+function assertOneRun(runs, platform, argv, msg) {
+  assert.strictEqual(runs.length, 1, `${msg}: expected one opener call, got ${JSON.stringify(runs)}`);
+  assert.ok(openerFilesFor(platform || process.platform).includes(runs[0].name),
+    `${msg}: the stub that answered (${runs[0].name}) is not this platform's opener (${openerFilesFor(platform || process.platform).join(' or ')})`);
+  assert.deepStrictEqual(runs[0].argv, argv, msg);
+  return runs[0];
 }
 
 // The loopback page URL of the recorded daemon, exactly as lib computes it.
@@ -122,9 +158,8 @@ test('nothing running → starts the daemon, prints only the running line, opens
   assert.strictEqual(rec.host, '127.0.0.1');
   assert.ok(alive(rec.pid), 'the daemon is running');
   const runs = captures(capture);
-  assert.strictEqual(runs.length, 1, 'one opener invocation');
-  assert.deepStrictEqual(runs[0], [m[1]], 'the opener is handed the URL and nothing else — one argv element, no shell string');
-  assert.ok(!runs[0][0].includes(rec.nonce), 'the control nonce is not in the URL');
+  assertOneRun(runs, null, [m[1]], 'the opener is handed the URL and nothing else — one argv element, no shell string');
+  assert.ok(!runs[0].argv[0].includes(rec.nonce), 'the control nonce is not in the URL');
 });
 
 test('already running → reused: same pid, same instance, one ownership ticket, opened again', async () => {
@@ -144,7 +179,8 @@ test('already running → reused: same pid, same instance, one ownership ticket,
   assert.strictEqual(after.pid, rec.pid, 'no new daemon');
   assert.strictEqual(after.instanceId, rec.instanceId, 'the same instance');
   assert.strictEqual(tickets(dir).length, 1, 'nothing took a second ownership ticket');
-  assert.strictEqual(captures(b.capture).length, 1, 'the reuse still hands the browser the address');
+  assertOneRun(captures(b.capture), null, [first.stdout.match(RUNNING_RE)[1]],
+    'the reuse still hands the browser the address');
 
   const json = JSON.parse((await vl(dir, ['dashboard', 'status', '--json'], { preload: false })).stdout);
   assert.strictEqual(json.state, 'running');
@@ -173,7 +209,7 @@ test('a stale record is recovered exactly as start recovers it, then opened', as
   const rec = record(dir);
   assert.notStrictEqual(rec.instanceId, dead.instanceId, 'the stale record was replaced');
   assert.ok(alive(rec.pid), 'a live daemon answers the recovered record');
-  assert.deepStrictEqual(captures(b.capture), [[m[1]]], 'the recovered address is the one opened');
+  assertOneRun(captures(b.capture), null, [m[1]], 'the recovered address is the one opened');
 });
 
 console.log('open: the URL is the loopback page URL');
@@ -195,15 +231,13 @@ test('the opener never sees the LAN address, the LAN token or the nonce (LAN ena
   assert.ok(!res.stdout.includes(addr), `stdout carries no LAN address: ${res.stdout}`);
   assert.match(res.stdout, /127\.0\.0\.1/, 'the printed address is loopback');
   const text = fs.readFileSync(capture, 'utf8');
-  const runs = captures(capture);
-  assert.strictEqual(runs.length, 1);
-  assert.deepStrictEqual(runs[0], [m[1]], 'one argument: the loopback URL');
+  assertOneRun(captures(capture), null, [m[1]], 'one argument: the loopback URL');
   assert.ok(!text.includes(addr), 'the LAN address never reaches the opener');
   assert.ok(!text.includes(rec.nonce), 'the control nonce never reaches the opener');
   const token = fs.existsSync(path.join(dir, 'dashboard-lan-token'))
     ? fs.readFileSync(path.join(dir, 'dashboard-lan-token'), 'utf8').trim() : null;
   if (token) assert.ok(!text.includes(token), 'the LAN read token never reaches the opener or argv');
-  assert.ok(!/[?#]/.test(runs[0][0]), 'no query or fragment: nothing secret rides in the URL');
+  assert.ok(!/[?#]/.test(captures(capture)[0].argv[0]), 'no query or fragment: nothing secret rides in the URL');
 });
 
 console.log('open: refusals never open a browser');
@@ -258,8 +292,16 @@ test('opener binary missing → address, one diagnostic line, exit 0, daemon sti
   const lines = res.stdout.trim().split('\n');
   assert.strictEqual(lines.length, 2, `address + one diagnostic, got: ${res.stdout}`);
   assert.strictEqual(lines[0], `dashboard: running at ${loopbackUrl(rec)}`);
-  assert.match(lines[1], /^dashboard: browser not opened \(spawn open ENOENT\)$/,
-    'the diagnostic names the command that is missing, not a bare errno');
+  // Derived from the platform's own opener name, never a hardcoded string: on
+  // macOS that is `open`, on Linux `xdg-open`, on Windows what `cmd` resolves
+  // to. The diagnostic has to name the command that is missing, not a bare
+  // errno, and it has to be THIS machine's command.
+  const want = openerFilesFor(process.platform);
+  const diag = lines[1].match(/^dashboard: browser not opened \(spawn (.+) ENOENT\)$/);
+  assert.ok(diag, `diagnostic names the missing opener: ${lines[1]}`);
+  assert.ok(want.includes(diag[1]) || want.includes(`${diag[1]}.exe`),
+    `the diagnostic names ${diag[1]}, expected ${want.join(' or ')} for ${process.platform}`);
+  assert.deepStrictEqual(captures(no.capture) || [], [], 'and nothing reached an opener');
   assert.ok(alive(rec.pid), 'the daemon keeps running');
   assert.strictEqual(record(dir).instanceId, rec.instanceId, 'and was not restarted');
 });
@@ -277,6 +319,7 @@ test('opener exits nonzero → address, one diagnostic line, exit 0, daemon stil
   const lines = res.stdout.trim().split('\n');
   assert.strictEqual(lines[0], `dashboard: running at ${loopbackUrl(rec)}`);
   assert.match(lines[1], /^dashboard: browser not opened \(the browser opener exited 3\)$/);
+  assertOneRun(captures(bad.capture), null, [loopbackUrl(rec)], 'the failing process was the stub');
   assert.ok(alive(rec.pid));
 });
 
@@ -308,24 +351,49 @@ test('Windows gets cmd /c start "" <url> as an array; Linux gets xdg-open <url>'
   note(dir);
   const url = loopbackUrl(rec);
 
-  // The Windows leg: the code asks for `cmd`, and a Windows Node resolves that
-  // to `cmd.exe` before it execs. The stub answers to both names, so what this
-  // case pins is the ARGV the branch builds — `/c start "" <url>`, with the
-  // empty element as `start`'s window title and the URL as its own element —
-  // not the name lookup Windows itself performs.
-  const win = stubbed(dir, { openers: ['cmd', 'cmd.exe'], platform: 'win32' });
+  // Every platform's opener name is stubbed and the PATH holds nothing else,
+  // so on the Windows leg the only thing that can answer is the stub — whether
+  // Node asks for `cmd` or resolves it to `cmd.exe`. What the case pins is the
+  // ARGV the branch builds: `/c start "" <url>`, with the empty element as
+  // `start`'s window title and the URL as its own element.
+  const win = stubbed(dir, { platform: 'win32' });
   const resWin = await vl(dir, ['dashboard', 'open'], { env: win.env });
   assert.strictEqual(resWin.status, 0, resWin.stderr);
   assert.strictEqual(resWin.stdout, `dashboard: running at ${url}\n`,
     'no diagnostic line: the opener ran');
-  assert.deepStrictEqual(captures(win.capture), [['/c', 'start', '', url]],
-    'the empty element is start\'s window title, and the URL stays one argv element');
+  assertOneRun(captures(win.capture), 'win32', ['/c', 'start', '', url],
+    'the Windows argv array, handed to the stub');
 
-  const lin = stubbed(dir, { openers: ['xdg-open'], platform: 'linux' });
+  const lin = stubbed(dir, { platform: 'linux' });
   const resLin = await vl(dir, ['dashboard', 'open'], { env: lin.env });
   assert.strictEqual(resLin.status, 0, resLin.stderr);
   assert.strictEqual(resLin.stdout, `dashboard: running at ${url}\n`, 'no diagnostic line: the opener ran');
-  assert.deepStrictEqual(captures(lin.capture), [[url]], 'one argument: the URL, never a shell string');
+  assertOneRun(captures(lin.capture), 'linux', [url], 'one argument: the URL, never a shell string');
+});
+
+test('the Linux capture is the stub speaking: PATH is the stub dir and `ps`, nothing else', async () => {
+  const dir = scratch();
+  const up = stubbed(dir);
+  assert.strictEqual((await vl(dir, ['dashboard', 'open'], { env: up.env })).status, 0);
+  const rec = record(dir);
+  note(dir);
+  const url = loopbackUrl(rec);
+
+  const lin = stubbed(dir, { platform: 'linux' });
+  // Hermetic, and proved rather than assumed: the run's PATH is exactly the
+  // stub dir plus the `ps` dir, so a host `xdg-open` (which every desktop Linux
+  // box has, and which would open a real browser) is not reachable at all.
+  assert.deepStrictEqual(lin.env.PATH.split(path.delimiter), [lin.bin, lin.tools],
+    'the opener lookup can only reach the stub dir');
+  assert.deepStrictEqual(fs.readdirSync(lin.bin).sort(), ALL_OPENER_FILES.slice().sort(),
+    'every platform opener name is shadowed by a stub');
+
+  const res = await vl(dir, ['dashboard', 'open'], { env: lin.env });
+  assert.strictEqual(res.status, 0, res.stderr);
+  const runs = captures(lin.capture);
+  assertOneRun(runs, 'linux', [url], 'the stub was handed the loopback URL');
+  assert.strictEqual(runs[0].name, 'xdg-open',
+    'the linux branch ran the stub named xdg-open, not a desktop opener');
 });
 
 console.log('slash: the /view-limits:dashboard mapper');

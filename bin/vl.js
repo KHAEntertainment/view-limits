@@ -1216,7 +1216,7 @@ async function grantInteractiveKeyOrFail() {
   try {
     await xiaomiSession.grantInteractiveKey(dataDir());
   } catch {
-    err('Chrome key access was not granted — rerun /view-limits:setup xiaomi-token-plan, then click "Always Allow" (not "Allow") in the macOS dialog.');
+    err('Chrome key access was not granted — rerun /view-limits:setup-xiaomi, then click "Always Allow" (not "Allow") in the macOS dialog.');
   }
 }
 
@@ -1275,9 +1275,9 @@ async function setupXiaomi(cfg, options) {
         err('helper build requires macOS — the Chrome cookie fallback is macOS-only.');
       }
       if (code === 'helper-build-failed') {
-        err('helper build failed — install the Xcode command line tools (xcode-select --install), then rerun /view-limits:setup xiaomi-token-plan.');
+        err('helper build failed — install the Xcode command line tools (xcode-select --install), then rerun /view-limits:setup-xiaomi.');
       }
-      err('helper build failed — rerun /view-limits:setup xiaomi-token-plan.');
+      err('helper build failed — rerun /view-limits:setup-xiaomi.');
     }
     log(built && built.skippedRebuild
       ? 'helper unchanged — identity preserved'
@@ -1310,10 +1310,10 @@ async function revalidateXiaomiSource(cfg, options) {
   const profile = options.profile !== null && options.profile !== undefined ? options.profile : current.chromeProfile;
   const source = options.chromeSource ? expandHome(options.chromeSource) : current.chromeSource;
   if (!validProfile(profile)) {
-    err('Chrome profile not configured — run /view-limits:setup xiaomi-token-plan (use "Default" or "Profile <number>").');
+    err('Chrome profile not configured — run /view-limits:setup-xiaomi (use "Default" or "Profile <number>").');
   }
   if (typeof source !== 'string' || !source.length) {
-    err('Chrome source not configured — run /view-limits:setup xiaomi-token-plan.');
+    err('Chrome source not configured — run /view-limits:setup-xiaomi.');
   }
   prevalidateXiaomiStateOrFail();
   await grantInteractiveKeyOrFail();
@@ -1324,7 +1324,7 @@ async function revalidateXiaomiSource(cfg, options) {
 
 async function updateXiaomi(cfg, options) {
   const route = cfg.routes.find((r) => r.id === options.routeId);
-  if (!route) err(`${XIAOMI_ROUTE_ID} is not configured — run /view-limits:setup ${XIAOMI_ROUTE_ID} first.`);
+  if (!route) err(`${XIAOMI_ROUTE_ID} is not configured — run /view-limits:setup-xiaomi first.`);
   if (options.key !== null) err('xiaomi-token-plan stores no key — no paste form.');
   if (options.headless) err('xiaomi-token-plan stores no key — --headless does not apply.');
   await revalidateXiaomiSource(cfg, options);

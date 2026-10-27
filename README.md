@@ -97,7 +97,7 @@ reference](docs/cli-reference.md#the--relay-exit-waiver-shim-only).
 Also supported:
 
 - **Your own OpenAI- or Anthropic-compatible route.** Wire compatibility doesn't give you a quota API, so view-limits reads only the documented rate-limit headers from one read-only `GET` you point it at. Verified with documented-format fixtures, not a live account.
-- **Xiaomi Token Plan.** Experimental and opt-in, macOS only. It reads Xiaomi's console through your Chrome session. Two of three live acceptance checks have passed.
+- **Xiaomi Token Plan.** Experimental and opt-in, macOS only. Set it up with `/view-limits:setup-xiaomi` — its own command, because it reads Xiaomi's console through your Chrome session rather than a stored key. Two of three live acceptance checks have passed.
 - **Alibaba Cloud Coding Plan and StepFun Step Plan.** Implemented, not live-tested (awaiting owner accounts, [#53](https://github.com/KHAEntertainment/view-limits/issues/53)). StepFun documents no quota API, so that route is shown as unmonitored and never denies.
 - **GLM.** Authentication and error handling are verified live; the quota fields are still checked against fixtures only ([#1](https://github.com/KHAEntertainment/view-limits/issues/1)).
 

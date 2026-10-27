@@ -44,6 +44,7 @@ const REQUIRED_SHIMS = [
   'commands/dashboard-status.md',
   'skills/setup/SKILL.md',
   'skills/update/SKILL.md',
+  'skills/setup-xiaomi/SKILL.md',
 ];
 
 // Exec argv allowlist: the rendering CLI and one or more plain argv tokens, with
@@ -103,6 +104,9 @@ const EXPECTED_EXEC = {
   'commands/dashboard-status.md': 'dashboard status --relay 2>&1',
   'skills/setup/SKILL.md': 'setup --relay 2>&1',
   'skills/update/SKILL.md': 'update --relay 2>&1',
+  // Q36-A: the Xiaomi route has its own command, so the route id is a literal in the
+  // file rather than an argument the user supplies.
+  'skills/setup-xiaomi/SKILL.md': 'setup xiaomi-token-plan --relay 2>&1',
 };
 // The prefix is matched in either documented spelling, closing quote included,
 // exactly as the shims write it.

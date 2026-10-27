@@ -37,6 +37,7 @@ const SKILL_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits', 
 const SKILL_DASHBOARD_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard', 'SKILL.md');
 const SKILL_DASHBOARD_STOP_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard-stop', 'SKILL.md');
 const SKILL_DASHBOARD_STATUS_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard-status', 'SKILL.md');
+const SKILL_SETUP_XIAOMI_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-setup-xiaomi', 'SKILL.md');
 const GUARD = path.join(__dirname, 'guard.cjs');
 const hooks = require('../harness/codex/hooks.json');
 
@@ -60,6 +61,8 @@ const ALLOWED_ARGV = {
   dashboard: ['dashboard', 'open', '--relay'],
   dashboardStop: ['dashboard', 'stop', '--relay'],
   dashboardStatus: ['dashboard', 'status', '--relay'],
+  // Q36-A: the Xiaomi route has its own skill, with the route id fixed in the call.
+  setupXiaomi: ['setup', 'xiaomi-token-plan', '--relay'],
 };
 
 // Shaping / processing tools that must never appear in a Codex surface file.
@@ -172,6 +175,7 @@ try {
   assert.ok(fs.existsSync(SKILL_DASHBOARD_PATH), 'harness/codex/skills/view-limits-dashboard/SKILL.md must exist');
   assert.ok(fs.existsSync(SKILL_DASHBOARD_STOP_PATH), 'harness/codex/skills/view-limits-dashboard-stop/SKILL.md must exist');
   assert.ok(fs.existsSync(SKILL_DASHBOARD_STATUS_PATH), 'harness/codex/skills/view-limits-dashboard-status/SKILL.md must exist');
+  assert.ok(fs.existsSync(SKILL_SETUP_XIAOMI_PATH), 'harness/codex/skills/view-limits-setup-xiaomi/SKILL.md must exist');
   assert.ok(hooks.hooks && typeof hooks.hooks === 'object' && !Array.isArray(hooks.hooks));
   assert.deepStrictEqual(
     Object.keys(hooks.hooks).sort(),
@@ -238,6 +242,7 @@ try {
     { file: SKILL_DASHBOARD_PATH, name: 'view-limits-dashboard', argvKey: 'dashboard', why: 'the dashboard launch wires to `vl.js dashboard open`' },
     { file: SKILL_DASHBOARD_STOP_PATH, name: 'view-limits-dashboard-stop', argvKey: 'dashboardStop', why: 'the dashboard shutdown wires to `vl.js dashboard stop`' },
     { file: SKILL_DASHBOARD_STATUS_PATH, name: 'view-limits-dashboard-status', argvKey: 'dashboardStatus', why: 'the dashboard state read wires to `vl.js dashboard status`' },
+    { file: SKILL_SETUP_XIAOMI_PATH, name: 'view-limits-setup-xiaomi', argvKey: 'setupXiaomi', why: 'the Xiaomi setup wires to the fixed `vl.js setup xiaomi-token-plan`' },
   ];
   const skillCommandOf = {};
   for (const spec of skills) {

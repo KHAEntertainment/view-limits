@@ -240,7 +240,7 @@ function assertNoSecrets(root, extra = []) {
       const ctx1 = s.ctx();
       ctx1.xiaomiDeps.passwordReader = () => { reads += 1; const e = new Error('keychain-unavailable'); e.code = 'keychain-unavailable'; throw e; };
       const first = await xiaomiSession.fetchStatus(s.cfg, s.cfg.routes[0], ctx1);
-      assert.strictEqual(first.detail.error, 'Chrome key unavailable — rerun /view-limits:setup xiaomi-token-plan');
+      assert.strictEqual(first.detail.error, 'Chrome key unavailable — rerun /view-limits:setup-xiaomi');
       assert.strictEqual(reads, 1);
       assert.ok(xiaomiSession.readSuppressed(s.dataDir), 'suppression written');
 
@@ -294,7 +294,7 @@ function assertNoSecrets(root, extra = []) {
       const cfg = { ...s.cfg };
       delete cfg.xiaomi;
       const st = await xiaomiSession.fetchStatus(cfg, cfg.routes[0], ctx);
-      assert.strictEqual(st.detail.error, 'Chrome cookie source not configured — run /view-limits:setup xiaomi-token-plan');
+      assert.strictEqual(st.detail.error, 'Chrome cookie source not configured — run /view-limits:setup-xiaomi');
       assert.strictEqual(reads, 0);
       assert.strictEqual(ctx.xiaomiDeps.transport.calls.length, 0);
     } finally {
@@ -320,7 +320,7 @@ function assertNoSecrets(root, extra = []) {
         cp.spawn = originalSpawn;
         cp.spawnSync = originalSpawnSync;
       }
-      assert.strictEqual(st.detail.error, 'Chrome key unavailable — rerun /view-limits:setup xiaomi-token-plan');
+      assert.strictEqual(st.detail.error, 'Chrome key unavailable — rerun /view-limits:setup-xiaomi');
       assert.deepStrictEqual(spawns, [], 'no process spawned on the default path without a helper');
       assert.ok(xiaomiSession.readSuppressed(s.dataDir), 'deterministic key failure suppresses retries');
       assertNoSecrets(s.dataDir);

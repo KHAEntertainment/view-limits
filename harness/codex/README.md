@@ -11,6 +11,7 @@ There is no second renderer, no second gate, and no Codex-specific adapter.
 | `skills/view-limits-dashboard/SKILL.md` | Codex skill for the dashboard launch (#136) | `dashboard open --relay` |
 | `skills/view-limits-dashboard-stop/SKILL.md` | Codex skill for shutting the daemon down (#136, Q34-A) | `dashboard stop --relay` |
 | `skills/view-limits-dashboard-status/SKILL.md` | Codex skill for the daemon state read (#136, Q34-A) | `dashboard status --relay` |
+| `skills/view-limits-setup-xiaomi/SKILL.md` | Codex skill for the Xiaomi route setup (#136 follow-up, Q36-A) | `setup xiaomi-token-plan --relay` |
 
 ## Install
 
@@ -33,7 +34,8 @@ Codex merges every `hooks.json` it finds, so pick one mode.
    ```sh
    mkdir -p .codex/skills && cp -R harness/codex/hooks.json .codex/ \
      && cp -R harness/codex/skills/view-limits harness/codex/skills/view-limits-dashboard \
-        harness/codex/skills/view-limits-dashboard-stop harness/codex/skills/view-limits-dashboard-status .codex/skills/
+        harness/codex/skills/view-limits-dashboard-stop harness/codex/skills/view-limits-dashboard-status \
+        harness/codex/skills/view-limits-setup-xiaomi .codex/skills/
    ```
 
    **Global (installed checkout)** — copy both into `~/.codex/` and point
@@ -43,7 +45,8 @@ Codex merges every `hooks.json` it finds, so pick one mode.
    ```sh
    cp harness/codex/hooks.json ~/.codex/hooks.json
    mkdir -p ~/.codex/skills && cp -R harness/codex/skills/view-limits harness/codex/skills/view-limits-dashboard \
-     harness/codex/skills/view-limits-dashboard-stop harness/codex/skills/view-limits-dashboard-status ~/.codex/skills/
+     harness/codex/skills/view-limits-dashboard-stop harness/codex/skills/view-limits-dashboard-status \
+     harness/codex/skills/view-limits-setup-xiaomi ~/.codex/skills/
    export VIEW_LIMITS_ROOT="$HOME/path/to/view-limits"
    ```
 
@@ -76,6 +79,12 @@ block a session. See "Known limits" below.
   last collection. Three skills rather than one that takes a word, by owner
   ruling Q34-A: each file names one fixed call, so nothing a user types can
   become shell text in a command the surface has already approved.
+- **`view-limits-setup-xiaomi` skill → `setup xiaomi-token-plan`** — the Xiaomi
+  route's own setup (owner ruling Q36-A). That route reads Chrome console cookies
+  rather than a stored key, so it is not part of the missing-key form the plain
+  setup offers, and the route id is a literal inside this call instead of an
+  argument another command would have to take. The profile and console-source
+  options stay in the terminal: `vl.js setup xiaomi-token-plan --profile "Profile 1"`.
 
 ## Known limits
 

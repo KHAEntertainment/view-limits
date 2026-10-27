@@ -119,12 +119,13 @@ const MUST_INJECT = [
   'commands/dashboard-status.md',
   'skills/setup/SKILL.md',
   'skills/update/SKILL.md',
+  'skills/setup-xiaomi/SKILL.md',
 ];
 
 let withExec = 0;
 const injected = [];
 const shims = listShims();
-assert.ok(shims.length >= 4, `expected the four known shims, discovered ${shims.length}: ${shims.join(', ')}`);
+assert.ok(shims.length >= 7, `expected the seven known shims, discovered ${shims.length}: ${shims.join(', ')}`);
 const pair = PAIRS.quoted;
 assert.strictEqual(pair.rule, ALLOWED_TOOLS,
   'the shipped rule must be the pair this test derives from: to switch between the quoted and the bare form, point ALLOWED_TOOLS at the PAIRS entry you want — the exec lines have to move with it');
@@ -189,7 +190,7 @@ for (const rel of shims) {
   }
 }
 
-assert.ok(withExec >= 4, `expected at least four exec-carrying shims, found ${withExec}`);
+assert.ok(withExec >= 7, `expected at least seven exec-carrying shims, found ${withExec}`);
 // Each known CLI shim must still inject something: a file losing its injection
 // silently is the same hole as one that never had the field. A NEW injecting
 // file is welcome — it is pinned by the loop above the moment it appears.

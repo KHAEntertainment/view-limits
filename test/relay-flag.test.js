@@ -105,6 +105,16 @@ test('setup and update — the same refusal, waived', async () => {
   await assertWaived(dir, ['update'], 10, 'update');
 });
 
+test('the setup-xiaomi command — the route id is a literal, the waiver still applies', async () => {
+  const dir = scratch();
+  // The Xiaomi route stores no key, so passing one is a refusal at exit 1 — the
+  // path the new command must be able to report. This exercises the exact fixed
+  // call the skill, the Codex skill and the OpenCode command name.
+  const plain = await assertWaived(dir, ['setup', 'xiaomi-token-plan', '--key', 'K'], 1, 'setup xiaomi-token-plan');
+  assert.match(plain.stderr.toString(), /stores no key/, 'the refusal is the route-specific one');
+  assert.ok(!fs.existsSync(records.recordPath(dir)), 'and no daemon or form was started');
+});
+
 test('dashboard status — nothing running: 3 unflagged, 0 with --relay', async () => {
   const dir = scratch();
   await assertWaived(dir, ['dashboard', 'status'], 3, 'dashboard status');

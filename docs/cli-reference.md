@@ -8,6 +8,12 @@
 - **`/view-limits:setup`** — initial setup: opens a local browser form for routes
   that have no key yet (auto-imports MiniMax from `~/.mmx/config.json`). Takes no
   argument; one route at a time is `vl.js setup <route-id>` in a terminal.
+- **`/view-limits:setup-xiaomi`** — the Xiaomi route’s own setup (owner ruling Q36-A):
+  the fixed call `vl.js setup xiaomi-token-plan`, because that route reads Chrome
+  console cookies rather than a stored key, so the bare setup command would not
+  offer it. It takes no argument — the route id is a literal in the file, not
+  something the user passes — and the profile and console-source options stay
+  terminal-only.
 - **`/view-limits:update`** — rotate existing keys: opens the form for every
   configured route. Takes no argument; one route is `vl.js update <route-id>` in
   a terminal. Rotation always requests a replacement; it never reimports a native
@@ -58,9 +64,11 @@ vl.js … --relay                   #   the shim-only exit waiver on the six cal
 ### The `--relay` exit waiver (shim-only)
 
 `--relay` is accepted by exactly `view`, `setup`, `update` and `dashboard open`,
-`stop`, `status` — the six calls the command surfaces make — and by nothing else:
-any other command given it exits `2` with one line saying so, and the command
-does not run.
+`stop`, `status` — the six commands the command surfaces make, from seven shim
+files (`/view-limits:setup` and `/view-limits:setup-xiaomi` are two of them, and
+both run `setup`, the second with the route id written into the file rather than
+passed to it). It is accepted by nothing else: any other command given it exits
+`2` with one line saying so, and the command does not run.
 
 With the flag, the output is what it always was, byte for byte, on both streams,
 in the same order: it touches no rendering, no collection and no side effect. The

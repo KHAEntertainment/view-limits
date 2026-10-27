@@ -42,6 +42,7 @@ const COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'view-lim
 const DASHBOARD_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'dashboard.md');
 const DASHBOARD_STOP_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'dashboard-stop.md');
 const DASHBOARD_STATUS_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'dashboard-status.md');
+const SETUP_XIAOMI_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'setup-xiaomi.md');
 const GUARD = path.join(__dirname, 'guard.cjs');
 
 // The one expansion the surface is allowed to interpolate in a command file:
@@ -65,6 +66,9 @@ const COMMAND_FILES = [
   { file: DASHBOARD_COMMAND_PATH, label: 'dashboard', argv: ['dashboard', 'open', '--relay'] },
   { file: DASHBOARD_STOP_COMMAND_PATH, label: 'dashboard-stop', argv: ['dashboard', 'stop', '--relay'] },
   { file: DASHBOARD_STATUS_COMMAND_PATH, label: 'dashboard-status', argv: ['dashboard', 'status', '--relay'] },
+  // Q36-A: the Xiaomi route has its own command, so its route id is a literal
+  // inside the fixed call rather than something the user passes.
+  { file: SETUP_XIAOMI_COMMAND_PATH, label: 'setup-xiaomi', argv: ['setup', 'xiaomi-token-plan', '--relay'] },
 ];
 
 // argv the plugin is allowed to pass to the CLI. Anything else is new logic
@@ -165,10 +169,15 @@ function assertNoNetworkOrCredentials(log, label) {
 
 // The one predicate a non-injecting OpenCode command must satisfy. Returns the
 // reasons it is not one, so the same rules can be run against a mutant in the
-// negative control below.
-function commandFileProblems(label, command) {
+// negative control below, and each control is asserted against the SPECIFIC
+// reason it must trip — otherwise a mutant could pass for an unrelated reason and
+// the control would prove nothing.
+//
+// `allowedRoots` is the one place a fixture may name a root other than the real
+// expansion. The files on disk get no such allowance: they must resolve the
+// checkout exactly as the surface documents it.
+function commandFileProblems(label, command, { argv = null, allowedRoots = [ROOT_EXPR] } = {}) {
   const bad = [];
-  const spec = COMMAND_FILES.find((s) => s.label === label) || { argv: null };
   if (!/^---\ndescription: [^\n]+\n---\n/.test(command)) bad.push(`${label}: no single-description frontmatter`);
   // The load-bearing check: the sequence OpenCode scans for must not appear in
   // the file at all — prose included — so the surface contributes no shell
@@ -182,9 +191,9 @@ function commandFileProblems(label, command) {
     const call = fences[0].match(CLI_CALL_PLAIN);
     if (!call) bad.push(`${label}: the block is not a bare CLI invocation: ${fences[0]}`);
     else {
-      if (call[1] !== ROOT_EXPR && call[1] !== 'x') bad.push(`${label}: unexpected root resolution: ${call[1]}`);
-      if (spec.argv && call[2].trim().split(/\s+/).join(' ') !== spec.argv.join(' ')) {
-        bad.push(`${label}: the call is \`vl.js ${call[2].trim()}\`, expected \`vl.js ${spec.argv.join(' ')}\``);
+      if (!allowedRoots.includes(call[1])) bad.push(`${label}: unexpected root resolution: ${call[1]}`);
+      if (argv && call[2].trim().split(/\s+/).join(' ') !== argv.join(' ')) {
+        bad.push(`${label}: the call is \`vl.js ${call[2].trim()}\`, expected \`vl.js ${argv.join(' ')}\``);
       }
     }
   }
@@ -250,9 +259,10 @@ function commandFileProblems(label, command) {
     // below proves the same rules reject the reviewer's payload shape rather
     // than the rules being an accident of what the files happen to look like.
     for (const spec of COMMAND_FILES) {
+      assert.ok(fs.existsSync(spec.file), `harness/opencode/command/${spec.label}.md must exist`);
       const command = fs.readFileSync(spec.file, 'utf8');
-      const problems = commandFileProblems(spec.label, command);
-      assert.deepStrictEqual(problems, [], `${spec.label}: ${problems.join(' | ')}`);
+      const problems = commandFileProblems(spec.label, command, { argv: spec.argv });
+      assert.deepStrictEqual(problems, [], problems.join(' | '));
     }
 
     // Negative control, in memory: OpenCode's expansion order is
@@ -260,25 +270,48 @@ function commandFileProblems(label, command) {
     // call — the shape these files had before the round-2 review — passes the
     // old "one exec, fixed argv" checks and must be refused here.
     const PAYLOAD = '!`printf VL_USER_TEXT_RAN`';
+    // Each mutant is asserted against the SPECIFIC reason it must trip. The
+    // fixture root here is `x`; the real files get no such allowance, so a check
+    // on disk cannot pass on a made-up path (R3-A1).
+    const fix = (call, tail = '') => `---\ndescription: d\n---\n\nRun exactly this command with the shell tool:\n\n\`\`\`sh\n${call}\n\`\`\`\n\nRelay the output above verbatim.\n${tail}`;
+    const GOOD = 'node "x/bin/vl.js" view --relay';
     const controls = [
-      ['the shape the files had before the review (an injected exec line)',
-        `${COMMAND_FILES[0].label}\n\n!${'``'}${'node "x/bin/vl.js" dashboard status --relay'}${'`'}`],
-      ['the reviewer payload appended as prose', `a line\n\n${PAYLOAD}\n`],
-      ['the payload inside a fenced block, where a reader might trust it', '```md\n' + PAYLOAD + '\n```\n'],
-      ['an argument placeholder in prose', 'Pass ${ARGUMENTS} to choose a route.\n'],
-      ['a positional placeholder', 'Run it with $1 for one route.\n'],
-      ['a second fixed call in a second sh block', '```sh\nnode "x/bin/vl.js" view --relay\n```\nand\n```sh\nnode "x/bin/vl.js" report\n```\n'],
-      ['the fixed call with an extra flag', '```sh\nnode "x/bin/vl.js" view --relay --json\n```\n'],
-      ['a substitution beyond the root resolution', '```sh\nnode "x/bin/vl.js" view --relay $HOME\n```\n'],
+      ['the shape the files had before the review: an injected exec line beside the call',
+        fix(GOOD, `\n!\`node "x/bin/vl.js" dashboard status --relay\`\n`), /bang-backtick sequence/],
+      ['the reviewer payload appended as prose',
+        fix(GOOD, `\n${PAYLOAD}\n`), /bang-backtick sequence/],
+      ['the payload inside a fenced block, where a reader might trust it',
+        fix(GOOD, `\n\`\`\`md\n${PAYLOAD}\n\`\`\`\n`), /bang-backtick sequence|code block that is not/],
+      ['an argument placeholder in prose',
+        fix(GOOD, '\nPass $' + '{ARGUMENTS} to choose a route.\n'), /argument placeholder|substitutes something/],
+      ['a positional placeholder',
+        fix(GOOD, '\nRun it with $1 for one route.\n'), /argument placeholder|substitutes something/],
+      ['a second fixed call in a second sh block',
+        fix(GOOD) + '\nand\n```sh\nnode "x/bin/vl.js" report\n```\n', /sh blocks|code block that is not/],
+      ['the fixed call with an extra flag',
+        fix('node "x/bin/vl.js" view --relay --json'), /the call is/],
+      ['the fixed call with a substitution beyond the root resolution',
+        fix('node "x/bin/vl.js" view --relay $HOME'), /substitutes something beyond/],
+      ['the fixed call without --relay',
+        fix('node "x/bin/vl.js" view'), /the call is/],
+      ['the fixed call pointed at another verb',
+        fix('node "x/bin/vl.js" dashboard lan rotate'), /the call is/],
+      ['no sh block at all', `---\ndescription: d\n---\n\nRun the CLI and relay it.\n`, /0 sh blocks/],
+      ['no relay instruction', fix(GOOD).replace('Relay the output above verbatim.', ''), /verbatim relay instruction/],
+      ['no instruction to run it', fix(GOOD).replace('Run exactly this command with the shell tool:', ''), /does not tell the model/],
     ];
-    for (const [label, body] of controls) {
-      const text = `---\ndescription: d\n---\n\nRun exactly this command with the shell tool:\n\n\`\`\`sh\nnode "${ROOT_EXPR}/bin/vl.js" ${COMMAND_FILES[0].argv.join(' ')}\n\`\`\`\n\nRelay the output above verbatim.\n\n${body}\n`;
-      assert.ok(commandFileProblems('control', text).length > 0,
-        `negative control accepted: ${label}`);
+    for (const [label, text, expect] of controls) {
+      const problems = commandFileProblems('control', text, { argv: ['view', '--relay'], allowedRoots: [ROOT_EXPR, 'x'] });
+      assert.ok(problems.length > 0, `negative control accepted: ${label}`);
+      assert.ok(problems.some((p) => expect.test(p)),
+        `negative control "${label}" failed for the wrong reason: ${problems.join(' | ')} (expected /${expect.source}/)`);
     }
+    // The same predicate passes every real file, so a control differs in the one
+    // thing it claims to test rather than in everything.
     for (const spec of COMMAND_FILES) {
-      assert.deepStrictEqual(commandFileProblems(spec.label, fs.readFileSync(spec.file, 'utf8')), [],
-        `${spec.label}: the real file must satisfy the same predicate the controls fail`);
+      assert.deepStrictEqual(
+        commandFileProblems(spec.label, fs.readFileSync(spec.file, 'utf8'), { argv: spec.argv }), [],
+        'the real file must satisfy the predicate the controls fail');
     }
 
     // And the rule the shape exists to satisfy, modelled the way OpenCode

@@ -11,6 +11,7 @@ no second renderer, no second gate, and no OpenCode-specific adapter.
 | `command/dashboard.md` | OpenCode custom command for the dashboard launch (#136) | `dashboard open --relay` |
 | `command/dashboard-stop.md` | OpenCode custom command for shutting the daemon down (#136, Q34-A) | `dashboard stop --relay` |
 | `command/dashboard-status.md` | OpenCode custom command for the daemon state read (#136, Q34-A) | `dashboard status --relay` |
+| `command/setup-xiaomi.md` | OpenCode custom command for the Xiaomi route setup (Q36-A) | `setup xiaomi-token-plan --relay` |
 
 Each command file is plain instructions, not an injected shell call: it tells the
 model to run the one fixed command with its shell tool and relay the output
@@ -33,7 +34,8 @@ by default; `$XDG_CONFIG_HOME/opencode` when set). Pick one mode.
 
    ```sh
    cp harness/opencode/command/view-limits.md harness/opencode/command/dashboard.md \
-     harness/opencode/command/dashboard-stop.md harness/opencode/command/dashboard-status.md ~/.config/opencode/command/
+     harness/opencode/command/dashboard-stop.md harness/opencode/command/dashboard-status.md \
+     harness/opencode/command/setup-xiaomi.md ~/.config/opencode/command/
    ```
 
 2. **Set the root** (optional) — with the plugin referenced from the checkout,
@@ -78,6 +80,11 @@ before treating the gate as a safety control.
   ["The commands inject nothing"](#the-commands-inject-nothing).
   `test/opencode-harness.test.js` pins each file to one fixed call with no
   argument placeholder and no shell span anywhere in it.
+- **`/setup-xiaomi` command → `setup xiaomi-token-plan`** — the Xiaomi route’s own
+  setup (Q36-A). It reads Chrome console cookies rather than a stored key, so it
+  is not in the missing-key form the plain setup offers; the route id is a literal
+  inside the fixed call, which is why it is a command of its own rather than an
+  argument to another one.
 
 ## Fail-open contract
 

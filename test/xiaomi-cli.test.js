@@ -476,7 +476,7 @@ async function until(predicate, deadlineMs = 5000) {
   try {
     const out = run(ctx, ['update', XIOMI_ID]);
     assert.strictEqual(out.status, 1);
-    assert.match(out.stderr, /not configured — run \/view-limits:setup xiaomi-token-plan first/);
+    assert.match(out.stderr, /not configured — run \/view-limits:setup-xiaomi first/);
     noVaultForXiaomi(ctx, false);
   } finally {
     cleanup(ctx);
@@ -987,7 +987,7 @@ async function until(predicate, deadlineMs = 5000) {
     });
     assert.strictEqual(out.status, 1, out.stderr);
     assert.match(out.stderr, /Approve Chrome key access: click "Always Allow" \(not "Allow"\) in the macOS dialog\./);
-    assert.match(out.stderr, /Chrome key access was not granted — rerun \/view-limits:setup xiaomi-token-plan, then click "Always Allow" \(not "Allow"\)/);
+    assert.match(out.stderr, /Chrome key access was not granted — rerun \/view-limits:setup-xiaomi, then click "Always Allow" \(not "Allow"\)/);
     assert.doesNotMatch(out.stderr, /configured Chrome cookie source/, 'no success message on denial');
     const cfg = readConfig(ctx);
     assert.strictEqual(cfg.xiaomi.chromeProfile, 'Profile 46', 'denied grant must NOT publish the new selection');
@@ -1013,7 +1013,7 @@ async function until(predicate, deadlineMs = 5000) {
 
     const out = run(ctx, ['update', XIOMI_ID, '--profile', 'Profile 9'], { env: { VL_XIAOMI_GRANT_MODE: 'denied' } });
     assert.strictEqual(out.status, 1, out.stderr);
-    assert.match(out.stderr, /Chrome key access was not granted — rerun \/view-limits:setup xiaomi-token-plan/);
+    assert.match(out.stderr, /Chrome key access was not granted — rerun \/view-limits:setup-xiaomi/);
     assert.doesNotMatch(out.stderr, /revalidated/, 'no success message on denial');
     assert.strictEqual(readConfig(ctx).xiaomi.chromeProfile, 'Profile 46', 'denied grant keeps the prior config');
     assert.ok(fs.existsSync(path.join(xiaomiDir, 'rejected.json')),

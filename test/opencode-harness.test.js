@@ -40,15 +40,21 @@ const ROOT = path.resolve(__dirname, '..');
 const PLUGIN_PATH = path.join(ROOT, 'harness', 'opencode', 'plugin', 'view-limits.js');
 const COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'view-limits.md');
 const DASHBOARD_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'dashboard.md');
+const DASHBOARD_STOP_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'dashboard-stop.md');
+const DASHBOARD_STATUS_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'dashboard-status.md');
 const GUARD = path.join(__dirname, 'guard.cjs');
 
 // The one expansion the surface is allowed to interpolate in the command
 // template: resolve the checkout from VIEW_LIMITS_ROOT, else from the session
 // git root (the pattern the Codex surface documents).
 const ROOT_EXPR = '${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}';
-// Issue #136: the dashboard command wires the same CLI's launch verb.
+// Issue #136: the dashboard commands wire the same CLI's three verbs, each as one
+// fixed call. Owner ruling Q34-A: they take no argument — OpenCode substitutes
+// `$ARGUMENTS` into the prompt as text, and a `!` line is shell.
 const COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" view 2>&1$/;
 const DASHBOARD_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard open 2>&1$/;
+const DASHBOARD_STOP_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard stop 2>&1$/;
+const DASHBOARD_STATUS_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard status 2>&1$/;
 
 // argv the plugin is allowed to pass to the CLI. Anything else is new logic
 // creeping into the surface.
@@ -152,6 +158,8 @@ function assertNoNetworkOrCredentials(log, label) {
     assert.ok(fs.existsSync(PLUGIN_PATH), 'harness/opencode/plugin/view-limits.js must exist');
     assert.ok(fs.existsSync(COMMAND_PATH), 'harness/opencode/command/view-limits.md must exist');
     assert.ok(fs.existsSync(DASHBOARD_COMMAND_PATH), 'harness/opencode/command/dashboard.md must exist');
+    assert.ok(fs.existsSync(DASHBOARD_STOP_COMMAND_PATH), 'harness/opencode/command/dashboard-stop.md must exist');
+    assert.ok(fs.existsSync(DASHBOARD_STATUS_COMMAND_PATH), 'harness/opencode/command/dashboard-status.md must exist');
 
     const mod = await import(pathToFileURL(PLUGIN_PATH).href);
     assert.strictEqual(typeof mod.ViewLimits, 'function', 'the plugin exports one initializer');
@@ -184,6 +192,8 @@ function assertNoNetworkOrCredentials(log, label) {
     for (const { file, label, execRe } of [
       { file: COMMAND_PATH, label: 'view-limits', execRe: COMMAND_EXEC_RE },
       { file: DASHBOARD_COMMAND_PATH, label: 'dashboard', execRe: DASHBOARD_COMMAND_EXEC_RE },
+      { file: DASHBOARD_STOP_COMMAND_PATH, label: 'dashboard-stop', execRe: DASHBOARD_STOP_COMMAND_EXEC_RE },
+      { file: DASHBOARD_STATUS_COMMAND_PATH, label: 'dashboard-status', execRe: DASHBOARD_STATUS_COMMAND_EXEC_RE },
     ]) {
       const command = fs.readFileSync(file, 'utf8');
       assert.match(command, /^---\ndescription: [^\n]+\n---\n/, `${label}: command frontmatter`);
@@ -192,6 +202,15 @@ function assertNoNetworkOrCredentials(log, label) {
       const exec = execs[0].match(execRe);
       assert.ok(exec, `${label}: not a bare CLI invocation: ${execs[0]}`);
       assert.strictEqual(exec[1], ROOT_EXPR, `${label}: unexpected root resolution`);
+      // Q34-A: nothing user-supplied reaches that shell call. The one expansion
+      // allowed is the documented root resolution, and it is checked by being
+      // removed first — what is left of the line must hold no `$` at all. Scoped
+      // to the shell call itself: a file may still NAME the substitution in its
+      // prose to explain why it does not use one.
+      const noRoot = execs[0].split(ROOT_EXPR).join('ROOT');
+      assert.doesNotMatch(noRoot, /\$/, `${label}: the shell call substitutes nothing but the root resolution: ${execs[0]}`);
+      assert.doesNotMatch(execs[0], /\$ARGUMENTS|\$[0-9]/,
+        `${label}: no user argument reaches a shell command (Q34-A): ${execs[0]}`);
       assert.match(command, /relay the output above verbatim/i, `${label}: verbatim relay instruction`);
       assert.doesNotMatch(command.split(ROOT_EXPR).join('ROOT'), FORMAT_TOOL_RE, `${label}: no text-processing tools`);
       assert.doesNotMatch(command, /^\|/m, `${label}: no markdown table — the CLI renders`);

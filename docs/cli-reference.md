@@ -6,10 +6,17 @@
   quota / reset time, with this month's spend where available. The Claude,
   Codex and OpenCode surfaces all resolve the same `vl.js view` command.
 - **`/view-limits:setup`** — initial setup: opens a local browser form for routes
-  that have no key yet (auto-imports MiniMax from `~/.mmx/config.json`).
-- **`/view-limits:update [route-id]`** — rotate existing keys: opens the form for
-  configured routes, or one route, e.g. `/view-limits:update kimi-code-plan`.
-  Rotation always requests a replacement; it never reimports a native key.
+  that have no key yet (auto-imports MiniMax from `~/.mmx/config.json`). Takes no
+  argument; one route at a time is `vl.js setup <route-id>` in a terminal.
+- **`/view-limits:update`** — rotate existing keys: opens the form for every
+  configured route. Takes no argument; one route is `vl.js update <route-id>` in
+  a terminal. Rotation always requests a replacement; it never reimports a native
+  key.
+- **`/view-limits:dashboard`**, **`…:dashboard-stop`**, **`…:dashboard-status`**
+  — the dashboard launch, shutdown and state read (#136). Three argument-free
+  commands rather than one that takes a word: a shim's injected command is shell
+  text, so a substituted argument would be code running under the shim's own
+  permission grant (owner ruling Q34-A).
 - **`vl.js provider add|update|remove|list`** — the custom-provider lifecycle:
   validate, probe the quota source read-only, then persist. Headless, with
   stable statuses and exit codes. See
@@ -43,7 +50,6 @@ vl.js view [--condensed] [--json] # the versioned view schema: text or JSON
 vl.js recommend --json            # advisory recommendation (Jev-dormant by default)
 vl.js dashboard start|stop|status # persistent loopback dashboard daemon (Issue #61)
 vl.js dashboard open [--no-open]  #   start or reuse it and open the page (#136)
-vl.js dashboard slash [stop|status] #  the /view-limits:dashboard argument mapper
 vl.js dashboard lan enable|disable|rotate|url  # opt-in read-only LAN view (#62)
 ```
 
@@ -59,7 +65,6 @@ vl.js dashboard lan enable|disable|rotate|url  # opt-in read-only LAN view (#62)
 | `view [--condensed] [--json]` | `0` (the text layout, or one always-valid JSON envelope on stdout) | `1` on an unknown flag (usage on stderr); `8` config.json has never been published (the one-time vault→routes migration has not resolved — a rerun cannot fix it): `No configuration yet: run /view-limits:setup to add a provider, or start a new session to finish first-run setup` on stderr; `9` config.json could not be confirmed (another process was replacing it, or it exists but could not be read): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr. `--json` still prints exactly one valid envelope (`routes: []`, the status and the reason code) in every refusing case |
 | `dashboard start\|stop\|status` | `0` (`status`: running and verified) | `1` refused or failed; `2` usage; `3` `status` with nothing verified running; `9` / `10` config.json refused, as for `view` — see [the dashboard daemon](dashboard.md#the-dashboard-daemon-vljs-dashboard) |
 | `dashboard open` | `0` — including the case where the browser could not be opened (the address is printed and one diagnostic line follows). Reuse of a verified running daemon and recovery of a stale record both exit `0` | `1` the same refusals `start` gives (an unverified record, or another start holding the ownership lock) with the same message, and no browser opened; `2` usage (a bad flag); `9` / `10` config.json refused, as for `start` |
-| `dashboard slash` | `0` — it runs `open` (no argument), `stop` or `status`, so it carries that subcommand's own exit code, `3` included | `2` usage: more than one argument, or any argument that is not `stop` or `status`. It never reaches `start`, `lan`, `open --no-open` or `__daemon` |
 | `recommend --json` | `0` (one pretty JSON envelope on stdout) | `1` on bad args; non-object `--task`/`--policy` JSON exits `1` (no fallback document) |
 | `setup` / `update` / `remove` | `0` | `1` on bad args, credential-storage failure, or a stored credential whose route row was not added; `8` migration pending ([how config.json is assembled](configuration.md#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr |
 | `provider add\|update\|remove\|list` | `0` (`ok`, or `cache-stale-warning` when only the cache row failed) | `1` bad args; `2` retention choice required; `3` id collision; `4` invalid route / unsupported recipe; `5` vault unavailable / persist failed; `6` lock busy; `7` not found; `8` migration pending ([how config.json is assembled](configuration.md#how-configjson-is-assembled)); `9` config.json could not be confirmed (another process was replacing it, or it does not exist): `config unreadable mid-write; retry` on stderr — rerun; `10` config.json exists but could not be read or parsed: `config.json could not be read or parsed — fix it or move it aside, then rerun` on stderr — see [the lifecycle section](providers.md#adding-updating-and-removing-a-custom-provider) |

@@ -81,20 +81,25 @@ const PROSE_TOOL_RE = /\b(?:sed|awk|jq|grep|perl|printf|xargs|base64|column)\b/i
 const PROSE_PIPE_RE =
   /\b(?:pipe|pipes|piped|piping|redirect|redirects|redirected|redirecting)\b/i;
 
-// [QA-Low] Every exec line in the command shim must be the live view: the
-// `view` command runs the shared collector, so it is a LIVE surface — a
-// second "extra" exec line must not smuggle in a second rendering path.
-// Issue #136: the dashboard shim is the same shape with one argument mapper in
-// front of it. `dashboard slash` is the only subcommand whose argument set is
-// bounded to nothing / stop / status, which is what keeps the shim from
-// reaching `start`, `lan` or the options the terminal commands carry.
-const VIEW_EXEC_RE =
-  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" view(?: 2>&1)?$/;
-const DASHBOARD_EXEC_RE =
-  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" dashboard slash(?: \$ARGUMENTS)?(?: 2>&1)?$/;
+// Q34-A (owner ruling, 2026-10-28): "no arguments in any pre-approved command".
+// Every scanned shim makes ONE exact, argument-free CLI call, pinned by file in
+// EXPECTED_EXEC below. The allowlist above already refuses shell shaping; this
+// refuses the OTHER half — a substituted argument is shell text, not data, so a
+// shim that takes one is not a relay surface at all.
+const EXPECTED_EXEC = {
+  'commands/view-limits.md': 'view 2>&1',
+  'commands/dashboard.md': 'dashboard open 2>&1',
+  'commands/dashboard-stop.md': 'dashboard stop 2>&1',
+  'commands/dashboard-status.md': 'dashboard status 2>&1',
+  'skills/setup/SKILL.md': 'setup 2>&1',
+  'skills/update/SKILL.md': 'update 2>&1',
+};
+// The prefix is matched in either documented spelling, closing quote included,
+// exactly as the shims write it.
+const expectedExecRe = (tail) => new RegExp(
+  `^"[$]{1,2}\\{?CLAUDE_PLUGIN_ROOT\\}?/bin/vl\\.js" ${tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
 
-const failures = [];
-function check(cond, msg) {
+const failures = [];function check(cond, msg) {
   if (!cond) failures.push(msg);
 }
 
@@ -108,7 +113,7 @@ function check(cond, msg) {
 // commands. A marker that cannot be parsed is a MALFORMED injection, not an
 // absent one, and is reported as a failure rather than skipping the file —
 // skipping is how a shim escapes a guard without anyone noticing.
-const { extractExecs, withoutInjections } = require('./helpers/injected-commands.cjs');
+const { extractExecs, withoutInjections, findSubstitutions, ALLOWED_SUBSTITUTION } = require('./helpers/injected-commands.cjs');
 
 function listShims() {
   const found = [];
@@ -192,18 +197,23 @@ for (const rel of shims) {
   // [AC2] /view-limits stays a live surface: EVERY exec in the command shim must
   // run `vl.js view` — a second "extra" exec must not smuggle in a different
   // display path such as `vl.js report`.
-  if (rel === 'commands/view-limits.md') {
+  // [AC2] Q34-A: every exec in a scanned shim is the one argument-free call that
+  // file is pinned to, byte for byte after the CLI prefix. A file with no entry
+  // in EXPECTED_EXEC is a failure, not an unconcern — that is what makes an
+  // argument-taking shim impossible to add quietly.
+  const tail = EXPECTED_EXEC[rel];
+  check(tail !== undefined,
+    `${rel}: no pinned CLI call — add it to EXPECTED_EXEC, or this shim is not a relay-only surface`);
+  if (tail !== undefined) {
     for (const cmd of execs) {
-      check(VIEW_EXEC_RE.test(cmd),
-        `${rel}: every exec must remain the live view — expected \`vl.js view\`, found: ${cmd}`);
-    }
-  }
-
-  // [AC2] same for the dashboard shim: it may only reach the bounded mapper.
-  if (rel === 'commands/dashboard.md') {
-    for (const cmd of execs) {
-      check(DASHBOARD_EXEC_RE.test(cmd),
-        `${rel}: every exec must run the bounded dashboard mapper — expected \`vl.js dashboard slash $ARGUMENTS\`, found: ${cmd}`);
+      check(expectedExecRe(tail).test(cmd),
+        `${rel}: every exec must be \`vl.js ${tail}\` — found: ${cmd}`);
+      // The argv allowlist above already has no room for a substitution; this is
+      // the explicit statement of the ruling, so a future widening of that
+      // regex cannot silently re-open it.
+      const bad = findSubstitutions(cmd);
+      check(bad.length === 0,
+        `${rel}: an injected command substitutes ${bad.join(', ')} — only ${ALLOWED_SUBSTITUTION} may appear (Q34-A): ${cmd}`);
     }
   }
 }

@@ -107,13 +107,16 @@ function listShims() {
 // what counts as an exec: a line-initial `!`-exec, the inline form at the start
 // of a line or immediately after whitespace, and a ```! fenced block whose lines
 // are the commands.
-const { extractExecs, execProgram } = require('./helpers/injected-commands.cjs');
+const { extractExecs, execProgram, findSubstitutions, ALLOWED_SUBSTITUTION } = require('./helpers/injected-commands.cjs');
 
-// The four known shims that must keep injecting the CLI: a file losing its
-// injection silently is the same hole as one that never carried the field.
+// The known shims that must keep injecting the CLI, each with the ONE
+// argument-free call it is allowed to make. A file losing its injection silently
+// is the same hole as one that never carried the field (Q34-A).
 const MUST_INJECT = [
   'commands/view-limits.md',
   'commands/dashboard.md',
+  'commands/dashboard-stop.md',
+  'commands/dashboard-status.md',
   'skills/setup/SKILL.md',
   'skills/update/SKILL.md',
 ];
@@ -165,6 +168,12 @@ for (const rel of shims) {
   // The rule and the command cannot drift: every injected command's program
   // token must be the path the rule names, quoted the same way.
   for (const cmd of execs) {
+    // Q34-A: a pre-approved command substitutes NOTHING but the plugin root. An
+    // argument in a `!` exec is shell text, not data, and the grant covers
+    // whatever the substitution turns it into.
+    const bad = findSubstitutions(cmd);
+    assert.deepStrictEqual(bad, [],
+      `${rel}: an injected command may only substitute ${ALLOWED_SUBSTITUTION}; found ${bad.join(', ')} in: ${cmd}`);
     let p;
     try {
       p = execProgram(cmd);

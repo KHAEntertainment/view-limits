@@ -52,7 +52,7 @@ node test/config-revision.test.js        # configRevision writer + gate reader, 
 node test/dashboard-lib.test.js          # daemon lock, record, listener, scheduler, view runner (Issue #61)
 node test/dashboard-cli.test.js          # real daemons: concurrent start, stale/PID reuse, crash, stop, gate warmth (Issue #61)
 node test/dashboard-tick.test.js         # interval collection end to end (Issue #61)
-node test/dashboard-open.test.js         # `dashboard open` + the slash mapper: start-or-reuse, the loopback URL handed to a stubbed opener, refusals, `--no-open` (Issue #136)
+node test/dashboard-open.test.js         # `dashboard open`: start-or-reuse, the loopback URL handed to a stubbed opener, refusals, `--no-open`, the three argument-free verbs (Issue #136)
 node test/shim-allowed-tools.test.js     # every `!`-exec command/skill shim carries the one CLI-scoped allowed-tools rule (Issue #142)
 ```
 

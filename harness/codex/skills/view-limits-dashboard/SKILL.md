@@ -17,7 +17,10 @@ operating system to open that address in the default browser. The address is
 always on `127.0.0.1` and holds no token. A browser that cannot be opened is
 reported in one line and the command still exits 0 with the daemon running.
 
-To stop the daemon, or ask for its state and last collection, run the same
-command with `dashboard stop` or `dashboard status`. This is the same CLI the
-Claude plugin and the OpenCode surface drive: there is no Codex-specific
-dashboard, no second renderer and no second daemon.
+To stop the daemon, or ask for its state and last collection, use the
+`view-limits-dashboard-stop` and `view-limits-dashboard-status` skills: the same
+CLI, one fixed call each. This is the same CLI the Claude plugin and the OpenCode
+surface drive — there is no Codex-specific dashboard, no second renderer and no
+second daemon. Like those surfaces, none of the three takes an argument (owner
+ruling Q34-A): a skill that interpolated one would hand shell text to a command
+the user has already approved.

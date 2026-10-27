@@ -1,15 +1,17 @@
 ---
 name: update
-description: Rotate/update existing view-limits provider credentials — opens the browser form for configured routes. Pass a route id to rotate one, e.g. /view-limits:update kimi-code-plan.
-argument-hint: [route-id]
+description: Rotate/update existing view-limits provider credentials — opens the browser form for configured routes.
 allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" update $ARGUMENTS 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" update 2>&1`
 
 Relay the output above verbatim. If a form URL is shown, tell the user to paste
 the new key there (never in chat), then run `/view-limits` to refresh. Update
 never imports a native credential; it always requests a replacement.
+
+This command takes no argument: it offers every configured route. To rotate one
+route only, run `vl.js update <route-id>` in a terminal.
 
 After the user submits credentials through the form, the next `/view-limits`
 report or session-start will mention the outcome: successful storage shows

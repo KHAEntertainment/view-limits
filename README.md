@@ -47,7 +47,7 @@ Your keys stay out of chat. `/view-limits:setup` opens a local browser form, and
 
 You'll see one block per route you added: its state, the quota windows or balance, and when it resets. A route whose numbers can't be proven fresh shows `unknown`, never `healthy`.
 
-Optional: run `/view-limits:dashboard` to keep that view in a page instead. It starts the background daemon if it isn't running, reuses it if it is, and opens `http://127.0.0.1:<port>/` in your browser. `… dashboard stop` and `… dashboard status` do what they say; `vl.js dashboard open --no-open` prints the address and opens nothing.
+Optional: run `/view-limits:dashboard` to keep that view in a page instead. It starts the background daemon if it isn't running, reuses it if it is, and opens `http://127.0.0.1:<port>/` in your browser. `/view-limits:dashboard-stop` shuts it down and `/view-limits:dashboard-status` reports what it last collected; `vl.js dashboard open --no-open` prints the address and opens nothing. The three commands take no arguments — a command that passes one would be handing shell text to a pre-approved call.
 
 Nothing is blocked yet. The gate starts off, and the cache refreshes when you run `/view-limits` (set `refreshOnSessionStart` to warm it at session start). To get advice in the model's context, or to turn blocking on, see [Hooks](docs/configuration.md#hooks).
 
@@ -62,6 +62,17 @@ so the grant is what makes `/view-limits` print instead of failing. One honest
 caveat: the docs state that substitution inside `allowed-tools` for a plugin
 *skill*, and a plugin *command* file accepting the same field is documented
 adjacent to that, not spelled out — the first real session settles it.
+
+Those commands take no arguments, and that is deliberate rather than an
+oversight. A `!` exec is shell text, and Claude Code substitutes `$ARGUMENTS` as
+typed, so an argument in one of those files would be code running under the very
+grant above — not data for the CLI to read. So the surfaces that need a second
+verb got a second command (`/view-limits:dashboard-stop`,
+`/view-limits:dashboard-status`), and the things that genuinely take a route id
+are terminal commands: `vl.js setup <route-id>`, `vl.js update <route-id>`,
+`vl.js dashboard lan enable --interface <ip>`. `test/relay-only.test.js` and
+`test/shim-allowed-tools.test.js` pin the one fixed call per file and reject any
+substitution but `${CLAUDE_PLUGIN_ROOT}`.
 
 ## Works with
 

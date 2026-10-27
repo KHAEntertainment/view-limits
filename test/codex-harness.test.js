@@ -35,6 +35,8 @@ const ROOT = path.resolve(__dirname, '..');
 const HOOKS_PATH = path.join(ROOT, 'harness', 'codex', 'hooks.json');
 const SKILL_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits', 'SKILL.md');
 const SKILL_DASHBOARD_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard', 'SKILL.md');
+const SKILL_DASHBOARD_STOP_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard-stop', 'SKILL.md');
+const SKILL_DASHBOARD_STATUS_PATH = path.join(ROOT, 'harness', 'codex', 'skills', 'view-limits-dashboard-status', 'SKILL.md');
 const GUARD = path.join(__dirname, 'guard.cjs');
 const hooks = require('../harness/codex/hooks.json');
 
@@ -53,8 +55,11 @@ const ALLOWED_ARGV = {
   gate: ['gate'],
   refresh: ['refresh', '--quiet', '--session-start'],
   view: ['view'],
-  // Issue #136: the dashboard skill opens the daemon; one fixed call, no logic.
+  // Issue #136: the dashboard skills open, stop and read the daemon; one fixed
+  // call each, no logic and no argument (owner ruling Q34-A).
   dashboard: ['dashboard', 'open'],
+  dashboardStop: ['dashboard', 'stop'],
+  dashboardStatus: ['dashboard', 'status'],
 };
 
 // Shaping / processing tools that must never appear in a Codex surface file.
@@ -165,6 +170,8 @@ try {
   assert.ok(fs.existsSync(HOOKS_PATH), 'harness/codex/hooks.json must exist');
   assert.ok(fs.existsSync(SKILL_PATH), 'harness/codex/skills/view-limits/SKILL.md must exist');
   assert.ok(fs.existsSync(SKILL_DASHBOARD_PATH), 'harness/codex/skills/view-limits-dashboard/SKILL.md must exist');
+  assert.ok(fs.existsSync(SKILL_DASHBOARD_STOP_PATH), 'harness/codex/skills/view-limits-dashboard-stop/SKILL.md must exist');
+  assert.ok(fs.existsSync(SKILL_DASHBOARD_STATUS_PATH), 'harness/codex/skills/view-limits-dashboard-status/SKILL.md must exist');
   assert.ok(hooks.hooks && typeof hooks.hooks === 'object' && !Array.isArray(hooks.hooks));
   assert.deepStrictEqual(
     Object.keys(hooks.hooks).sort(),
@@ -228,7 +235,9 @@ try {
   // no code of its own and no table to render.
   const skills = [
     { file: SKILL_PATH, name: 'view-limits', argvKey: 'view', why: 'the status surface wires to `vl.js view`' },
-    { file: SKILL_DASHBOARD_PATH, name: 'view-limits-dashboard', argvKey: 'dashboard', why: 'the dashboard surface wires to `vl.js dashboard open`' },
+    { file: SKILL_DASHBOARD_PATH, name: 'view-limits-dashboard', argvKey: 'dashboard', why: 'the dashboard launch wires to `vl.js dashboard open`' },
+    { file: SKILL_DASHBOARD_STOP_PATH, name: 'view-limits-dashboard-stop', argvKey: 'dashboardStop', why: 'the dashboard shutdown wires to `vl.js dashboard stop`' },
+    { file: SKILL_DASHBOARD_STATUS_PATH, name: 'view-limits-dashboard-status', argvKey: 'dashboardStatus', why: 'the dashboard state read wires to `vl.js dashboard status`' },
   ];
   const skillCommandOf = {};
   for (const spec of skills) {
@@ -249,6 +258,14 @@ try {
     assert.match(skill, /relay/i, `${spec.name}: instructs a relay`);
     assert.doesNotMatch(skill, /summar|reformat|extract the|rebuild/i,
       `${spec.name}: instruct verbatim relay, never reshaping`);
+    // Q34-A ("no arguments in any pre-approved command"): Codex has no injection
+    // and no `allowed-tools` field, but the rule still applies to what the skill
+    // tells the model to run — one fixed command line with nothing substituted
+    // but the documented root resolution.
+    const noRoot = skillCommands[0].split(ROOT_EXPR).join('ROOT');
+    assert.doesNotMatch(noRoot, /\$/, `${spec.name}: the command line substitutes nothing but the root resolution`);
+    assert.doesNotMatch(skill, /\$ARGUMENTS|\$[0-9]/,
+      `${spec.name}: no user argument reaches a shell command (Q34-A)`);
     skillCommandOf[spec.name] = skillCommands[0];
   }
 
@@ -262,11 +279,14 @@ try {
   assert.deepStrictEqual(gateArgv.slice(1), ALLOWED_ARGV.gate);
   assert.deepStrictEqual(refreshArgv.slice(1), ALLOWED_ARGV.refresh);
 
-  // Issue #136: the dashboard skill's command line resolves to the real CLI
-  // with exactly the wired argv — the same `open` the Claude command runs.
-  const dashSkillArgv = resolveArgv(skillCommandOf['view-limits-dashboard']);
-  assert.strictEqual(dashSkillArgv[0], path.join(ROOT, 'bin', 'vl.js'), 'dashboard skill: resolves to the real CLI');
-  assert.deepStrictEqual(dashSkillArgv.slice(1), ALLOWED_ARGV.dashboard, 'dashboard skill: unexpected argv');
+  // Issue #136: each dashboard skill's command line resolves to the real CLI
+  // with exactly the wired argv — the same verbs the Claude commands run.
+  for (const spec of skills.slice(1)) {
+    const argv = resolveArgv(skillCommandOf[spec.name]);
+    assert.strictEqual(argv[0], path.join(ROOT, 'bin', 'vl.js'), `${spec.name}: resolves to the real CLI`);
+    assert.ok(fs.existsSync(argv[0]), `${spec.name}: the CLI it names exists`);
+    assert.deepStrictEqual(argv.slice(1), ALLOWED_ARGV[spec.argvKey], `${spec.name}: unexpected argv`);
+  }
 
   // VIEW_LIMITS_ROOT must win over the git-root fallback, or the global
   // install mode documented in harness/codex/README.md would not work.

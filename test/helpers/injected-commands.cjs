@@ -67,4 +67,23 @@ function execProgram(cmd) {
   return { token: bare[1], wasQuoted: false };
 }
 
-module.exports = { extractExecs, withoutInjections, execProgram, INLINE_MARKER_RE, INLINE_EXEC_RE, FENCE_BLOCK_RE };
+// The variable a shim may substitute into its injected command, and NOTHING
+// else. Owner ruling Q34-A ("no arguments in any pre-approved command") exists
+// because a `!` exec is shell text: Claude Code substitutes `$ARGUMENTS` as
+// typed, so an argument becomes code before the CLI ever sees it. The PR #144
+// repro was `/view-limits:dashboard status; "<root>/bin/vl.js" dashboard lan
+// disable`, which ran as two pre-approved vl.js calls. Quoting the substitution
+// does not help — it is textual replacement, not shell quoting.
+const ALLOWED_SUBSTITUTION = '${CLAUDE_PLUGIN_ROOT}';
+
+// → the substitution fragments left in a command once the plugin root is
+// accounted for: `$ARGUMENTS`, `$ARGUMENTS[1]`, `$0`..`$9`, `$NAME`, any other
+// `${…}`, and `$(…)`. An empty array is the only passing answer.
+function findSubstitutions(cmd) {
+  const rest = cmd.split(ALLOWED_SUBSTITUTION).join('');
+  const bad = [];
+  for (const m of rest.matchAll(/\$(?:\{[^}]*\}?|\([^)]*\)?|[A-Za-z_][A-Za-z0-9_]*|\d+)?/g)) bad.push(m[0]);
+  return bad;
+}
+
+module.exports = { extractExecs, withoutInjections, execProgram, findSubstitutions, ALLOWED_SUBSTITUTION, INLINE_MARKER_RE, INLINE_EXEC_RE, FENCE_BLOCK_RE };

@@ -10,7 +10,6 @@ vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
 vl.js dashboard open [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open]
 vl.js dashboard status [--json]
 vl.js dashboard stop
-vl.js dashboard slash [stop|status]                # what /view-limits:dashboard runs
 vl.js dashboard lan enable --interface IP [--port N]   # LAN view on (off by default)
 vl.js dashboard lan disable
 vl.js dashboard lan rotate                             # new read token; old links stop working
@@ -39,13 +38,20 @@ vl.js dashboard lan url                                # prints the phone link (
   - **A refusal is still a refusal.** An unverified record, or a lock held by
     another start, prints the message `start` prints for it, opens no browser,
     and exits nonzero like `start` does.
-- **From inside a harness.** `/view-limits:dashboard` (Claude) runs `open`;
-  `… stop` and `… status` run those; any other argument prints the usage. The
-  shim carries no logic, so that mapping lives in the CLI: `vl.js dashboard
-  slash` accepts nothing else, and it cannot reach `start`, `lan`, the options
-  `open` takes, or the internal `__daemon`. The Codex skill
-  `view-limits-dashboard` and the OpenCode `/dashboard` command call the same
-  `vl.js dashboard open`.
+- **From inside a harness — three argument-free commands (owner ruling Q34-A).**
+  Claude: `/view-limits:dashboard` runs `dashboard open`,
+  `/view-limits:dashboard-stop` runs `dashboard stop` and
+  `/view-limits:dashboard-status` runs `dashboard status`. Each command file
+  injects exactly one fixed CLI call and passes the user nothing: an injected
+  command is shell text, so a substituted argument would be code running under
+  that file's own permission grant rather than data for the CLI to read. To work
+  on one route, or to pass a dashboard option, use the terminal forms. The Codex
+  skills `view-limits-dashboard`, `view-limits-dashboard-stop` and
+  `view-limits-dashboard-status`, and the OpenCode commands `/dashboard`,
+  `/dashboard-stop` and `/dashboard-status`, call the same three verbs. Both
+  guards pin the rule: `test/relay-only.test.js` requires each shim's single
+  injected call to match, and `test/shim-allowed-tools.test.js` refuses any
+  substitution but `${CLAUDE_PLUGIN_ROOT}`.
 - **Collection.** On start, then every `--interval` seconds (default 30; flag >
   `config.json` `{"dashboard": {"intervalSeconds": N}}` > 30; allowed 15–3600). Each
   collection is the same `vl.js view --json` run, so it uses the shared

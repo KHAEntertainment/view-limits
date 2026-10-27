@@ -26,7 +26,6 @@
 //   vl.js recommend --json [--task J]  advisory harness/model/route/profile
 //           [--policy J]               recommendation over configured routes;
 //                                     deterministic + zero-I/O (Jev dormant).
-
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -2189,7 +2188,6 @@ async function viewCmd(args) {
 //   vl.js dashboard open  [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open]
 //   vl.js dashboard stop
 //   vl.js dashboard status [--json]
-//   vl.js dashboard slash [stop|status]   the /view-limits:dashboard entry point
 //
 // The persistent dashboard daemon, one per data directory (lib/dashboard/).
 // This is the Claude-free wrapper: flag parsing, the confirmed config read,
@@ -2198,7 +2196,7 @@ async function viewCmd(args) {
 // process `start` spawns; it is not a user command.
 
 const DASHBOARD_USAGE = 'usage: vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS] | stop | status [--json]\n' +
-  '       vl.js dashboard open [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open] | slash [stop|status]\n' +
+  '       vl.js dashboard open [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open]\n' +
   '       vl.js dashboard lan enable --interface IP [--port N] | lan disable | lan rotate | lan url';
 
 // Exit codes: 0 ok · 1 failure or refusal · 2 usage · 3 status: not running
@@ -2209,10 +2207,6 @@ const DASHBOARD_EXIT_NOT_RUNNING = 3;
 // not answered by then already has the address, so `open` never blocks on a
 // browser; the child is detached and outlives this process.
 const OPENER_WAIT_MS = 3000;
-// The words /view-limits:dashboard may carry. `dashboard slash` is the only
-// place they are mapped, so the slash surface cannot reach any other
-// subcommand — `start`, `lan` and the internal `__daemon` included.
-const DASHBOARD_SLASH_WORDS = ['stop', 'status'];
 
 function dashboardUsage(msg) {
   process.stderr.write(`view-limits: ${msg}\n${DASHBOARD_USAGE}\n`);
@@ -2446,22 +2440,6 @@ async function dashboardCmd(args) {
       if (!opened.ok) process.stdout.write(`dashboard: browser not opened (${opened.error})\n`);
     }
     return;
-  }
-
-  if (sub === 'slash') {
-    // Issue #136: the entry point /view-limits:dashboard runs. A command
-    // shim carries no shell logic (test/relay-only.test.js enforces that),
-    // so the argument mapping lives here: at most ONE argument, and only the
-    // three the slash surface defines - nothing → open, `stop` → stop,
-    // `status` → status. `open` itself is not one of them: it is the default,
-    // and its options belong to the terminal command. Anything else prints
-    // the usage and exits 2 without reaching a subcommand, `lan` and
-    // `start` included.
-    if (rest.length > 1) dashboardUsage(`the dashboard command takes at most one argument, not ${rest.length}.`);
-    if (rest.length === 1 && !DASHBOARD_SLASH_WORDS.includes(rest[0])) {
-      dashboardUsage(`unknown dashboard argument ${JSON.stringify(rest[0])}.`);
-    }
-    return dashboardCmd(rest.length === 0 ? ['open'] : [rest[0]]);
   }
 
   if (sub === '__daemon') {

@@ -9,6 +9,8 @@ There is no second renderer, no second gate, and no Codex-specific adapter.
 | `hooks.json` | Codex hook config (Codex format, not Claude's) | `gate`, `refresh --quiet --session-start` |
 | `skills/view-limits/SKILL.md` | Codex skill for the status surface | `view` |
 | `skills/view-limits-dashboard/SKILL.md` | Codex skill for the dashboard launch (#136) | `dashboard open` |
+| `skills/view-limits-dashboard-stop/SKILL.md` | Codex skill for shutting the daemon down (#136, Q34-A) | `dashboard stop` |
+| `skills/view-limits-dashboard-status/SKILL.md` | Codex skill for the daemon state read (#136, Q34-A) | `dashboard status` |
 
 ## Install
 
@@ -30,7 +32,8 @@ Codex merges every `hooks.json` it finds, so pick one mode.
 
    ```sh
    mkdir -p .codex/skills && cp -R harness/codex/hooks.json .codex/ \
-     && cp -R harness/codex/skills/view-limits harness/codex/skills/view-limits-dashboard .codex/skills/
+     && cp -R harness/codex/skills/view-limits harness/codex/skills/view-limits-dashboard \
+        harness/codex/skills/view-limits-dashboard-stop harness/codex/skills/view-limits-dashboard-status .codex/skills/
    ```
 
    **Global (installed checkout)** — copy both into `~/.codex/` and point
@@ -39,7 +42,8 @@ Codex merges every `hooks.json` it finds, so pick one mode.
 
    ```sh
    cp harness/codex/hooks.json ~/.codex/hooks.json
-   mkdir -p ~/.codex/skills && cp -R harness/codex/skills/view-limits harness/codex/skills/view-limits-dashboard ~/.codex/skills/
+   mkdir -p ~/.codex/skills && cp -R harness/codex/skills/view-limits harness/codex/skills/view-limits-dashboard \
+     harness/codex/skills/view-limits-dashboard-stop harness/codex/skills/view-limits-dashboard-status ~/.codex/skills/
    export VIEW_LIMITS_ROOT="$HOME/path/to/view-limits"
    ```
 
@@ -66,8 +70,12 @@ block a session. See "Known limits" below.
   swallows the "nothing installed" case.
 - **`view-limits-dashboard` skill → `dashboard open`** — starts the dashboard
   daemon or reuses the one already running, prints its loopback address, and
-  opens that address in the browser (#136). `dashboard stop` and
-  `dashboard status` are the same CLI, run directly.
+  opens that address in the browser (#136).
+- **`view-limits-dashboard-stop` / `-status` skills → `dashboard stop` /
+  `dashboard status`** — shut the daemon down, and read its address, uptime and
+  last collection. Three skills rather than one that takes a word, by owner
+  ruling Q34-A: each file names one fixed call, so nothing a user types can
+  become shell text in a command the surface has already approved.
 
 ## Known limits
 

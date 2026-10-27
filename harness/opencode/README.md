@@ -9,6 +9,8 @@ no second renderer, no second gate, and no OpenCode-specific adapter.
 | `plugin/view-limits.js` | OpenCode plugin (plugin-format hooks) | `gate` |
 | `command/view-limits.md` | OpenCode custom command | `view` |
 | `command/dashboard.md` | OpenCode custom command for the dashboard launch (#136) | `dashboard open` |
+| `command/dashboard-stop.md` | OpenCode custom command for shutting the daemon down (#136, Q34-A) | `dashboard stop` |
+| `command/dashboard-status.md` | OpenCode custom command for the daemon state read (#136, Q34-A) | `dashboard status` |
 
 ## Install
 
@@ -25,7 +27,8 @@ by default; `$XDG_CONFIG_HOME/opencode` when set). Pick one mode.
    ```
 
    ```sh
-   cp harness/opencode/command/view-limits.md harness/opencode/command/dashboard.md ~/.config/opencode/command/
+   cp harness/opencode/command/view-limits.md harness/opencode/command/dashboard.md \
+     harness/opencode/command/dashboard-stop.md harness/opencode/command/dashboard-status.md ~/.config/opencode/command/
    ```
 
 2. **Set the root** (optional) — with the plugin referenced from the checkout,
@@ -60,8 +63,15 @@ before treating the gate as a safety control.
 - **`/dashboard` command → `dashboard open`** — starts the dashboard daemon or
   reuses the one already running, prints its loopback address and opens that
   address in the browser (#136). OpenCode names a custom command after its file,
-  so `command/dashboard.md` is `/dashboard`. `dashboard stop` and
-  `dashboard status` have no command file: run the CLI, the same one.
+  so `command/dashboard.md` is `/dashboard`.
+- **`/dashboard-stop` and `/dashboard-status` → `dashboard stop` / `dashboard
+  status`** — shut the daemon down, and read its address, uptime and last
+  collection. Three command files rather than one that takes a word, by owner
+  ruling Q34-A: `$ARGUMENTS` is substituted into the prompt as text and a `` !`…` ``
+  line is shell, so an argument in one of these files would run as code under the
+  surface's own approval. `test/opencode-harness.test.js` pins each file to one
+  fixed call and fails if any `$`-substitution but the documented root resolution
+  appears in it.
 
 ## Fail-open contract
 

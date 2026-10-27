@@ -1,5 +1,6 @@
 'use strict';
-// Issue #136 — `vl.js dashboard open`, the `slash` mapper and the browser
+// Issue #136 — `vl.js dashboard open`, the browser opener, and the three
+// argument-free verbs (Q34-A) the Claude command files call.
 // opener, run through the real CLI against a scratch CLAUDE_PLUGIN_DATA.
 //
 // The opener is a STUB, always, and the stubbing is hermetic: every name the
@@ -396,73 +397,65 @@ test('the Linux capture is the stub speaking: PATH is the stub dir and `ps`, not
     'the linux branch ran the stub named xdg-open, not a desktop opener');
 });
 
-console.log('slash: the /view-limits:dashboard mapper');
+console.log('the three argument-free verbs the shims call');
 
-test('no argument → open; stop → stop; status → status', async () => {
+// Issue #136 with owner ruling Q34-A ("no arguments in any pre-approved
+// command"): /view-limits:dashboard, /view-limits:dashboard-stop and
+// /view-limits:dashboard-status each run ONE fixed CLI call. The mapping that
+// used to sit in front of them (`dashboard slash`) is gone, so these are the
+// three verbs themselves — walked in the order a user meets them, including the
+// exit codes the shims relay verbatim.
+test('status (nothing running) → open → status → stop → status', async () => {
   const dir = scratch();
-  const a = stubbed(dir);
-  const opened = await vl(dir, ['dashboard', 'slash'], { env: a.env });
-  assert.strictEqual(opened.status, 0, opened.stderr);
-  assert.match(opened.stdout, RUNNING_RE);
-  note(dir);
-  assert.strictEqual(captures(a.capture).length, 1, 'the mapper reached the launch path');
+  const before = await vl(dir, ['dashboard', 'status'], { preload: false });
+  assert.strictEqual(before.status, 3, before.stdout);
+  assert.match(before.stdout, /dashboard: not running/);
+  assert.ok(!fs.existsSync(records.recordPath(dir)), 'a status read starts nothing');
 
-  const stat = await vl(dir, ['dashboard', 'slash', 'status'], { preload: false });
+  const a = stubbed(dir);
+  const opened = await vl(dir, ['dashboard', 'open'], { env: a.env });
+  assert.strictEqual(opened.status, 0, opened.stderr);
+  const m = opened.stdout.match(RUNNING_RE);
+  assert.ok(m, opened.stdout);
+  note(dir);
+  assert.strictEqual(captures(a.capture).length, 1, 'open handed the address to the stub');
+
+  const stat = await vl(dir, ['dashboard', 'status'], { preload: false });
   assert.strictEqual(stat.status, 0);
   assert.match(stat.stdout, /dashboard: running at http:\/\/127\.0\.0\.1:\d+\/ \(pid \d+, up \d+s, interval 30s\)/);
 
   const b = stubbed(dir);
-  const stopped = await vl(dir, ['dashboard', 'slash', 'stop'], { env: b.env });
+  const stopped = await vl(dir, ['dashboard', 'stop'], { env: b.env });
   assert.strictEqual(stopped.status, 0, stopped.stderr);
   assert.match(stopped.stdout, /dashboard: stopped/);
   assert.deepStrictEqual(captures(b.capture) || [], [], 'stop opens no browser');
-  assert.strictEqual((await vl(dir, ['dashboard', 'status'], { preload: false })).status, 3, 'and it did stop');
+
+  const after = await vl(dir, ['dashboard', 'status'], { preload: false });
+  assert.strictEqual(after.status, 3, 'and it really stopped');
+  assert.match(after.stdout, /dashboard: not running/);
 });
 
-test('status through the mapper when nothing runs keeps status\'s own exit code', async () => {
+// The removed mapper must leave no trace a caller can still trip over.
+test('the dashboard command refuses everything else, the removed mapper included', async () => {
   const dir = scratch();
-  const { env, capture } = stubbed(dir);
-  const res = await vl(dir, ['dashboard', 'slash', 'status'], { env });
-  assert.strictEqual(res.status, 3);
-  assert.match(res.stdout, /dashboard: not running/);
-  assert.deepStrictEqual(captures(capture) || [], []);
-  assert.ok(!fs.existsSync(records.recordPath(dir)), 'and nothing was started');
-});
-
-test('anything else is usage: exit 2, no daemon, no browser, no record', async () => {
-  const dir = scratch();
-  for (const args of [
-    ['bogus'], ['open'], ['start'], ['lan', 'enable'], ['stop', 'status'], ['stop', '--force'],
-    ['--json'], ['status', '--json'], ['__daemon'], ['slash'],
-  ]) {
+  for (const args of [['bogus'], ['slash'], ['status', '--bogus'], ['stop', '--force'], ['start', '--bogus']]) {
     const { env, capture } = stubbed(dir);
-    const res = await vl(dir, ['dashboard', 'slash', ...args], { env });
-    assert.strictEqual(res.status, 2, `slash ${args.join(' ')} → ${res.status}: ${res.stdout}${res.stderr}`);
+    const res = await vl(dir, ['dashboard', ...args], { env });
+    assert.strictEqual(res.status, 2, `dashboard ${args.join(' ')} → ${res.status}: ${res.stdout}${res.stderr}`);
     assert.match(res.stderr, /usage: vl\.js dashboard /);
-    assert.deepStrictEqual(captures(capture) || [], [], `slash ${args.join(' ')}: no browser`);
-    assert.ok(!fs.existsSync(records.recordPath(dir)), `slash ${args.join(' ')}: no daemon was started`);
+    // The mapper is gone, so `slash` is now just another unknown word…
+    if (args[0] === 'slash') assert.match(res.stderr, /unknown dashboard command "slash"/);
+    // …and it is not offered anywhere in the usage block itself.
+    const usageBlock = res.stderr.split('\n').filter((l) => l.startsWith('usage:') || l.startsWith('       vl.js')).join('\n');
+    assert.ok(!usageBlock.includes('slash'), `the usage no longer offers the removed mapper:\n${usageBlock}`);
+    assert.deepStrictEqual(captures(capture) || [], [], `dashboard ${args.join(' ')}: no browser`);
+    assert.ok(!fs.existsSync(records.recordPath(dir)), `dashboard ${args.join(' ')}: nothing was started`);
   }
-  // The bounded mapper is the only thing the shim may reach: a bare
-  // `vl.js dashboard` still behaves as it did on the terminal.
   const bare = await vl(dir, ['dashboard'], { preload: false });
   assert.strictEqual(bare.status, 2);
   assert.match(bare.stderr, /a dashboard command is required/);
 });
 
-test('the mapper cannot reach lan or start even with a running daemon to lose', async () => {
-  const dir = scratch();
-  const a = stubbed(dir);
-  assert.strictEqual((await vl(dir, ['dashboard', 'open'], { env: a.env })).status, 0);
-  const rec = record(dir);
-  note(dir);
-  for (const args of [['lan'], ['lan', 'disable'], ['start'], ['open', '--no-open']]) {
-    const { env, capture } = stubbed(dir);
-    const res = await vl(dir, ['dashboard', 'slash', ...args], { env });
-    assert.strictEqual(res.status, 2, `${args.join(' ')}: ${res.stderr}`);
-    assert.deepStrictEqual(captures(capture) || [], []);
-    assert.strictEqual(record(dir).instanceId, rec.instanceId, 'the running daemon was untouched');
-  }
-});
 
 // ---- runner ------------------------------------------------------------------
 

@@ -4,8 +4,10 @@
 
 Credentials are managed **in-CLI**, never pasted into chat:
 
-- `/view-limits:setup` — add missing keys (browser form).
-- `/view-limits:update <route-id>` — rotate a key (browser form).
+- `/view-limits:setup` — add missing keys (browser form). Takes no argument;
+  one route is `vl.js setup <route-id>` in a terminal.
+- `/view-limits:update` — rotate a key (browser form), offering every configured
+  route. Takes no argument; one route is `vl.js update <route-id>` in a terminal.
 
 Storage: macOS Keychain (generic password, no biometric prompt) by default;
 AES-256-GCM encrypted file (keyed by `VIEW_LIMITS_MASTER_KEY`) elsewhere. No

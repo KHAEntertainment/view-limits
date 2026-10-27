@@ -23,6 +23,10 @@ const { spawnSync } = require('child_process');
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const VL = path.join(PLUGIN_ROOT, 'bin', 'vl.js');
 const GUARD = path.join(__dirname, 'guard.cjs');
+// The hermetic collector face for the tests that run a LIVE collection: a fake
+// vault, a fake adapter, no network, and — the part #131 is about — a native
+// Traycer read that never spawns a CLI.
+const PRELOAD = path.join(PLUGIN_ROOT, 'test', 'fixtures', 'view-cli-preload.cjs');
 
 // Issue #103: the static banner header — the ascii.rest "View-Limits" banner
 // as plain text, 8 lines.
@@ -84,6 +88,19 @@ function freshEntry(id, status) {
 
 function vl(dir, args, opts = {}) {
   const env = { ...process.env, CLAUDE_PLUGIN_DATA: dir };
+  // [#131] A shell that belongs to an agent session exports TRAYCER_AGENT_ID,
+  // TRAYCER_EPIC_ID and TRAYCER_CLI. Handed that launch identity, the spawned
+  // `vl.js view` performs a REAL bounded Traycer read (lib/traycer-adapter.js)
+  // — up to 10 s per CLI call — and a route-less view treats a read timeout as
+  // fatal, so this file flaked at random on a loaded machine. No test here is
+  // about the native read, and none may depend on a live Traycer, so the
+  // inherited variables are dropped: without a launch identity the collector
+  // never spawns a read at all. This is the same isolation
+  // test/traycer-cli.test.js applies to its own children; a test that wants to
+  // observe the native path stubs it through its preload instead.
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('TRAYCER_')) delete env[key];
+  }
   if (opts.guard) {
     env.NODE_OPTIONS = `--require ${GUARD}`;
     if (opts.log) env.REVIEW_LOG = opts.log;
@@ -191,7 +208,9 @@ test('view --json prints exactly one always-valid envelope', () => {
 test('a confirmed configuration with no routes is the always-valid empty envelope', () => {
   const dir = scratch();
   writeConfig(dir, []);
-  const r = vl(dir, ['view', '--json']);
+  // No routes, so this is the live collection with nothing to collect: the
+  // native read must be the stub's, never a real Traycer's (#131).
+  const r = vl(dir, ['view', '--json'], { preload: PRELOAD });
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
   const doc = JSON.parse(r.stdout);
   assert.strictEqual(doc.schemaVersion, 1);
@@ -203,7 +222,9 @@ test('a confirmed configuration with no routes is the always-valid empty envelop
 test('the text form of a confirmed configuration with no routes is a valid empty view', () => {
   const dir = scratch();
   writeConfig(dir, []);
-  const r = vl(dir, ['view']);
+  // The reported flake (#131): with nothing to render, a native Traycer read
+  // that timed out failed the command instead of degrading.
+  const r = vl(dir, ['view'], { preload: PRELOAD });
   assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
   assert.ok(r.stdout.includes('QUOTA REMAINING'));
   assert.ok(r.stdout.includes('0 healthy | 0 constrained | 0 exhausted | 0 unknown'));
@@ -255,8 +276,6 @@ test('a configuration that exists but cannot be confirmed is exit 9', () => {
 // The view is a LIVE surface now: it runs the shared collector with a bounded
 // wait and then renders what the collection published — or what it kept. The
 // gate and the snapshot stay cache-only.
-
-const PRELOAD = path.join(PLUGIN_ROOT, 'test', 'fixtures', 'view-cli-preload.cjs');
 
 test('view --json emits exactly ONE envelope for a successful collection', () => {
   const dir = scratch();

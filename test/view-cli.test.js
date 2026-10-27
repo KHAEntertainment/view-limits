@@ -271,6 +271,110 @@ test('a configuration that exists but cannot be confirmed is exit 9', () => {
   assert.deepStrictEqual(doc.reasonCodes, ['config-inconclusive']);
 });
 
+// ---- the empty configuration is never failed by the native read (#133) ------
+//
+// Owner decision Q27-A: with ZERO configured routes the native Traycer read
+// still runs (it feeds the harness profiles), but its failure must not fail
+// the command — there is nothing to collect, so there is nothing a failed
+// read could invalidate. It is disclosed, never escalated.
+
+test('[#133] a route-less view does not fail on a native read timeout', () => {
+  const dir = scratch();
+  writeConfig(dir, []);
+  const r = vl(dir, ['view'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_NATIVE_FAIL: 'traycer-read-timeout' },
+  });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  assert.ok(r.stdout.includes('QUOTA REMAINING'), 'the always-valid empty view is still rendered');
+  assert.ok(r.stdout.includes('0 healthy | 0 constrained | 0 exhausted | 0 unknown'));
+  // Pinned in full so a future extra line cannot slip past this test: the
+  // pre-existing no-credentials line, then the one native diagnostic line.
+  assert.strictEqual(
+    r.stderr,
+    'view-limits: no credentials configured yet — showing the last cached status\n' +
+    'view-limits: native collection failed — traycer-read-timeout\n',
+  );
+  // The escalated line is `view-limits: collection failed — …`; the native
+  // disclosure is `view-limits: native collection failed — …`. Only the first
+  // may never appear here.
+  assert.doesNotMatch(r.stderr, /view-limits: collection failed/);
+});
+
+test('[#133] a route-less view --json is the empty envelope on a native read timeout', () => {
+  const dir = scratch();
+  writeConfig(dir, []);
+  const r = vl(dir, ['view', '--json'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_NATIVE_FAIL: 'traycer-read-timeout' },
+  });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout); // exactly one JSON document
+  assert.strictEqual(doc.schemaVersion, 1, 'the schema version is unchanged');
+  assert.strictEqual(doc.status, 'empty');
+  assert.deepStrictEqual(doc.routes, []);
+  assert.deepStrictEqual(doc.reasonCodes, ['no-routes-configured']);
+  // No schema change: the same collection fields, with the native failure in
+  // the block that already carries it. The outcome is NOT 'failed'.
+  assert.strictEqual(doc.collection.outcome, 'no-credentials');
+  assert.strictEqual(doc.collection.reason, null);
+  assert.strictEqual(doc.collection.error, null);
+  assert.strictEqual(doc.collection.native.outcome, 'failed');
+  assert.deepStrictEqual(doc.collection.native.codes, ['traycer-read-timeout']);
+  assert.match(r.stderr, /^view-limits: native collection failed — traycer-read-timeout$/m);
+  assert.doesNotMatch(r.stderr, /view-limits: collection failed/);
+});
+
+test('[#133] a route-less view still carries the native harness profiles', () => {
+  const dir = scratch();
+  writeConfig(dir, []);
+  // The read the fix keeps for zero routes: the harness profiles come from it.
+  const r = vl(dir, ['view', '--json'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_NATIVE_PROFILE: '1' },
+  });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.status, 'empty');
+  assert.strictEqual(doc.profiles.length, 1, 'the native profile is carried');
+  assert.strictEqual(doc.collection.outcome, 'completed', 'a native-only success is unchanged');
+  assert.strictEqual(r.stderr, '', 'a successful native read prints no diagnostic');
+});
+
+test('[#133] with routes configured, a native read timeout behaves as before', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  // The boundary the fix must NOT move: a configuration WITH routes keeps the
+  // pre-existing outcome — an external success beside a failed native read is
+  // partial, exactly as on main.
+  const r = vl(dir, ['view', '--json'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_NATIVE_FAIL: 'traycer-read-timeout' },
+  });
+  assert.strictEqual(r.status, 0, `exit 0 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout);
+  assert.strictEqual(doc.collection.outcome, 'partial');
+  assert.strictEqual(doc.collection.native.outcome, 'failed');
+  assert.match(r.stderr, /^view-limits: collection partial — 0 route\(s\) failed$/m);
+});
+
+test('[#133] routes that are all ineligible are NOT route-less: a native failure still fails', () => {
+  const dir = scratch();
+  writeConfig(dir, ROUTES);
+  // "Zero routes" is literally zero configured routes. Routes that are
+  // configured but have no credential keep the native-only failure rule: the
+  // native read is the only source such a setup has.
+  const r = vl(dir, ['view', '--json'], {
+    preload: PRELOAD,
+    env: { VL_VIEW_NATIVE_FAIL: 'traycer-read-timeout', VL_VIEW_NO_VAULT: '1' },
+  });
+  assert.strictEqual(r.status, 1, `exit 1 (stderr: ${r.stderr})`);
+  const doc = JSON.parse(r.stdout); // the envelope is still valid
+  assert.strictEqual(doc.collection.outcome, 'failed');
+  assert.strictEqual(doc.collection.reason, 'native-unavailable');
+  assert.match(r.stderr, /^view-limits: collection failed — native-unavailable \(traycer-read-timeout\)$/m);
+});
+
 // ---- the live collection (Issue #60) ---------------------------------------
 //
 // The view is a LIVE surface now: it runs the shared collector with a bounded

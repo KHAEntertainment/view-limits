@@ -8,6 +8,11 @@
 //   VL_VIEW_FAIL=<routeId>   the adapter throws for that route (an external
 //                            failure), so the collector has to keep the
 //                            route's prior entry.
+//   VL_VIEW_NATIVE_FAIL=<code>  the native Traycer read comes back with that
+//                            failure diagnostic and no rows (Issue #133: e.g.
+//                            `traycer-read-timeout`).
+//   VL_VIEW_NATIVE_PROFILE=1 the native read returns one harness profile, so a
+//                            route-less view has something to carry.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -29,7 +34,18 @@ const emptyNativeRead = async () => {
   // entry's one-second lifetime is genuinely exercised against a slow read.
   const delay = Number(process.env.VL_VIEW_NATIVE_DELAY_MS || 0);
   if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-  return { caller: null, sessions: [], harnesses: [], profiles: [], diagnostics: [] };
+  // Issue #133: a native read that FAILED — the source was present and the
+  // read timed out or returned unusable output — is an empty read carrying
+  // its failure diagnostic, exactly what the real runtime snapshot service
+  // hands the collector. No rows came back, so nothing was observed.
+  const failCode = process.env.VL_VIEW_NATIVE_FAIL;
+  if (failCode) {
+    return { caller: null, sessions: [], harnesses: [], profiles: [], diagnostics: [{ code: failCode, scope: 'profiles' }] };
+  }
+  const profiles = process.env.VL_VIEW_NATIVE_PROFILE === '1'
+    ? [{ key: { host: 'test-host', provider: 'codex', profileId: 'test-profile' } }]
+    : [];
+  return { caller: null, sessions: [], harnesses: [], profiles, diagnostics: [] };
 };
 
 const load = Module._load;

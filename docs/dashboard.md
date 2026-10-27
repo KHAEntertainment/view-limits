@@ -48,10 +48,15 @@ vl.js dashboard lan url                                # prints the phone link (
   on one route, or to pass a dashboard option, use the terminal forms. The Codex
   skills `view-limits-dashboard`, `view-limits-dashboard-stop` and
   `view-limits-dashboard-status`, and the OpenCode commands `/dashboard`,
-  `/dashboard-stop` and `/dashboard-status`, call the same three verbs. Both
-  guards pin the rule: `test/relay-only.test.js` requires each shim's single
-  injected call to match, and `test/shim-allowed-tools.test.js` refuses any
-  substitution but `${CLAUDE_PLUGIN_ROOT}`.
+  `/dashboard-stop` and `/dashboard-status`, name the same three verbs. The
+  Claude files inject their one fixed call; the Codex and OpenCode files carry no
+  injection at all and tell the model to run the call and relay the output,
+  because OpenCode merges the user's arguments into the template before it looks
+  for shell spans ([OpenCode surface README](../harness/opencode/README.md#the-commands-inject-nothing)).
+  Both Claude guards pin the rule: `test/relay-only.test.js` requires each shim's
+  single injected call to match and allows exactly one of them, and
+  `test/shim-allowed-tools.test.js` refuses any substitution but
+  `${CLAUDE_PLUGIN_ROOT}`.
 - **`--relay` is for the surfaces, not for you.** Each of those calls carries it:
   a shim's injected exec aborts the whole command on any non-zero exit, and
   `status` / `stop` legitimately exit `3` / `1` when nothing is running. The flag

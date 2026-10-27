@@ -40,16 +40,26 @@ const root = path.resolve(__dirname, '..');
 const REQUIRED_SHIMS = [
   'commands/view-limits.md',
   'commands/dashboard.md',
+  'commands/dashboard-stop.md',
+  'commands/dashboard-status.md',
   'skills/setup/SKILL.md',
   'skills/update/SKILL.md',
 ];
 
-// Exec argv allowlist: the rendering CLI, one or more plain argv tokens,
-// an optional $ARGUMENTS passthrough, an optional 2>&1. Anything beyond that —
-// a pipe, redirect, `;`, `&&`, quoting, a different command — fails closed.
+// Exec argv allowlist: the rendering CLI and one or more plain argv tokens, with
+// an optional 2>&1. Anything beyond that — a pipe, a redirect to a file, `;`,
+// `&&`, a substitution, quoting, a different command — fails closed.
+//
+// The `$ARGUMENTS` passthrough this allowlist used to carry is GONE, by owner
+// ruling Q34-A ("no arguments in any pre-approved command"). A `!` exec is shell
+// text and Claude Code substitutes `$ARGUMENTS` as typed, so an argument is not
+// data for the CLI — it is code that runs under the file's own permission grant.
+// The PR #144 repro `/view-limits:dashboard status; "<root>/bin/vl.js" dashboard
+// lan disable` executed two vl.js calls inside one grant. Wrapping the
+// substitution in quotes does not help: the substitution is textual.
 const CLI_PREFIX = /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js"/;
 const EXEC_BODY_RE =
-  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js"(?: [A-Za-z0-9._:@/-]+)*(?: \$ARGUMENTS)?(?: 2>&1)?$/;
+  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js"(?: [A-Za-z0-9._:@/-]+)*(?: 2>&1)?$/;
 
 // The shim must instruct verbatim relay of the injected CLI output.
 const RELAY_RE = /relay the output above verbatim/i;
@@ -154,7 +164,7 @@ for (const rel of shims) {
   for (const cmd of execs) {
     check(CLI_PREFIX.test(cmd), `${rel}: exec line does not invoke the rendering CLI (bin/vl.js): ${cmd}`);
     check(EXEC_BODY_RE.test(cmd),
-      `${rel}: exec argv outside the relay allowlist (CLI + plain args + optional $ARGUMENTS + optional 2>&1 only — no pipes, redirects, subshells, or other commands): ${cmd}`);
+      `${rel}: exec argv outside the relay allowlist (CLI + plain args + optional 2>&1 only — no pipes, redirects, subshells, substitutions, or other commands): ${cmd}`);
   }
   // A file this guard cannot read is a failure, never a skip.
   for (const problem of problems) check(false, problem);

@@ -2,6 +2,7 @@
 name: setup
 description: Initial setup of view-limits provider credentials — opens the browser form for routes that have no key yet. Pass a route id to add one, e.g. /view-limits:setup glm-coding-plan.
 argument-hint: [route-id]
+allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
 !`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup $ARGUMENTS 2>&1`

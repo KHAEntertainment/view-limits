@@ -2,6 +2,7 @@
 name: update
 description: Rotate/update existing view-limits provider credentials — opens the browser form for configured routes. Pass a route id to rotate one, e.g. /view-limits:update kimi-code-plan.
 argument-hint: [route-id]
+allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
 !`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" update $ARGUMENTS 2>&1`

@@ -8,6 +8,7 @@ There is no second renderer, no second gate, and no Codex-specific adapter.
 | --- | --- | --- |
 | `hooks.json` | Codex hook config (Codex format, not Claude's) | `gate`, `refresh --quiet --session-start` |
 | `skills/view-limits/SKILL.md` | Codex skill for the status surface | `view` |
+| `skills/view-limits-dashboard/SKILL.md` | Codex skill for the dashboard launch (#136) | `dashboard open` |
 
 ## Install
 
@@ -29,7 +30,7 @@ Codex merges every `hooks.json` it finds, so pick one mode.
 
    ```sh
    mkdir -p .codex/skills && cp -R harness/codex/hooks.json .codex/ \
-     && cp -R harness/codex/skills/view-limits .codex/skills/
+     && cp -R harness/codex/skills/view-limits harness/codex/skills/view-limits-dashboard .codex/skills/
    ```
 
    **Global (installed checkout)** — copy both into `~/.codex/` and point
@@ -38,7 +39,7 @@ Codex merges every `hooks.json` it finds, so pick one mode.
 
    ```sh
    cp harness/codex/hooks.json ~/.codex/hooks.json
-   mkdir -p ~/.codex/skills && cp -R harness/codex/skills/view-limits ~/.codex/skills/
+   mkdir -p ~/.codex/skills && cp -R harness/codex/skills/view-limits harness/codex/skills/view-limits-dashboard ~/.codex/skills/
    export VIEW_LIMITS_ROOT="$HOME/path/to/view-limits"
    ```
 
@@ -63,6 +64,10 @@ block a session. See "Known limits" below.
   missing `node`, or a crash must never block a Codex session. It cannot hide a
   deny: the gate exits `0` and prints its decision on stdout, so `|| true` only
   swallows the "nothing installed" case.
+- **`view-limits-dashboard` skill → `dashboard open`** — starts the dashboard
+  daemon or reuses the one already running, prints its loopback address, and
+  opens that address in the browser (#136). `dashboard stop` and
+  `dashboard status` are the same CLI, run directly.
 
 ## Known limits
 
@@ -84,3 +89,35 @@ block a session. See "Known limits" below.
   shared collector and then renders — the same command the Claude and OpenCode
   surfaces use. `vl.js status` remains the cache-only read if you want it.
 - **Codex hooks are unavailable on Windows.**
+
+## Approval prompts (Issue #142): this surface needs no `allowed-tools`
+
+The Claude plugin's command and skill files carry
+`allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)`, because Claude Code
+runs a shim's `` !`…` `` exec itself while the file renders and, outside auto
+mode, aborts the whole invocation when that injected command matches no allow
+rule ([skills](https://code.claude.com/docs/en/skills),
+[permissions](https://code.claude.com/docs/en/permissions)).
+
+Codex has no such step, so there is nothing here to pre-approve. Verified
+against the current Codex docs:
+
+- A Codex skill is instructions, not an injected command. The skill page lists
+  no shell-injection syntax and no `allowed-tools` field; the only skill
+  metadata is `agents/openai.yaml`, whose fields are `interface`,
+  `policy.allow_implicit_invocation` and `dependencies.tools`
+  ([build skills](https://learn.chatgpt.com/docs/build-skills)). Our skill tells
+  the model to run one command; the model runs it through its own shell tool.
+- That shell call is governed by approval policy, permission profiles
+  (`default_permissions` / `[permissions]`, or the older `sandbox_mode`) and,
+  for commands run outside the sandbox, `prefix_rule` entries in a `rules/`
+  file ([permissions](https://learn.chatgpt.com/docs/permissions),
+  [rules](https://learn.chatgpt.com/docs/agent-configuration/rules) — rules are
+  documented as experimental).
+
+So a plugin file cannot and should not carry a Codex grant. If you want
+`vl.js dashboard open` to stop prompting, approve it once in the TUI — Codex
+then writes the prefix rule for you into `~/.codex/rules/default.rules` — or
+add one yourself, e.g.
+`prefix_rule(pattern = ["node", "<path-to-checkout>/bin/vl.js", "dashboard", "open"], decision = "allow")`.
+A `pattern` is an exact argv prefix, so keep it as narrow as that.

@@ -35,6 +35,7 @@ const root = path.resolve(__dirname, '..');
 // fails below.
 const REQUIRED_SHIMS = [
   'commands/view-limits.md',
+  'commands/dashboard.md',
   'skills/setup/SKILL.md',
   'skills/update/SKILL.md',
 ];
@@ -79,8 +80,14 @@ const PROSE_PIPE_RE =
 // [QA-Low] Every exec line in the command shim must be the live view: the
 // `view` command runs the shared collector, so it is a LIVE surface — a
 // second "extra" exec line must not smuggle in a second rendering path.
+// Issue #136: the dashboard shim is the same shape with one argument mapper in
+// front of it. `dashboard slash` is the only subcommand whose argument set is
+// bounded to nothing / stop / status, which is what keeps the shim from
+// reaching `start`, `lan` or the options the terminal commands carry.
 const VIEW_EXEC_RE =
   /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" view(?: 2>&1)?$/;
+const DASHBOARD_EXEC_RE =
+  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" dashboard slash(?: \$ARGUMENTS)?(?: 2>&1)?$/;
 
 const failures = [];
 function check(cond, msg) {
@@ -171,6 +178,16 @@ for (const rel of shims) {
       if (!m) continue; // malformed form already failed above
       check(VIEW_EXEC_RE.test(m[1]),
         `${rel}: every exec must remain the live view — expected \`vl.js view\`, found: ${m[1]}`);
+    }
+  }
+
+  // [AC2] same for the dashboard shim: it may only reach the bounded mapper.
+  if (rel === 'commands/dashboard.md') {
+    for (const line of execLines) {
+      const m = line.match(/^!`(.+)`$/);
+      if (!m) continue;
+      check(DASHBOARD_EXEC_RE.test(m[1]),
+        `${rel}: every exec must run the bounded dashboard mapper — expected \`vl.js dashboard slash $ARGUMENTS\`, found: ${m[1]}`);
     }
   }
 }

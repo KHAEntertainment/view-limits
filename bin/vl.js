@@ -21,6 +21,8 @@
 //   vl.js dashboard start|stop|status  the persistent dashboard daemon (#61): one
 //                                     per data dir, loopback-only, interval
 //                                     collection, GET /api/status.
+//   vl.js dashboard open [--no-open]   start or reuse that daemon, print its
+//                                     address and open it in the browser (#136).
 //   vl.js recommend --json [--task J]  advisory harness/model/route/profile
 //           [--policy J]               recommendation over configured routes;
 //                                     deterministic + zero-I/O (Jev dormant).
@@ -2181,11 +2183,13 @@ async function viewCmd(args) {
   if (result.outcome === collector.OUTCOME.FAILED) process.exitCode = 1;
 }
 
-// ---- dashboard (Issue #61) ---------------------------------------------------
+// ---- dashboard (Issue #61, launch path Issue #136) ---------------------------
 //
 //   vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
+//   vl.js dashboard open  [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open]
 //   vl.js dashboard stop
 //   vl.js dashboard status [--json]
+//   vl.js dashboard slash [stop|status]   the /view-limits:dashboard entry point
 //
 // The persistent dashboard daemon, one per data directory (lib/dashboard/).
 // This is the Claude-free wrapper: flag parsing, the confirmed config read,
@@ -2194,12 +2198,21 @@ async function viewCmd(args) {
 // process `start` spawns; it is not a user command.
 
 const DASHBOARD_USAGE = 'usage: vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS] | stop | status [--json]\n' +
+  '       vl.js dashboard open [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open] | slash [stop|status]\n' +
   '       vl.js dashboard lan enable --interface IP [--port N] | lan disable | lan rotate | lan url';
 
 // Exit codes: 0 ok · 1 failure or refusal · 2 usage · 3 status: not running
 // (stopped, stale or unverified) · 9/10 config refused (shared with view).
 const DASHBOARD_EXIT_USAGE = 2;
 const DASHBOARD_EXIT_NOT_RUNNING = 3;
+// How long `open` waits for the browser opener to answer. An opener that has
+// not answered by then already has the address, so `open` never blocks on a
+// browser; the child is detached and outlives this process.
+const OPENER_WAIT_MS = 3000;
+// The words /view-limits:dashboard may carry. `dashboard slash` is the only
+// place they are mapped, so the slash surface cannot reach any other
+// subcommand — `start`, `lan` and the internal `__daemon` included.
+const DASHBOARD_SLASH_WORDS = ['stop', 'status'];
 
 function dashboardUsage(msg) {
   process.stderr.write(`view-limits: ${msg}\n${DASHBOARD_USAGE}\n`);
@@ -2256,6 +2269,130 @@ function printDashboardStatus(info, asJson) {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
+// The browser opener for `dashboard open` (Issue #136). ONE argv array, never a
+// shell string: the URL is its own element, so nothing in it can be read back as
+// shell syntax. macOS `open`, Linux `xdg-open`, Windows `cmd /c start "" <url>`
+// — the empty element is `start`'s window title, which is what keeps the URL a
+// title argument rather than the thing to open. What is handed over is always
+// the loopback page URL: never the LAN link, the LAN read token or the control
+// nonce.
+//
+// This is a second opener rather than a reuse of the credential form's
+// `openBrowser` on purpose: that one fires the spawn and forgets it, so it can
+// neither report a missing browser (which `open` must do in one line without
+// failing the command) nor detach, and a browser process that outlives the CLI
+// would hold `dashboard open` in the foreground. Fixing that means editing the
+// setup path, which is not this command's file.
+function openerCommand(url, platform) {
+  if (platform === 'win32') return { file: 'cmd', args: ['/c', 'start', '', url] };
+  if (platform === 'darwin') return { file: 'open', args: [url] };
+  return { file: 'xdg-open', args: [url] };
+}
+
+// → { ok: true } | { ok: false, error }. Detached with no stdio, so the
+// opener cannot hold this process open, and a slow one is not waited on past
+// OPENER_WAIT_MS: the address has already been handed over.
+function openDashboardPage(url, { platform = process.platform, spawnFn = spawn, waitMs = OPENER_WAIT_MS } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      const cmd = openerCommand(url, platform);
+      child = spawnFn(cmd.file, cmd.args, { detached: true, stdio: 'ignore' });
+    } catch (e) {
+      resolve({ ok: false, error: escapeControlChars(openerProblem(e)) });
+      return;
+    }
+    let settled = false;
+    const settle = (outcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    // No answer in the window: treated as opened, and the detached child
+    // keeps the browser after this process exits.
+    const timer = setTimeout(() => settle({ ok: true }), waitMs);
+    child.on('error', (e) => settle({ ok: false, error: escapeControlChars(openerProblem(e)) }));
+    child.on('exit', (code) => settle(code === 0
+      ? { ok: true }
+      : { ok: false, error: `the browser opener exited ${code}` }));
+    if (typeof child.unref === 'function') child.unref();
+  });
+}
+
+// A diagnostic is one line and free of control characters: it reaches stdout
+// and, through the command shim, a chat transcript. Node names the failing
+// command in the message (`spawn open ENOENT`), which is what a user needs:
+// a bare errno code says only that something is missing, not what.
+function openerProblem(e) {
+  if (!e) return 'the browser opener could not be started';
+  return String(e.message || e.code || e).replace(/^Error:\s*/, '');
+}
+
+// The start path, shared by `dashboard start` and `dashboard open` (Issue
+// #136) so the two cannot drift: the confirmed config read, the LAN
+// validation, the daemon spawn and every refusal message, unchanged. A
+// failure still exits through `err` with the same text and the same code.
+// On success it returns the loopback URL. `opts.quiet` (set by `open`)
+// prints neither success line; `opts.reuse` (set by `open`) answers a
+// verified running instance with its URL instead of the refusal.
+async function dashboardStart(dir, rest, dashboard, lanLib, opts) {
+  const quiet = opts.quiet === true;
+  const reuse = opts.reuse === true;
+  const flags = parseDashboardFlags(rest, ['--port', '--host', '--interval']);
+  const port = flags['--port'] === undefined ? 0 : strictInteger(flags['--port']);
+  const flagInterval = flags['--interval'] === undefined ? undefined : strictInteger(flags['--interval']);
+  const bind = dashboard.validateBind({ host: flags['--host'], port });
+  if (!bind.ok) err(`dashboard start: ${bind.error}`);
+  // The confirmed config read: a configuration that cannot be proven
+  // refuses (exit 9 / 10) instead of starting a daemon on guessed defaults.
+  const cfg = loadConfig();
+  const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
+  if (!interval.ok) err(`dashboard start: ${interval.error}`);
+  // The LAN view (off unless config.dashboard.lan.enabled): a bad value or
+  // an interface not on this machine refuses; a missing or unsafe read
+  // token refuses with exit 10. The token itself never goes into argv.
+  const lanCfg = lanLib.resolveLanConfig(cfg);
+  if (!lanCfg.ok) err(`dashboard start: ${lanCfg.error}`);
+  if (lanCfg.enabled) {
+    const tok = lanLib.readToken(dir);
+    if (!tok.ok) exitLanToken(`dashboard start: ${lanLib.tokenProblem(tok.reason)}`);
+  }
+  const t = cfg.gate && cfg.gate.constrainedThreshold;
+  const started = await dashboard.startDaemon({
+    dir,
+    daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds),
+      ...(typeof t === 'number' && t > 0 && t < 1 ? ['--threshold', String(t)] : []),
+      ...(lanCfg.enabled ? ['--lan-address', lanCfg.address, '--lan-port', String(lanCfg.port)] : [])],
+  });
+  if (started.ok) {
+    if (!quiet) {
+      process.stdout.write(`dashboard: started at ${started.url} (pid ${started.pid}, interval ${started.intervalSeconds}s${interval.source === 'default' ? '' : `, from ${interval.source}`})\n`);
+      if (started.lan) process.stdout.write(`dashboard: LAN view (read-only) on http://${lanLib.hostFor(started.lan.address, started.lan.port)}/ — \`vl.js dashboard lan url\` prints the phone link\n`);
+    }
+    return started.url;
+  }
+  if (started.reason === 'already-running' || started.reason === 'held') {
+    const info = started.info || await waitForDashboard(dashboard, dir);
+    if (info && info.state === 'running') {
+      // `open` got here after `status` reported nothing running, so an
+      // instance that appeared in the meantime is reused, not refused.
+      if (reuse) return info.url;
+      err(`dashboard start: already running at ${info.url} (pid ${info.pid})`);
+    }
+    err('dashboard start: another start is in progress or holds the ownership lock; run `dashboard status`');
+  }
+  const reasons = {
+    unverified: 'a record names an instance that could not be verified; nothing was signalled — run `dashboard status`',
+    'bind-failed': `could not listen on ${bind.host}:${bind.port}${started.code ? ` (${started.code})` : ''}; nothing was published`,
+    'no-identity': 'the process start time could not be read (is `ps` available?), so the daemon would be unverifiable after a crash',
+    'ready-timeout': 'the daemon did not report ready in time (see dashboard.log in the data directory)',
+    'lan-bind-failed': `could not listen on the LAN interface${lanCfg.enabled ? ` ${lanLib.hostFor(lanCfg.address, lanCfg.port)}` : ''}${started.code ? ` (${started.code})` : ''}; nothing was published — run \`vl.js dashboard lan disable\`, or pick another port with \`vl.js dashboard lan enable --interface <ip> --port N\``,
+    'lan-token-unreadable': lanLib.tokenProblem('unreadable'),
+  };
+  err(`dashboard start: ${reasons[started.reason] || `${started.reason}${started.error ? ` (${started.error})` : ''}`}`);
+}
+
 async function dashboardCmd(args) {
   const sub = args[0];
   const rest = args.slice(1);
@@ -2283,58 +2420,57 @@ async function dashboardCmd(args) {
     err(`dashboard stop: refused (${res.reason}${res.status ? ` ${res.status}` : ''})`);
   }
 
-  if (sub === 'start' || sub === '__daemon') {
+  if (sub === 'start') { await dashboardStart(dir, rest, dashboard, lanLib, {}); return; }
+
+  if (sub === 'open') {
+    // Issue #136: start-or-reuse, print the address, then hand it to the
+    // browser. `--no-open` is the headless form: the address and nothing
+    // else, and it launches nothing.
+    const flags = parseDashboardFlags(rest.map((a) => (a === '--no-open' ? '--no-open=1' : a)),
+      ['--port', '--host', '--interval', '--no-open']);
+    const startArgs = rest.filter((a) => a !== '--no-open' && !a.startsWith('--no-open='));
+    // Reuse only a VERIFIED running instance: statusDaemon confirms the
+    // process identity and the loopback answer before it reports `running`
+    // (C-002), and reuse starts nothing. A stale record, an absent one and a
+    // corrupt one all go through the start path, which recovers the stale
+    // record and refuses an unverified one with the existing message and code.
+    const info = await dashboard.statusDaemon(dir);
+    const url = info.state === 'running'
+      ? info.url
+      : await dashboardStart(dir, startArgs, dashboard, lanLib, { quiet: true, reuse: true });
+    process.stdout.write(`dashboard: running at ${url}\n`);
+    if (flags['--no-open'] === undefined) {
+      // A missing or failing opener is not a failed command: the address is
+      // printed, the daemon stays running, and the exit stays 0.
+      const opened = await openDashboardPage(url);
+      if (!opened.ok) process.stdout.write(`dashboard: browser not opened (${opened.error})\n`);
+    }
+    return;
+  }
+
+  if (sub === 'slash') {
+    // Issue #136: the entry point /view-limits:dashboard runs. A command
+    // shim carries no shell logic (test/relay-only.test.js enforces that),
+    // so the argument mapping lives here: at most ONE argument, and only the
+    // three the slash surface defines - nothing → open, `stop` → stop,
+    // `status` → status. `open` itself is not one of them: it is the default,
+    // and its options belong to the terminal command. Anything else prints
+    // the usage and exits 2 without reaching a subcommand, `lan` and
+    // `start` included.
+    if (rest.length > 1) dashboardUsage(`the dashboard command takes at most one argument, not ${rest.length}.`);
+    if (rest.length === 1 && !DASHBOARD_SLASH_WORDS.includes(rest[0])) {
+      dashboardUsage(`unknown dashboard argument ${JSON.stringify(rest[0])}.`);
+    }
+    return dashboardCmd(rest.length === 0 ? ['open'] : [rest[0]]);
+  }
+
+  if (sub === '__daemon') {
     // `--threshold` is internal: `start` hands the daemon the gate's threshold
     // from the config it has already confirmed, so the page colours bars at it.
-    const flags = parseDashboardFlags(rest, sub === '__daemon'
-      ? ['--port', '--host', '--interval', '--threshold', '--lan-address', '--lan-port']
-      : ['--port', '--host', '--interval']);
+    const flags = parseDashboardFlags(rest, ['--port', '--host', '--interval', '--threshold', '--lan-address', '--lan-port']);
     const port = flags['--port'] === undefined ? 0 : strictInteger(flags['--port']);
-    const flagInterval = flags['--interval'] === undefined ? undefined : strictInteger(flags['--interval']);
     const bind = dashboard.validateBind({ host: flags['--host'], port });
-    if (!bind.ok) err(`dashboard ${sub === 'start' ? 'start' : 'daemon'}: ${bind.error}`);
-    if (sub === 'start') {
-      // The confirmed config read: a configuration that cannot be proven
-      // refuses (exit 9 / 10) instead of starting a daemon on guessed defaults.
-      const cfg = loadConfig();
-      const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
-      if (!interval.ok) err(`dashboard start: ${interval.error}`);
-      // The LAN view (off unless config.dashboard.lan.enabled): a bad value or
-      // an interface not on this machine refuses; a missing or unsafe read
-      // token refuses with exit 10. The token itself never goes into argv.
-      const lanCfg = lanLib.resolveLanConfig(cfg);
-      if (!lanCfg.ok) err(`dashboard start: ${lanCfg.error}`);
-      if (lanCfg.enabled) {
-        const tok = lanLib.readToken(dir);
-        if (!tok.ok) exitLanToken(`dashboard start: ${lanLib.tokenProblem(tok.reason)}`);
-      }
-      const t = cfg.gate && cfg.gate.constrainedThreshold;
-      const started = await dashboard.startDaemon({
-        dir,
-        daemonArgs: [__filename, 'dashboard', '__daemon', '--host', bind.host, '--port', String(bind.port), '--interval', String(interval.seconds),
-          ...(typeof t === 'number' && t > 0 && t < 1 ? ['--threshold', String(t)] : []),
-          ...(lanCfg.enabled ? ['--lan-address', lanCfg.address, '--lan-port', String(lanCfg.port)] : [])],
-      });
-      if (started.ok) {
-        process.stdout.write(`dashboard: started at ${started.url} (pid ${started.pid}, interval ${started.intervalSeconds}s${interval.source === 'default' ? '' : `, from ${interval.source}`})\n`);
-        if (started.lan) process.stdout.write(`dashboard: LAN view (read-only) on http://${lanLib.hostFor(started.lan.address, started.lan.port)}/ — \`vl.js dashboard lan url\` prints the phone link\n`);
-        return;
-      }
-      if (started.reason === 'already-running' || started.reason === 'held') {
-        const info = started.info || await waitForDashboard(dashboard, dir);
-        if (info && info.state === 'running') err(`dashboard start: already running at ${info.url} (pid ${info.pid})`);
-        err('dashboard start: another start is in progress or holds the ownership lock; run `dashboard status`');
-      }
-      const reasons = {
-        unverified: 'a record names an instance that could not be verified; nothing was signalled — run `dashboard status`',
-        'bind-failed': `could not listen on ${bind.host}:${bind.port}${started.code ? ` (${started.code})` : ''}; nothing was published`,
-        'no-identity': 'the process start time could not be read (is `ps` available?), so the daemon would be unverifiable after a crash',
-        'ready-timeout': 'the daemon did not report ready in time (see dashboard.log in the data directory)',
-        'lan-bind-failed': `could not listen on the LAN interface${lanCfg.enabled ? ` ${lanLib.hostFor(lanCfg.address, lanCfg.port)}` : ''}${started.code ? ` (${started.code})` : ''}; nothing was published — run \`vl.js dashboard lan disable\`, or pick another port with \`vl.js dashboard lan enable --interface <ip> --port N\``,
-        'lan-token-unreadable': lanLib.tokenProblem('unreadable'),
-      };
-      err(`dashboard start: ${reasons[started.reason] || `${started.reason}${started.error ? ` (${started.error})` : ''}`}`);
-    }
+    if (!bind.ok) err(`dashboard daemon: ${bind.error}`);
 
     // __daemon: the detached process. It reports through fd 3 (the ready
     // channel) and logs to stderr, which `start` pointed at dashboard.log.
@@ -2871,6 +3007,6 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     case 'recommend': return recommendCmd(args);
     case 'dashboard': return dashboardCmd(args);
     default:
-      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|open [--no-open]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
   }
 })();

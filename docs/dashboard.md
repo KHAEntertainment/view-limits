@@ -7,8 +7,10 @@ LAN view for a phone.
 
 ```sh
 vl.js dashboard start [--port N] [--host 127.0.0.1] [--interval SECONDS]
+vl.js dashboard open [--port N] [--host 127.0.0.1] [--interval SECONDS] [--no-open]
 vl.js dashboard status [--json]
 vl.js dashboard stop
+vl.js dashboard slash [stop|status]                # what /view-limits:dashboard runs
 vl.js dashboard lan enable --interface IP [--port N]   # LAN view on (off by default)
 vl.js dashboard lan disable
 vl.js dashboard lan rotate                             # new read token; old links stop working
@@ -19,6 +21,31 @@ vl.js dashboard lan url                                # prints the phone link (
   returns once the daemon is listening, printing its URL. The listener binds
   port `0` (a free port) unless `--port` is given; the bound port is recorded.
   An occupied `--port` is a clean error and publishes nothing.
+- **`open` — start or reuse, then show it (Issue #136).** With nothing verified
+  running it does exactly what `start` does (same config, port and interval
+  rules, same stale-record recovery); with a verified instance running it
+  reuses it and starts nothing. Either way it prints
+  `dashboard: running at <loopback url>` and asks the operating system to open
+  that address in the default browser — `open` on macOS, `xdg-open` on Linux,
+  `cmd /c start "" <url>` on Windows, always as an argument array and never
+  through a shell string. `--no-open` prints the address and launches nothing,
+  which is the headless form.
+  - **The URL is the loopback page URL, and that is all it is.** Never the LAN
+    link, never the LAN read token, never the control nonce: nothing secret
+    rides in the URL, the argv or the output, even with the LAN view enabled.
+  - **A browser that cannot be opened is not a failed command.** The address is
+    printed, one line says the browser could not be opened and why, the daemon
+    keeps running, and the exit is `0`.
+  - **A refusal is still a refusal.** An unverified record, or a lock held by
+    another start, prints the message `start` prints for it, opens no browser,
+    and exits nonzero like `start` does.
+- **From inside a harness.** `/view-limits:dashboard` (Claude) runs `open`;
+  `… stop` and `… status` run those; any other argument prints the usage. The
+  shim carries no logic, so that mapping lives in the CLI: `vl.js dashboard
+  slash` accepts nothing else, and it cannot reach `start`, `lan`, the options
+  `open` takes, or the internal `__daemon`. The Codex skill
+  `view-limits-dashboard` and the OpenCode `/dashboard` command call the same
+  `vl.js dashboard open`.
 - **Collection.** On start, then every `--interval` seconds (default 30; flag >
   `config.json` `{"dashboard": {"intervalSeconds": N}}` > 30; allowed 15–3600). Each
   collection is the same `vl.js view --json` run, so it uses the shared

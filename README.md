@@ -28,7 +28,7 @@ There's an optional gate too. A `PreToolUse` hook resolves each sub-agent dispat
 - It denies only a route whose status is fresh and unambiguously exhausted. Unknown, stale, unmapped and ambiguous routes are allowed.
 - Anything unreadable in its own config counts as `off`.
 
-An optional dashboard daemon keeps the status fresh in the background and serves a page on `127.0.0.1`, with an opt-in, read-only view for your phone. Built-in provider rows show the provider's logo (bundled with the plugin, nothing is fetched), and custom providers get a generic icon.
+An optional dashboard daemon keeps the status fresh in the background and serves a page on `127.0.0.1`, with an opt-in, read-only view for your phone. Built-in provider rows show the provider's logo (bundled with the plugin, nothing is fetched), and custom providers get a generic icon. `/view-limits:dashboard` brings it up: it starts the daemon if it isn't running, reuses it if it is, and opens the page in your browser, so you never have to go to a terminal to look at your limits.
 
 Your keys stay out of chat. `/view-limits:setup` opens a local browser form, and the keys go to the macOS Keychain, or to an AES-256-GCM encrypted file on other systems.
 
@@ -47,9 +47,21 @@ Your keys stay out of chat. `/view-limits:setup` opens a local browser form, and
 
 You'll see one block per route you added: its state, the quota windows or balance, and when it resets. A route whose numbers can't be proven fresh shows `unknown`, never `healthy`.
 
+Optional: run `/view-limits:dashboard` to keep that view in a page instead. It starts the background daemon if it isn't running, reuses it if it is, and opens `http://127.0.0.1:<port>/` in your browser. `… dashboard stop` and `… dashboard status` do what they say; `vl.js dashboard open --no-open` prints the address and opens nothing.
+
 Nothing is blocked yet. The gate starts off, and the cache refreshes when you run `/view-limits` (set `refreshOnSessionStart` to warm it at session start). To get advice in the model's context, or to turn blocking on, see [Hooks](docs/configuration.md#hooks).
 
 Codex and OpenCode run the same `vl.js view` command: [Codex setup](harness/codex/README.md), [OpenCode setup](harness/opencode/README.md). To run from a checkout, use `claude --plugin-dir /path/to/view-limits`. More in [Install](docs/install.md).
+
+Every command here runs its CLI without asking you first: each one declares
+`allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)`, which pre-approves
+this plugin's own `vl.js` and nothing else. Claude Code checks a command file's
+injected `` !`…` `` call against your permission rules while the file renders,
+and outside auto mode anything that is not allowed aborts the whole invocation,
+so the grant is what makes `/view-limits` print instead of failing. One honest
+caveat: the docs state that substitution inside `allowed-tools` for a plugin
+*skill*, and a plugin *command* file accepting the same field is documented
+adjacent to that, not spelled out — the first real session settles it.
 
 ## Works with
 
@@ -78,7 +90,7 @@ Kimi needs a `sk-kimi-*` Coding Plan key; a Moonshot `sk-*` key won't work. Kimi
 - [Xiaomi Token Plan](docs/xiaomi.md): requirements, setup, what the numbers mean, fixing access errors.
 - [Install](docs/install.md): the marketplace and checkout installs, and the Codex and OpenCode harnesses.
 - [Configuration](docs/configuration.md): credential storage, how `config.json` is assembled, hooks and gate modes.
-- [Dashboard](docs/dashboard.md): the daemon, the loopback page, the phone view.
+- [Dashboard](docs/dashboard.md): the daemon, the loopback page, the phone view, and `/view-limits:dashboard`.
 - [The view and its schema](docs/view-schema.md): `vl.js view`, the JSON envelope, what it guarantees.
 - [CLI reference](docs/cli-reference.md): every command and exit code.
 - [Development](docs/development.md): architecture, refresh and locking, tests, how releases are cut. Also see [credential receipts](docs/credential-receipts.md) (the first-run notice), [Jev recommendation](docs/jev-recommendation.md) and [Jev readiness](docs/jev-readiness.md) (the advisory model recommendation and its readiness gate).

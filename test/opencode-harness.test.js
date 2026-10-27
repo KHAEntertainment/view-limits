@@ -39,13 +39,16 @@ const { cliEnv: cliEnvBase, withEnv } = require('./helpers/gated-env.cjs');
 const ROOT = path.resolve(__dirname, '..');
 const PLUGIN_PATH = path.join(ROOT, 'harness', 'opencode', 'plugin', 'view-limits.js');
 const COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'view-limits.md');
+const DASHBOARD_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'dashboard.md');
 const GUARD = path.join(__dirname, 'guard.cjs');
 
 // The one expansion the surface is allowed to interpolate in the command
 // template: resolve the checkout from VIEW_LIMITS_ROOT, else from the session
 // git root (the pattern the Codex surface documents).
 const ROOT_EXPR = '${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}';
+// Issue #136: the dashboard command wires the same CLI's launch verb.
 const COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" view 2>&1$/;
+const DASHBOARD_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard open 2>&1$/;
 
 // argv the plugin is allowed to pass to the CLI. Anything else is new logic
 // creeping into the surface.
@@ -148,6 +151,7 @@ function assertNoNetworkOrCredentials(log, label) {
     // ---- 1. SHAPE: a loadable plugin with exactly the wired hook -----------
     assert.ok(fs.existsSync(PLUGIN_PATH), 'harness/opencode/plugin/view-limits.js must exist');
     assert.ok(fs.existsSync(COMMAND_PATH), 'harness/opencode/command/view-limits.md must exist');
+    assert.ok(fs.existsSync(DASHBOARD_COMMAND_PATH), 'harness/opencode/command/dashboard.md must exist');
 
     const mod = await import(pathToFileURL(PLUGIN_PATH).href);
     assert.strictEqual(typeof mod.ViewLimits, 'function', 'the plugin exports one initializer');
@@ -174,19 +178,27 @@ function assertNoNetworkOrCredentials(log, label) {
       'plugin: never process.execPath — OpenCode runs plugins under Bun, where it is the opencode binary');
     assert.doesNotMatch(pluginCode, FORMAT_TOOL_RE, 'plugin: no text-processing tools');
 
-    const command = fs.readFileSync(COMMAND_PATH, 'utf8');
-    assert.match(command, /^---\ndescription: .+\n---\n/, 'command frontmatter');
-    const execs = [...command.matchAll(/!`([^`]+)`/g)].map((m) => m[1]);
-    assert.strictEqual(execs.length, 1, 'the command interpolates exactly one shell call');
-    const exec = execs[0].match(COMMAND_EXEC_RE);
-    assert.ok(exec, `command: not a bare CLI invocation: ${execs[0]}`);
-    assert.strictEqual(exec[1], ROOT_EXPR, 'command: unexpected root resolution');
-    assert.match(command, /relay the output above verbatim/i, 'command: verbatim relay instruction');
-    assert.doesNotMatch(command.split(ROOT_EXPR).join('ROOT'), FORMAT_TOOL_RE, 'command: no text-processing tools');
-    assert.doesNotMatch(command, /^\|/m, 'command: no markdown table — the CLI renders');
-    assert.doesNotMatch(command, /```/, 'command: no code fences — a relay shim holds no code');
-    assert.doesNotMatch(command, /summari[sz]\w*|reformat\w*|prettif\w*|as a table/i,
-      'command: instruct verbatim relay, never reshaping');
+    // Both command files are the same shape: one frontmatter description, one
+    // injected CLI call with a fixed argv, a verbatim-relay instruction, and no
+    // code, table or reshaping of their own.
+    for (const { file, label, execRe } of [
+      { file: COMMAND_PATH, label: 'view-limits', execRe: COMMAND_EXEC_RE },
+      { file: DASHBOARD_COMMAND_PATH, label: 'dashboard', execRe: DASHBOARD_COMMAND_EXEC_RE },
+    ]) {
+      const command = fs.readFileSync(file, 'utf8');
+      assert.match(command, /^---\ndescription: [^\n]+\n---\n/, `${label}: command frontmatter`);
+      const execs = [...command.matchAll(/!`([^`]+)`/g)].map((m) => m[1]);
+      assert.strictEqual(execs.length, 1, `${label}: the command interpolates exactly one shell call`);
+      const exec = execs[0].match(execRe);
+      assert.ok(exec, `${label}: not a bare CLI invocation: ${execs[0]}`);
+      assert.strictEqual(exec[1], ROOT_EXPR, `${label}: unexpected root resolution`);
+      assert.match(command, /relay the output above verbatim/i, `${label}: verbatim relay instruction`);
+      assert.doesNotMatch(command.split(ROOT_EXPR).join('ROOT'), FORMAT_TOOL_RE, `${label}: no text-processing tools`);
+      assert.doesNotMatch(command, /^\|/m, `${label}: no markdown table — the CLI renders`);
+      assert.doesNotMatch(command, /```/, `${label}: no code fences — a relay shim holds no code`);
+      assert.doesNotMatch(command, /summari[sz]\w*|reformat\w*|prettif\w*|as a table/i,
+        `${label}: instruct verbatim relay, never reshaping`);
+    }
 
     // ---- 3. LIVE: the real hook, against a capturing stub CLI --------------
     const plugin = mod.ViewLimits({ client: {} });

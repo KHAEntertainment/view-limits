@@ -11,6 +11,8 @@ const os = require('os');
 
 const { getRuntimeSnapshot } = require('../lib/runtime-snapshot');
 const { readTraycerRuntime, parseTerminalResult, traycerEnvCallerContext } = require('../lib/traycer-adapter');
+const { buildViewSchema } = require('../lib/view-model');
+const { redactForLan } = require('../lib/dashboard/lan-redact');
 
 let failures = 0;
 const pendingTests = [];
@@ -840,6 +842,60 @@ test('boolFact: availabilityPending non-boolean (string) degrades to unconformin
   const claude = out.harnesses.find((h) => h.key.harness === 'claude');
   assert.strictEqual(claude.availabilityPending.provenance, 'unknown');
   assert.strictEqual(claude.availabilityPending.reason, 'traycer-field-unconforming');
+});
+
+console.log('\nprofile rows carry their harness (Issue #137)');
+
+// The dashboard Harness column read "—" on every row because the adapter's
+// profile row never carried a harness at all: `key.provider` is the PROVIDER
+// id (`claude-code`), which neither equals nor derives the HARNESS id
+// (`claude`). The harness is the catalog the profile list was read for, so it
+// is known at that point and is an observed fact of that read.
+//
+// The fixtures here are the real-shaped `agent list-profiles` answers: NONE of
+// them carries a `harness` field, so nothing but the adapter can supply it.
+test('every profile row carries an OBSERVED harness, through the view envelope and the LAN', async () => {
+  const fake = fullRun();
+  const dir = scratch();
+  const s = await getRuntimeSnapshot({
+    refresh: true, now: frozen, dataDir: dir,
+    callerContext: CTX,
+    io: { env: ENV, traycerRun: fake.run },
+  });
+
+  // (1) the adapter output — provider ids and harness ids stay distinct facts.
+  const byProvider = new Map(s.profiles.map((r) => [r.key.provider, r]));
+  for (const [provider, harness] of [['claude-code', 'claude'], ['codex', 'codex'], ['opencode', 'opencode']]) {
+    const row = byProvider.get(provider);
+    assert.ok(row, `profile row for ${provider}`);
+    assert.ok(row.harness, 'harness fact present');
+    assert.strictEqual(row.harness.value, harness, `${provider} → harness ${harness}`);
+    assert.strictEqual(row.harness.provenance, 'observed', 'the read is evidence, not a guess');
+    assert.strictEqual(row.harness.observedAt, row.label.observedAt, 'stamped with the SAME read time as the rest of the row');
+    assert.strictEqual(row.key.harness, undefined, 'the identity key is unchanged (C-001)');
+  }
+
+  // (2) the view envelope the CLI and the daemon publish.
+  const view = buildViewSchema(s, { now: NOW });
+  const harnesses = view.profiles.map((p) => p.harness).sort();
+  assert.deepStrictEqual([...new Set(harnesses)], ['claude', 'codex', 'opencode']);
+
+  // (3) the LAN projection keeps it — C-003's allowlist is unchanged; the
+  // value passes the SAME `oneOf(..., PROFILE_HARNESSES)` check as before.
+  const lan = redactForLan({
+    schemaVersion: view.schemaVersion, status: 'ok', daemon: { intervalSeconds: 60 },
+    collection: { state: 'idle', lastAttempt: { outcome: 'completed' } }, view,
+  });
+  assert.deepStrictEqual([...new Set(lan.view.profiles.map((p) => p.harness))].sort(), ['claude', 'codex', 'opencode']);
+  assert.ok(!JSON.stringify(lan).includes('claude-code'), 'the provider id is still not on the LAN');
+});
+
+test('a profile catalog that fails on one harness leaves the others carrying theirs', async () => {
+  const fake = fullRun({ 'agent list-profiles codex --json': { timedOut: true } });
+  const out = await readTraycerRuntime({ callerContext: CTX, env: ENV, run: fake.run });
+  const claude = out.profiles.find((r) => r.key.provider === 'claude-code');
+  assert.strictEqual(claude.harness.value, 'claude');
+  assert.ok(!out.profiles.some((r) => r.key.provider === 'codex'), 'no rows invented for the failed catalog');
 });
 
 Promise.all(pendingTests).then(() => {

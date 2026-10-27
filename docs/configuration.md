@@ -6,8 +6,10 @@ Credentials are managed **in-CLI**, never pasted into chat:
 
 - `/view-limits:setup` — add missing keys (browser form). Takes no argument;
   one route is `vl.js setup <route-id>` in a terminal.
-- `/view-limits:update` — rotate a key (browser form), offering every configured
-  route. Takes no argument; one route is `vl.js update <route-id>` in a terminal.
+- `/view-limits:update` — rotate a key (browser form), for the configured routes
+  that already have one. A configured Xiaomi route is revalidated in place first,
+  with no form, and a configured route with no key yet is setup's job, not this
+  one's. Takes no argument; one route is `vl.js update <route-id>` in a terminal.
 - `/view-limits:setup-xiaomi` — the Xiaomi route only (Q36-A). It reads Chrome
   console cookies rather than a stored key, so it is not in the missing-key form
   above and has its own command, which builds the background key helper and saves

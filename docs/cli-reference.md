@@ -14,10 +14,12 @@
   offer it. It takes no argument — the route id is a literal in the file, not
   something the user passes — and the profile and console-source options stay
   terminal-only.
-- **`/view-limits:update`** — rotate existing keys: opens the form for every
-  configured route. Takes no argument; one route is `vl.js update <route-id>` in
-  a terminal. Rotation always requests a replacement; it never reimports a native
-  key.
+- **`/view-limits:update`** — rotate existing keys: it revalidates a configured
+  Xiaomi route's Chrome source in place, without a form, and opens the form only
+  for the configured routes that already have a stored key. A configured route
+  with no key yet belongs to `/view-limits:setup`. Takes no argument; one route is
+  `vl.js update <route-id>` in a terminal. Rotation always requests a replacement;
+  it never reimports a native key.
 - **`/view-limits:dashboard`**, **`…:dashboard-stop`**, **`…:dashboard-status`**
   — the dashboard launch, shutdown and state read (#136). Three argument-free
   commands rather than one that takes a word: a shim's injected command is shell

@@ -4,13 +4,18 @@ Wiring only. This directory contains no view-limits logic: the plugin and the
 command delegate to `bin/vl.js`, the same CLI the Claude plugin drives. There is
 no second renderer, no second gate, and no OpenCode-specific adapter.
 
-| File | What it is | CLI call |
+| File | What it is | The call it names |
 | --- | --- | --- |
 | `plugin/view-limits.js` | OpenCode plugin (plugin-format hooks) | `gate` |
 | `command/view-limits.md` | OpenCode custom command | `view --relay` |
 | `command/dashboard.md` | OpenCode custom command for the dashboard launch (#136) | `dashboard open --relay` |
 | `command/dashboard-stop.md` | OpenCode custom command for shutting the daemon down (#136, Q34-A) | `dashboard stop --relay` |
 | `command/dashboard-status.md` | OpenCode custom command for the daemon state read (#136, Q34-A) | `dashboard status --relay` |
+
+Each command file is plain instructions, not an injected shell call: it tells the
+model to run the one fixed command with its shell tool and relay the output
+verbatim. Why that matters is in
+["The commands inject nothing"](#the-commands-inject-nothing) below.
 
 ## Install
 
@@ -55,11 +60,11 @@ before treating the gate as a safety control.
   unambiguously exhausted* route in `deny` mode. The plugin translates the call
   into the same PreToolUse envelope the Claude surface sends and throws when the
   CLI answers with `permissionDecision: "deny"`, which blocks the `task` call.
-- **`/view-limits` command → `view`** — collects the live status through the
-  shared collector and relays the CLI's rendered output verbatim, exactly like
-  the Claude `/view-limits` command and the Codex skill. `vl.js status` is the
-  cache-only read; both the command and `vl.js refresh` collect live, so
-  neither gives you a cache-only render.
+- **`/view-limits` command → `view`** — the model runs the fixed call and relays
+  the CLI's rendered output verbatim, exactly like the Claude `/view-limits`
+  command and the Codex skill. `vl.js status` is the cache-only read; the command
+  and `vl.js refresh` both collect live, so neither gives you a cache-only
+  render.
 - **`/dashboard` command → `dashboard open`** — starts the dashboard daemon or
   reuses the one already running, prints its loopback address and opens that
   address in the browser (#136). OpenCode names a custom command after its file,
@@ -67,11 +72,12 @@ before treating the gate as a safety control.
 - **`/dashboard-stop` and `/dashboard-status` → `dashboard stop` / `dashboard
   status`** — shut the daemon down, and read its address, uptime and last
   collection. Three command files rather than one that takes a word, by owner
-  ruling Q34-A: `$ARGUMENTS` is substituted into the prompt as text and a `` !`…` ``
-  line is shell, so an argument in one of these files would run as code under the
-  surface's own approval. `test/opencode-harness.test.js` pins each file to one
-  fixed call and fails if any `$`-substitution but the documented root resolution
-  appears in it.
+  ruling Q34-A, and none of the four injects shell at all: OpenCode merges the
+  user's arguments into the template before it looks for shell spans, so an
+  injected template would let an argument add a second command — see
+  ["The commands inject nothing"](#the-commands-inject-nothing).
+  `test/opencode-harness.test.js` pins each file to one fixed call with no
+  argument placeholder and no shell span anywhere in it.
 
 ## Fail-open contract
 
@@ -98,16 +104,46 @@ CLI.
 - **`status` reads the cache.** It renders the cache and does no provider I/O.
   The command itself collects live.
 
+## The commands inject nothing
+
+OpenCode custom commands support a bang-backtick line that runs a shell command
+and folds its output into the prompt. These four files deliberately do not use
+it, because of the order OpenCode expands a command in. In v1.19.4
+[`SessionPrompt.command`](https://github.com/anomalyco/opencode/blob/v1.19.4/packages/opencode/src/session/prompt.ts#L1390)
+replaces the argument placeholders in the template — text substituted into prose
+counts too — or, when the template has no placeholder, **appends the arguments the
+user passed**, and only then does
+[`markdown.ts`](https://github.com/anomalyco/opencode/blob/v1.19.4/packages/opencode/src/config/markdown.ts#L6)
+scan the result for bang-backtick spans and execute every match. So an argument
+like a bang-backtick span around any shell command, supplied to
+`/dashboard-status`, becomes a second shell command running next to ours, and
+nothing inside the file can reject text before that expansion happens. Quoting
+the substitution is not a fix: it is textual.
+
+A file with no shell span of its own contributes none. What is left is the
+user's own text reaching OpenCode's documented shell-command path, which is what
+the user could have typed in the TUI anyway; the surface adds no command, and the
+fixed call is the only one the file mentions. `test/opencode-harness.test.js`
+pins that: every command file must contain no bang-backtick sequence anywhere,
+no `$` of any kind once the documented root resolution is set aside, exactly one
+`sh` block, and that block must be the one fixed CLI call.
+
+The consequence for you: output now arrives because the model ran the command and
+relayed it, not because the renderer substituted it, so it is relayed rather than
+injected — same bytes from `vl.js`, one extra hop. The user's own
+`permission.bash` rule is what pre-approves the call (see below), and OpenCode
+does not abort a command the way a Claude shim does.
+
 ## The `--relay` flag on the command calls
 
-Each command file injects its call with `--relay`, the shim-only exit waiver
-([CLI reference](../docs/cli-reference.md#the--relay-exit-waiver-shim-only)):
-OpenCode folds the injected command's output into the prompt, and the state
-answers of these commands are not failures — `dashboard status` exits `3` when
-nothing is running and `dashboard stop` exits `1`. Output is identical either way,
-the flag is refused by every other command, and the gate in `plugin/view-limits.js`
-deliberately does not carry it: that call's exit code is part of how the plugin
-decides to fail open.
+Each fixed call carries `--relay`, the shim-only exit waiver
+([CLI reference](../../docs/cli-reference.md#the--relay-exit-waiver-shim-only)):
+the state answers of these commands are not failures — `dashboard status` exits
+`3` when nothing is running and `dashboard stop` exits `1` — and the surface
+shows output rather than reading an exit code. Output is byte-identical with or
+without the flag, it is refused by every other command, and the gate in
+`plugin/view-limits.js` deliberately does not carry it: that call's exit code is
+part of how the plugin decides to fail open.
 
 ## Approval prompts (Issue #142): the grant is config-side, and the default needs none
 
@@ -131,9 +167,9 @@ OpenCode docs:
   with the last matching rule winning", and "Most permissions default to
   `allow`" ([permissions](https://opencode.ai/docs/permissions)).
 
-So the out-of-the-box answer is: nothing to do — a default OpenCode install runs
-the command file's `!` call without a prompt, and this surface ships no grant
-because there is nowhere to put one.
+So the out-of-the-box answer is: nothing to do — a default OpenCode install lets
+the model run that shell call without a prompt, and this surface ships no grant
+because there is nowhere per-command to put one.
 
 If you have tightened `bash` to `ask` or `deny` and want view-limits through
 anyway, add a narrow pattern of your own, naming the checkout you installed:

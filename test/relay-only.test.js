@@ -155,12 +155,17 @@ for (const required of REQUIRED_SHIMS) {
 for (const rel of shims) {
   const text = fs.readFileSync(path.join(root, rel), 'utf8');
 
-  // [AC1] relay source: at least one injected command, in any of the documented
-  // shapes, each strictly allowlisted so the shim only invokes the rendering CLI
-  // and never shapes its output.
+  // [AC1] relay source: EXACTLY ONE injected command — a relay-only shim does
+  // one fixed thing, and a second call (even a byte-identical one) doubles the
+  // work the surface does and is how a "fixed" shim quietly stops being fixed —
+  // in any of the documented shapes, each strictly allowlisted so the shim only
+  // invokes the rendering CLI and never shapes its output.
   const problems = [];
   const execs = extractExecs(rel, text, problems);
-  check(execs.length >= 1, `${rel}: no injected \`!\` command — a relay-only shim must invoke bin/vl.js`);
+  check(execs.length === 1,
+    execs.length === 0
+      ? `${rel}: no injected \`!\` command — a relay-only shim must invoke bin/vl.js`
+      : `${rel}: a relay-only shim injects exactly one command, found ${execs.length}: ${execs.join(' | ')}`);
   for (const cmd of execs) {
     check(CLI_PREFIX.test(cmd), `${rel}: exec line does not invoke the rendering CLI (bin/vl.js): ${cmd}`);
     check(EXEC_BODY_RE.test(cmd),

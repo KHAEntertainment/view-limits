@@ -38,7 +38,17 @@ function extractExecs(rel, text, problems) {
     problems.push(`${rel}: ${markers} injected \`!\` marker(s) but only ${parsed} parsed `
       + '— an inline command with no closing backtick?');
   }
-  for (const block of text.matchAll(FENCE_BLOCK_RE)) {
+  const fenceOpens = (text.match(/^[ \t]*```!/gm) || []).length;
+  const blocks = [...text.matchAll(FENCE_BLOCK_RE)];
+  // An opening ```! with no closing fence is a malformed injection. Counting it
+  // against the blocks actually parsed is what makes that explicit: a parser
+  // that quietly skips what it cannot match turns "the guard read every
+  // injection" into a claim that is only true for well-formed files.
+  if (blocks.length !== fenceOpens) {
+    problems.push(`${rel}: ${fenceOpens} opening \`\`\`! fence(s) but ${blocks.length} complete block(s) `
+      + '— an injected command block with no closing fence?');
+  }
+  for (const block of blocks) {
     for (const line of block[1].split('\n')) {
       if (line.trim() === '') continue;
       out.push(line.trim());
@@ -53,7 +63,15 @@ function extractExecs(rel, text, problems) {
 // shim piping anything. Removes the fenced blocks whole and the inline/indented
 // forms by match, which is why this cannot be done with a line filter.
 function withoutInjections(text) {
-  return text.replace(FENCE_BLOCK_RE, '').replace(INLINE_EXEC_RE, '');
+  return text
+    .replace(FENCE_BLOCK_RE, '')
+    // An unclosed block has already been reported by extractExecs. Drop its
+    // marker line here so the commands inside it are still seen by the prose and
+    // code-span scans — that is where the shim's "no code fences" rule catches
+    // the malformed remainder, rather than the file passing on a stripped blind
+    // spot.
+    .replace(/^[ \t]*```![^\n]*\n/gm, '')
+    .replace(INLINE_EXEC_RE, '');
 }
 
 // The program token of one injected command: its first word, quoted or not.

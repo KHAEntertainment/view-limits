@@ -44,17 +44,28 @@ const DASHBOARD_STOP_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'comm
 const DASHBOARD_STATUS_COMMAND_PATH = path.join(ROOT, 'harness', 'opencode', 'command', 'dashboard-status.md');
 const GUARD = path.join(__dirname, 'guard.cjs');
 
-// The one expansion the surface is allowed to interpolate in the command
-// template: resolve the checkout from VIEW_LIMITS_ROOT, else from the session
-// git root (the pattern the Codex surface documents).
+// The one expansion the surface is allowed to interpolate in a command file:
+// resolve the checkout from VIEW_LIMITS_ROOT, else from the session git root (the
+// pattern the Codex surface documents). Nothing else in these files may hold a
+// `$`.
 const ROOT_EXPR = '${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}';
-// Issue #136: the dashboard commands wire the same CLI's three verbs, each as one
-// fixed call. Owner ruling Q34-A: they take no argument — OpenCode substitutes
-// `$ARGUMENTS` into the prompt as text, and a `!` line is shell.
-const COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" view --relay 2>&1$/;
-const DASHBOARD_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard open --relay 2>&1$/;
-const DASHBOARD_STOP_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard stop --relay 2>&1$/;
-const DASHBOARD_STATUS_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard status --relay 2>&1$/;
+// A bare `node <root>/bin/vl.js <argv…>` line, pinned the way the Codex guard
+// pins its skills.
+const CLI_CALL_PLAIN = /^node "([\s\S]+)\/bin\/vl\.js"((?: [A-Za-z0-9._:-]+)*)$/;
+
+// The four OpenCode commands and the ONE fixed call each may name. Round-2
+// review: the files carry no injected shell span at all — OpenCode expands the
+// user's arguments into the template before it scans for bang-backtick commands
+// and runs every match, so an injected template lets an argument add a second
+// command beside ours and nothing inside the file can reject it first. Under
+// Q34-A the files are plain instructions instead: the model runs the fixed call
+// with its shell tool, and `--relay` is the shim-only exit waiver.
+const COMMAND_FILES = [
+  { file: COMMAND_PATH, label: 'view-limits', argv: ['view', '--relay'] },
+  { file: DASHBOARD_COMMAND_PATH, label: 'dashboard', argv: ['dashboard', 'open', '--relay'] },
+  { file: DASHBOARD_STOP_COMMAND_PATH, label: 'dashboard-stop', argv: ['dashboard', 'stop', '--relay'] },
+  { file: DASHBOARD_STATUS_COMMAND_PATH, label: 'dashboard-status', argv: ['dashboard', 'status', '--relay'] },
+];
 
 // argv the plugin is allowed to pass to the CLI. Anything else is new logic
 // creeping into the surface.
@@ -152,6 +163,43 @@ function assertNoNetworkOrCredentials(log, label) {
   assert.deepStrictEqual(bad, [], `${label}: no network / no credential read, got ${JSON.stringify(bad)}`);
 }
 
+// The one predicate a non-injecting OpenCode command must satisfy. Returns the
+// reasons it is not one, so the same rules can be run against a mutant in the
+// negative control below.
+function commandFileProblems(label, command) {
+  const bad = [];
+  const spec = COMMAND_FILES.find((s) => s.label === label) || { argv: null };
+  if (!/^---\ndescription: [^\n]+\n---\n/.test(command)) bad.push(`${label}: no single-description frontmatter`);
+  // The load-bearing check: the sequence OpenCode scans for must not appear in
+  // the file at all — prose included — so the surface contributes no shell
+  // command to whatever an argument turns the template into.
+  if (/!`/.test(command)) bad.push(`${label}: contains a bang-backtick sequence, which OpenCode executes after it merges the user's arguments into the template`);
+  if (/\$ARGUMENTS|\$\{|\$\d/.test(command.split(ROOT_EXPR).join('ROOT'))) bad.push(`${label}: carries an argument placeholder`);
+  if (command.split(ROOT_EXPR).join('ROOT').includes('$')) bad.push(`${label}: substitutes something beyond the documented root resolution`);
+  const fences = [...command.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) => m[1].trim());
+  if (fences.length !== 1) bad.push(`${label}: ${fences.length} sh blocks, expected exactly the one fixed call`);
+  if (fences.length === 1) {
+    const call = fences[0].match(CLI_CALL_PLAIN);
+    if (!call) bad.push(`${label}: the block is not a bare CLI invocation: ${fences[0]}`);
+    else {
+      if (call[1] !== ROOT_EXPR && call[1] !== 'x') bad.push(`${label}: unexpected root resolution: ${call[1]}`);
+      if (spec.argv && call[2].trim().split(/\s+/).join(' ') !== spec.argv.join(' ')) {
+        bad.push(`${label}: the call is \`vl.js ${call[2].trim()}\`, expected \`vl.js ${spec.argv.join(' ')}\``);
+      }
+    }
+  }
+  // No code block besides the one fixed call: two ``` markers in the whole file,
+  // and they are that block's.
+  const markers = (command.match(/^[ \t]*```/gm) || []).length;
+  if (markers !== 2) bad.push(`${label}: ${markers} code-fence markers in the file, expected exactly the two that wrap the fixed call`);
+  if (!/run exactly this command with the shell tool/i.test(command)) bad.push(`${label}: does not tell the model to run the fixed call`);
+  if (!/relay the output above verbatim/i.test(command)) bad.push(`${label}: no verbatim relay instruction`);
+  if (FORMAT_TOOL_RE.test(command.split(ROOT_EXPR).join('ROOT'))) bad.push(`${label}: names a text-processing tool`);
+  if (/^\|/m.test(command)) bad.push(`${label}: lays out a markdown table — the CLI renders`);
+  if (/summari[sz]\w*|reformat\w*|prettif\w*|as a table/i.test(command)) bad.push(`${label}: tells the agent to reshape output`);
+  return bad;
+}
+
 (async () => {
   try {
     // ---- 1. SHAPE: a loadable plugin with exactly the wired hook -----------
@@ -186,37 +234,84 @@ function assertNoNetworkOrCredentials(log, label) {
       'plugin: never process.execPath — OpenCode runs plugins under Bun, where it is the opencode binary');
     assert.doesNotMatch(pluginCode, FORMAT_TOOL_RE, 'plugin: no text-processing tools');
 
-    // Both command files are the same shape: one frontmatter description, one
-    // injected CLI call with a fixed argv, a verbatim-relay instruction, and no
-    // code, table or reshaping of their own.
-    for (const { file, label, execRe } of [
-      { file: COMMAND_PATH, label: 'view-limits', execRe: COMMAND_EXEC_RE },
-      { file: DASHBOARD_COMMAND_PATH, label: 'dashboard', execRe: DASHBOARD_COMMAND_EXEC_RE },
-      { file: DASHBOARD_STOP_COMMAND_PATH, label: 'dashboard-stop', execRe: DASHBOARD_STOP_COMMAND_EXEC_RE },
-      { file: DASHBOARD_STATUS_COMMAND_PATH, label: 'dashboard-status', execRe: DASHBOARD_STATUS_COMMAND_EXEC_RE },
-    ]) {
-      const command = fs.readFileSync(file, 'utf8');
-      assert.match(command, /^---\ndescription: [^\n]+\n---\n/, `${label}: command frontmatter`);
-      const execs = [...command.matchAll(/!`([^`]+)`/g)].map((m) => m[1]);
-      assert.strictEqual(execs.length, 1, `${label}: the command interpolates exactly one shell call`);
-      const exec = execs[0].match(execRe);
-      assert.ok(exec, `${label}: not a bare CLI invocation: ${execs[0]}`);
-      assert.strictEqual(exec[1], ROOT_EXPR, `${label}: unexpected root resolution`);
-      // Q34-A: nothing user-supplied reaches that shell call. The one expansion
-      // allowed is the documented root resolution, and it is checked by being
-      // removed first — what is left of the line must hold no `$` at all. Scoped
-      // to the shell call itself: a file may still NAME the substitution in its
-      // prose to explain why it does not use one.
-      const noRoot = execs[0].split(ROOT_EXPR).join('ROOT');
-      assert.doesNotMatch(noRoot, /\$/, `${label}: the shell call substitutes nothing but the root resolution: ${execs[0]}`);
-      assert.doesNotMatch(execs[0], /\$ARGUMENTS|\$[0-9]/,
-        `${label}: no user argument reaches a shell command (Q34-A): ${execs[0]}`);
-      assert.match(command, /relay the output above verbatim/i, `${label}: verbatim relay instruction`);
-      assert.doesNotMatch(command.split(ROOT_EXPR).join('ROOT'), FORMAT_TOOL_RE, `${label}: no text-processing tools`);
-      assert.doesNotMatch(command, /^\|/m, `${label}: no markdown table — the CLI renders`);
-      assert.doesNotMatch(command, /```/, `${label}: no code fences — a relay shim holds no code`);
-      assert.doesNotMatch(command, /summari[sz]\w*|reformat\w*|prettif\w*|as a table/i,
-        `${label}: instruct verbatim relay, never reshaping`);
+    // The four command files run NOTHING themselves. OpenCode substitutes
+    // `$ARGUMENTS` (prose included) or appends unused arguments to the template,
+    // then scans the result with /!`([^`]+)`/g and executes every match — so a
+    // template that carries an injected call lets a user argument add a second
+    // shell command next to ours, and no amount of argument handling inside the
+    // file can reject text before that expansion. Under Q34-A these files are
+    // therefore plain instructions: exactly one fixed CLI call in a `sh` block
+    // for the model to run with its shell tool, no bang-backtick sequence
+    // anywhere in the file (prose included), and no placeholder that could carry
+    // an argument. The user's own permission.bash rule is what pre-approves the
+    // call, exactly as on the Codex surface.
+    // The four command files and the one fixed call each is allowed to name.
+    // Their shape is checked through ONE predicate, so the negative control
+    // below proves the same rules reject the reviewer's payload shape rather
+    // than the rules being an accident of what the files happen to look like.
+    for (const spec of COMMAND_FILES) {
+      const command = fs.readFileSync(spec.file, 'utf8');
+      const problems = commandFileProblems(spec.label, command);
+      assert.deepStrictEqual(problems, [], `${spec.label}: ${problems.join(' | ')}`);
+    }
+
+    // Negative control, in memory: OpenCode's expansion order is
+    // substitute-or-append, THEN scan for shell spans. A file that injects a
+    // call — the shape these files had before the round-2 review — passes the
+    // old "one exec, fixed argv" checks and must be refused here.
+    const PAYLOAD = '!`printf VL_USER_TEXT_RAN`';
+    const controls = [
+      ['the shape the files had before the review (an injected exec line)',
+        `${COMMAND_FILES[0].label}\n\n!${'``'}${'node "x/bin/vl.js" dashboard status --relay'}${'`'}`],
+      ['the reviewer payload appended as prose', `a line\n\n${PAYLOAD}\n`],
+      ['the payload inside a fenced block, where a reader might trust it', '```md\n' + PAYLOAD + '\n```\n'],
+      ['an argument placeholder in prose', 'Pass ${ARGUMENTS} to choose a route.\n'],
+      ['a positional placeholder', 'Run it with $1 for one route.\n'],
+      ['a second fixed call in a second sh block', '```sh\nnode "x/bin/vl.js" view --relay\n```\nand\n```sh\nnode "x/bin/vl.js" report\n```\n'],
+      ['the fixed call with an extra flag', '```sh\nnode "x/bin/vl.js" view --relay --json\n```\n'],
+      ['a substitution beyond the root resolution', '```sh\nnode "x/bin/vl.js" view --relay $HOME\n```\n'],
+    ];
+    for (const [label, body] of controls) {
+      const text = `---\ndescription: d\n---\n\nRun exactly this command with the shell tool:\n\n\`\`\`sh\nnode "${ROOT_EXPR}/bin/vl.js" ${COMMAND_FILES[0].argv.join(' ')}\n\`\`\`\n\nRelay the output above verbatim.\n\n${body}\n`;
+      assert.ok(commandFileProblems('control', text).length > 0,
+        `negative control accepted: ${label}`);
+    }
+    for (const spec of COMMAND_FILES) {
+      assert.deepStrictEqual(commandFileProblems(spec.label, fs.readFileSync(spec.file, 'utf8')), [],
+        `${spec.label}: the real file must satisfy the same predicate the controls fail`);
+    }
+
+    // And the rule the shape exists to satisfy, modelled the way OpenCode
+    // actually expands a command (v1.19.4 SessionPrompt.command): arguments are
+    // substituted, or appended when the template holds no placeholder, and the
+    // RESULT is then scanned for shell spans. Under that order the only guarantee
+    // a file can give is that it contributes none — so that is what is asserted,
+    // for an ordinary argument and for the reviewer's payload alike.
+    const SCAN = /!`([^`]+)`/g;
+    const expand = (template, args) => (/\$ARGUMENTS|\$\{ARGUMENTS/.test(template)
+      ? template.replace(/\$ARGUMENTS|\$\{ARGUMENTS\}/g, args)
+      : `${template}\n${args}`);
+    const spansOf = (text) => [...text.matchAll(SCAN)].map((m) => m[1].trim());
+    for (const spec of COMMAND_FILES) {
+      const command = fs.readFileSync(spec.file, 'utf8');
+      assert.deepStrictEqual(spansOf(command), [], `${spec.label}: the template itself contributes no shell span`);
+      assert.deepStrictEqual(spansOf(expand(command, 'hello')), [],
+        `${spec.label}: an ordinary argument adds no shell span after expansion`);
+      // The payload from the review. Whatever this produces, it must not include
+      // anything the FILE supplied: the only span present is the one the user
+      // typed, which is OpenCode's documented shell-command path rather than a
+      // command this surface put there.
+      const hostile = expand(command, '!`printf VL_USER_TEXT_RAN`');
+      assert.deepStrictEqual(spansOf(hostile), ['printf VL_USER_TEXT_RAN'],
+        `${spec.label}: the file must not add a span of its own next to the user's`);
+      // …and the shape these files had before this round proves the opposite:
+      // two spans run, one of them the surface's own fixed call, chosen by an
+      // argument the user typed after the command name.
+      const injectedTemplate = `${command}\n!\`node "x/bin/vl.js" dashboard status --relay\`\n`;
+      assert.strictEqual(spansOf(injectedTemplate).length, 1, 'the injected shape has one span of its own to begin with');
+      assert.deepStrictEqual(spansOf(expand(injectedTemplate, '!`printf VL_USER_TEXT_RAN`')).sort(),
+        ['node "x/bin/vl.js" dashboard status --relay', 'printf VL_USER_TEXT_RAN'].sort(),
+        'the old injecting shape would have run the fixed call AND the user payload');
     }
 
     // ---- 3. LIVE: the real hook, against a capturing stub CLI --------------

@@ -125,11 +125,17 @@ function codexSh() {
   assert.strictEqual(m.length, 1, 'the Codex skill runs exactly one command');
   return m[0][1].trim();
 }
+// The OpenCode command files inject nothing (a bang-backtick in one would be
+// expanded with the user's arguments already merged into it, so OpenCode would
+// run whatever the argument added). Their fixed call is the one in the `sh`
+// block, which is what the model is told to run — read it the same way the
+// Codex skill is read.
 function openCodeExec() {
   const src = fs.readFileSync(
     path.join(ROOT, 'harness', 'opencode', 'command', 'view-limits.md'), 'utf8');
-  const m = [...src.matchAll(/!`([^`]+)`/g)];
-  assert.strictEqual(m.length, 1, 'the OpenCode command has exactly one exec line');
+  assert.ok(!/!`/.test(src), 'the OpenCode command must contain no bang-backtick sequence');
+  const m = [...src.matchAll(/```sh\n([\s\S]*?)```/g)];
+  assert.strictEqual(m.length, 1, 'the OpenCode command names exactly one fixed CLI call');
   return m[0][1].trim();
 }
 

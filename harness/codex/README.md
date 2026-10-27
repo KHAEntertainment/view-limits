@@ -95,13 +95,16 @@ block a session. See "Known limits" below.
   `view` and `refresh`.
 - **`view` is live.** The skill runs `vl.js view`, which collects through the
   shared collector and then renders — the same command the Claude and OpenCode
-  surfaces use. `vl.js status` remains the cache-only read if you want it.
+  surfaces use. `vl.js status` remains the cache-only read if you want it. On
+  this surface the model runs the command itself, so a non-zero exit is simply
+  reported; the `--relay` waiver is there for parity with the surfaces that
+  cannot read an exit code.
 - **Codex hooks are unavailable on Windows.**
 
 ## The `--relay` flag on the skill calls
 
 Every skill above ends its command with `--relay`, the shim-only exit waiver
-([CLI reference](../docs/cli-reference.md#the--relay-exit-waiver-shim-only)): the
+([CLI reference](../../docs/cli-reference.md#the--relay-exit-waiver-shim-only)): the
 surface shows the command's output, and its own state answers (`status` on a
 stopped daemon exits `3`, `stop` on nothing running exits `1`) should not read as
 a failed run. The output is byte-identical with or without it, the flag is

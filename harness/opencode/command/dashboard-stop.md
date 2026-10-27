@@ -2,12 +2,21 @@
 description: Stop the view-limits dashboard daemon
 ---
 
-!`node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard stop --relay 2>&1`
+Run exactly this command with the shell tool:
+
+```sh
+node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard stop --relay
+```
 
 Relay the output above verbatim.
 
-This asks the verified running daemon to shut itself down and removes its record.
-It never signals a process from a record it could not verify. For the state read
-use `/dashboard-status`, to bring the page back `/dashboard`. Like the Claude
-command it mirrors, this file passes no argument: OpenCode substitutes
-`$ARGUMENTS` into the prompt as text, and a `!` line is shell.
+This file runs no shell command of its own: OpenCode appends any argument the user
+supplies to the command template and only then scans the result for
+bang-backtick shell commands to execute, so an injected template can be made to
+run a second command the user typed. The root resolution is the one expansion
+here, and this command takes no argument.
+
+`dashboard stop` asks the verified running daemon to shut itself down and removes
+its record. It never signals a process from a record it could not verify: if
+nothing verified is running, it says so and changes nothing. For the state read
+use `/dashboard-status`, to bring the page back `/dashboard`.

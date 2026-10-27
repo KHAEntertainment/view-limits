@@ -51,10 +51,10 @@ const ROOT_EXPR = '${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}';
 // Issue #136: the dashboard commands wire the same CLI's three verbs, each as one
 // fixed call. Owner ruling Q34-A: they take no argument — OpenCode substitutes
 // `$ARGUMENTS` into the prompt as text, and a `!` line is shell.
-const COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" view 2>&1$/;
-const DASHBOARD_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard open 2>&1$/;
-const DASHBOARD_STOP_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard stop 2>&1$/;
-const DASHBOARD_STATUS_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard status 2>&1$/;
+const COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" view --relay 2>&1$/;
+const DASHBOARD_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard open --relay 2>&1$/;
+const DASHBOARD_STOP_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard stop --relay 2>&1$/;
+const DASHBOARD_STATUS_COMMAND_EXEC_RE = /^node "([\s\S]+)\/bin\/vl\.js" dashboard status --relay 2>&1$/;
 
 // argv the plugin is allowed to pass to the CLI. Anything else is new logic
 // creeping into the surface.

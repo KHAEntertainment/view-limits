@@ -3,7 +3,7 @@ description: Open the view-limits dashboard — starts the daemon if it is not r
 allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" dashboard open 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" dashboard open --relay 2>&1`
 
 Relay the output above verbatim.
 

@@ -6,11 +6,11 @@ There is no second renderer, no second gate, and no Codex-specific adapter.
 
 | File | What it is | CLI call |
 | --- | --- | --- |
-| `hooks.json` | Codex hook config (Codex format, not Claude's) | `gate`, `refresh --quiet --session-start` |
-| `skills/view-limits/SKILL.md` | Codex skill for the status surface | `view` |
-| `skills/view-limits-dashboard/SKILL.md` | Codex skill for the dashboard launch (#136) | `dashboard open` |
-| `skills/view-limits-dashboard-stop/SKILL.md` | Codex skill for shutting the daemon down (#136, Q34-A) | `dashboard stop` |
-| `skills/view-limits-dashboard-status/SKILL.md` | Codex skill for the daemon state read (#136, Q34-A) | `dashboard status` |
+| `hooks.json` | Codex hook config (Codex format, not Claude's) | `gate`, `refresh --quiet --session-start` (no `--relay`: a hook contract keeps its exit code) |
+| `skills/view-limits/SKILL.md` | Codex skill for the status surface | `view --relay` |
+| `skills/view-limits-dashboard/SKILL.md` | Codex skill for the dashboard launch (#136) | `dashboard open --relay` |
+| `skills/view-limits-dashboard-stop/SKILL.md` | Codex skill for shutting the daemon down (#136, Q34-A) | `dashboard stop --relay` |
+| `skills/view-limits-dashboard-status/SKILL.md` | Codex skill for the daemon state read (#136, Q34-A) | `dashboard status --relay` |
 
 ## Install
 
@@ -97,6 +97,18 @@ block a session. See "Known limits" below.
   shared collector and then renders — the same command the Claude and OpenCode
   surfaces use. `vl.js status` remains the cache-only read if you want it.
 - **Codex hooks are unavailable on Windows.**
+
+## The `--relay` flag on the skill calls
+
+Every skill above ends its command with `--relay`, the shim-only exit waiver
+([CLI reference](../docs/cli-reference.md#the--relay-exit-waiver-shim-only)): the
+surface shows the command's output, and its own state answers (`status` on a
+stopped daemon exits `3`, `stop` on nothing running exits `1`) should not read as
+a failed run. The output is byte-identical with or without it, the flag is
+refused by every other command, and the hooks deliberately do NOT carry it — a
+hook contract keeps its exit code. Codex does not abort on a non-zero shell
+result the way a Claude shim does, so on this surface the flag is for parity in
+what the surfaces print, not a fix for a failure mode.
 
 ## Approval prompts (Issue #142): this surface needs no `allowed-tools`
 

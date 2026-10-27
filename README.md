@@ -74,6 +74,14 @@ are terminal commands: `vl.js setup <route-id>`, `vl.js update <route-id>`,
 `test/shim-allowed-tools.test.js` pin the one fixed call per file and reject any
 substitution but `${CLAUDE_PLUGIN_ROOT}`.
 
+Each of those injected calls also carries `--relay`, because Claude Code aborts a
+command whose injected exec exits non-zero — and "the dashboard is not running"
+is a normal answer, not a failure (`dashboard status` exits `3`, `dashboard stop`
+exits `1`). The flag waives the exit code and nothing else: same bytes out, and
+every exit code in a terminal, in a hook and for the gate is unchanged. It is
+refused by any other command. See [the CLI
+reference](docs/cli-reference.md#the--relay-exit-waiver-shim-only).
+
 ## Works with
 
 | Route | Provider | What it reads |

@@ -512,7 +512,9 @@ async function check(routeId) {
   } catch (e) {
     // One line, no stack: provider bodies can carry newlines.
     const msg = String((e && e.message) || e).replace(/\s+/g, ' ').trim();
-    const hint = e && e.status === 401 ? ` (rotate via /view-limits:update ${routeId})` : '';
+    // Q34-A: the route id is context, not an argument — `/view-limits:update`
+    // takes none, and the command line below is what a user copies.
+    const hint = e && e.status === 401 ? ` (rotate ${routeId} via /view-limits:update)` : '';
     err(`check ${routeId} failed: ${msg}${hint}`);
   }
   process.stdout.write(JSON.stringify(withBasis(st), null, 2) + '\n');
@@ -1935,7 +1937,9 @@ function failedRouteLines(result, what, withRotate) {
     const kept = (r.retained === true && observedAt)
       ? `showing the last observation from ${diagText(observedAt)}`
       : 'no cached observation to fall back to';
-    const rotate = withRotate ? ` (rotate via /view-limits:update ${diagText(r.id)})` : '';
+    // Q34-A: id first, command last — the slash command takes no argument, and
+    // `vl.js update <id>` remains the way to rotate exactly one route.
+    const rotate = withRotate ? ` (rotate ${diagText(r.id)} via /view-limits:update)` : '';
     lines.push(`view-limits: ${diagText(r.id)} ${what} failed (${error}); ${kept}${rotate}`);
   }
   return lines;
@@ -2833,9 +2837,64 @@ function sessionStart() {
 
 // ---- dispatch ---------------------------------------------------------------
 
+// ---- the shim-only exit waiver (`--relay`, D2-a) -----------------------------
+//
+// A command shim's injected `!` exec is run by Claude Code while the file
+// renders, and the skills docs are explicit about what a non-zero exit means
+// there: "A failed command aborts the entire skill invocation, not just its own
+// placeholder. Claude never sees the skill content for that invocation." (See
+// https://code.claude.com/docs/en/skills#when-an-injected-command-fails.) For a
+// surface whose whole job is to REPORT state, that turns the ordinary answers
+// into an error banner: `dashboard status` exits 3 when nothing runs, `dashboard
+// stop` exits 1, and `view`/`setup`/`update` exit 8/9/10 when the configuration
+// is refused. Those exit codes are a contract for terminals, scripts and the
+// gate, so they cannot change. `--relay` is a per-invocation waiver for the
+// surfaces that cannot read an exit code:
+//
+//   · the output is byte-identical — same bytes, same order, same streams:
+//     nothing in the flag touches rendering, collection or side effects;
+//   · the process exit is 0 whatever the command decided;
+//   · it is accepted ONLY on the six calls the shims actually make. Everywhere
+//     else it is a usage refusal that itself exits 2, before the waiver is
+//     installed — a waiver that also covered `serve`, `provider`, `check` or the
+//     detached `__daemon` would silently change behaviour those paths depend on,
+//     which is more than an exit code.
+const RELAY_FLAG = '--relay';
+const RELAY_COMMANDS = new Set(['view', 'setup', 'update']);
+const RELAY_DASHBOARD_SUBS = new Set(['open', 'stop', 'status']);
+
+// Validate the waiver before anything else runs. Not allowed → one line and exit
+// 2, with the process untouched, so the refusal behaves like any other usage
+// error rather than a waived one.
+function relayWanted(cmdName, argv) {
+  const at = argv.indexOf(RELAY_FLAG);
+  if (at === -1) return -1;
+  const allowed = RELAY_COMMANDS.has(cmdName)
+    || (cmdName === 'dashboard' && RELAY_DASHBOARD_SUBS.has(argv[0]));
+  if (!allowed) {
+    process.stderr.write(`view-limits: ${RELAY_FLAG} is the command-surface exit waiver only — it belongs on view, setup, update or dashboard open|stop|status\n`);
+    process.exit(2);
+  }
+  return at;
+}
+
 const cmd = process.argv[2];
 const args = process.argv.slice(3);
 const hasFlag = (n) => args.includes(n);
+
+// The waiver: taken out of argv so no command's own flag parser sees an unknown
+// option, then `process.exit` reports 0 for every explicit exit. Sites that set
+// `process.exitCode` and return are handled at the foot of the dispatch, where
+// the code is reset before the event loop drains — so stdout/stderr still flush
+// in full and the bytes a user sees are exactly the bytes the unflagged run
+// wrote.
+const RELAY_AT = relayWanted(cmd, args);
+const RELAY = RELAY_AT !== -1;
+if (RELAY) {
+  args.splice(RELAY_AT, 1);
+  const realExit = process.exit;
+  process.exit = function relayExit() { return realExit.call(process, 0); };
+}
 
 // Commands that may run the one-time route migration (see
 // lib/provider-lifecycle.js migrateFromVault). The list is an ALLOWLIST, not an exclusion, because
@@ -2987,4 +3046,10 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     default:
       return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|open [--no-open]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
   }
-})();
+})().then(() => {
+  // D2-a: the commands that report a state through `process.exitCode` (status
+  // not running = 3, a refused configuration = 8/9/10, a store failure = 1) are
+  // waived here rather than at the writer, so no call site has to remember the
+  // flag and no unflagged path can be affected by it.
+  if (RELAY) process.exitCode = 0;
+});

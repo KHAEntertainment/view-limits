@@ -4,7 +4,7 @@ description: Initial setup of view-limits provider credentials — opens the bro
 allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup --relay 2>&1`
 
 Relay the output above verbatim. If a form URL is shown, tell the user to paste
 keys there (never in chat), then run `/view-limits` to refresh. To rotate an

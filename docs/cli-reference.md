@@ -51,7 +51,33 @@ vl.js recommend --json            # advisory recommendation (Jev-dormant by defa
 vl.js dashboard start|stop|status # persistent loopback dashboard daemon (Issue #61)
 vl.js dashboard open [--no-open]  #   start or reuse it and open the page (#136)
 vl.js dashboard lan enable|disable|rotate|url  # opt-in read-only LAN view (#62)
+vl.js … --relay                   #   the shim-only exit waiver on the six calls
+                                  #   the command surfaces make — see below
 ```
+
+### The `--relay` exit waiver (shim-only)
+
+`--relay` is accepted by exactly `view`, `setup`, `update` and `dashboard open`,
+`stop`, `status` — the six calls the command surfaces make — and by nothing else:
+any other command given it exits `2` with one line saying so, and the command
+does not run.
+
+With the flag, the output is what it always was, byte for byte, on both streams,
+in the same order: it touches no rendering, no collection and no side effect. The
+process exit is then `0` whatever the command decided. Without it, every exit
+code in the table above is the contract, in a terminal, in a hook and for the
+gate.
+
+It exists because a command shim's injected exec is not run the way a shell is
+run: Claude Code checks it while the file renders, and
+["a failed command aborts the entire skill invocation, not just its own placeholder"](https://code.claude.com/docs/en/skills#when-an-injected-command-fails)
+— with the default shell, any non-zero exit counts as a failure. For a surface
+whose job is to report state, that turns the ordinary answers into an error
+banner: `status` on a stopped daemon exits `3`, `stop` on nothing running exits
+`1`, and a refused configuration exits `8`, `9` or `10`. A waiver on the exit
+code is the fix that leaves the contract alone; `|| true` would not be, because
+`||` makes a second subcommand the shim's own permission rule does not cover.
+
 
 ### Exit codes
 

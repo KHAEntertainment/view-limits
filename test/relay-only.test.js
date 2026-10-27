@@ -97,12 +97,12 @@ const PROSE_PIPE_RE =
 // refuses the OTHER half — a substituted argument is shell text, not data, so a
 // shim that takes one is not a relay surface at all.
 const EXPECTED_EXEC = {
-  'commands/view-limits.md': 'view 2>&1',
-  'commands/dashboard.md': 'dashboard open 2>&1',
-  'commands/dashboard-stop.md': 'dashboard stop 2>&1',
-  'commands/dashboard-status.md': 'dashboard status 2>&1',
-  'skills/setup/SKILL.md': 'setup 2>&1',
-  'skills/update/SKILL.md': 'update 2>&1',
+  'commands/view-limits.md': 'view --relay 2>&1',
+  'commands/dashboard.md': 'dashboard open --relay 2>&1',
+  'commands/dashboard-stop.md': 'dashboard stop --relay 2>&1',
+  'commands/dashboard-status.md': 'dashboard status --relay 2>&1',
+  'skills/setup/SKILL.md': 'setup --relay 2>&1',
+  'skills/update/SKILL.md': 'update --relay 2>&1',
 };
 // The prefix is matched in either documented spelling, closing quote included,
 // exactly as the shims write it.

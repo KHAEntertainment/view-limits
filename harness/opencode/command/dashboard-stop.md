@@ -2,7 +2,7 @@
 description: Stop the view-limits dashboard daemon
 ---
 
-!`node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard stop 2>&1`
+!`node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard stop --relay 2>&1`
 
 Relay the output above verbatim.
 

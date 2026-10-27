@@ -367,7 +367,7 @@ assert.strictEqual(vm.reauthNote({ url: 'https://other.example/' }), 'session un
     }],
     diagnostics: [],
   }, null);
-  assert.match(v.lines.join('\n'), /    glm-coding: unknown — a{80}… \(rotate via \/view-limits:update glm-coding\)$/m);
+  assert.match(v.lines.join('\n'), /    glm-coding: unknown — a{80}… \(rotate glm-coding via \/view-limits:update\)$/m);
 }
 
 // ---- non-xiaomi unknown with state.reason (no error) -------------------

@@ -273,7 +273,7 @@ test('vl check with adapter auth failure (synthetic) → exit 1, one-line error'
   assert.strictEqual(r.status, 1);
   assert.strictEqual(r.stdout, '');
   assert.match(r.stderr.replace(/\n$/, ''),
-    /^view-limits: check glm-coding-plan failed:[\s\S]+rotate via \/view-limits:update glm-coding-plan\)$/,
+    /^view-limits: check glm-coding-plan failed:[\s\S]+rotate glm-coding-plan via \/view-limits:update\)$/,
     'synthesized auth-failure surface must print one line with a rotate hint');
 });
 

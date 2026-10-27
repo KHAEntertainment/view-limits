@@ -3,7 +3,7 @@ description: Show the view-limits dashboard state — the address, the uptime an
 allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" dashboard status 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" dashboard status --relay 2>&1`
 
 Relay the output above verbatim.
 

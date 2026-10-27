@@ -6,7 +6,7 @@ description: Open the view-limits dashboard page — starts the local daemon if 
 Run exactly this command with the shell tool:
 
 ```sh
-node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard open
+node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard open --relay
 ```
 
 Relay the output above verbatim.

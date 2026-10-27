@@ -294,7 +294,7 @@ async function until(predicate, deadlineMs = 5000) {
     assert.strictEqual(text.status, 0, text.stderr);
     assert.match(text.stdout, /xiaomi-token-plan: healthy · tokens 75% \(token count\)/);
     assert.doesNotMatch(text.stdout, /xiaomi-token-plan:[^\n]*\(stale\)/, 'live Xiaomi observation is not marked stale');
-    assert.ok(!text.stdout.includes('rotate via'), 'xiaomi rows never get the rotate hint');
+    assert.ok(!text.stdout.includes('via /view-limits:update'), 'xiaomi rows never get the rotate hint');
     assert.strictEqual(fetches(ctx).length, 2, 'text report performs its own single pair');
     noVaultForXiaomi(ctx, true);
     console.log('  ✓ report (text + json) is live: fresh counts replace the cached success');
@@ -348,7 +348,7 @@ async function until(predicate, deadlineMs = 5000) {
     assert.strictEqual(text.status, 0, text.stderr);
     assert.ok(!text.stdout.includes(String(OLD_COUNTS)), 'old counts must not appear in text');
     assert.match(text.stdout, /session unavailable — open https:\/\/platform\.xiaomimimo\.com\/ in Chrome \(profile Profile 46\) and log in if needed; next refresh checks for new cookies/);
-    assert.doesNotMatch(text.stdout, /rotate via \/view-limits:update xiaomi-token-plan/);
+    assert.doesNotMatch(text.stdout, /rotate xiaomi-token-plan via \/view-limits:update/);
     noVaultForXiaomi(ctx, true);
     console.log('  ✓ live auth failure shows the full dashboard link with zero cached counts');
   } finally {

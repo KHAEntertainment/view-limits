@@ -3,6 +3,6 @@ description: Show coding-plan credit and rate-limit status across all routes/acc
 allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" view 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" view --relay 2>&1`
 
 Relay the output above verbatim.

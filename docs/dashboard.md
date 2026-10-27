@@ -52,6 +52,12 @@ vl.js dashboard lan url                                # prints the phone link (
   guards pin the rule: `test/relay-only.test.js` requires each shim's single
   injected call to match, and `test/shim-allowed-tools.test.js` refuses any
   substitution but `${CLAUDE_PLUGIN_ROOT}`.
+- **`--relay` is for the surfaces, not for you.** Each of those calls carries it:
+  a shim's injected exec aborts the whole command on any non-zero exit, and
+  `status` / `stop` legitimately exit `3` / `1` when nothing is running. The flag
+  waives the exit code and nothing else — same bytes out, same daemon behavior —
+  and in a terminal you still get the real codes. See
+  [the CLI reference](cli-reference.md#the--relay-exit-waiver-shim-only).
 - **Collection.** On start, then every `--interval` seconds (default 30; flag >
   `config.json` `{"dashboard": {"intervalSeconds": N}}` > 30; allowed 15–3600). Each
   collection is the same `vl.js view --json` run, so it uses the shared

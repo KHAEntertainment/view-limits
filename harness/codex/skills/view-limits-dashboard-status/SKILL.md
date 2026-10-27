@@ -6,7 +6,7 @@ description: Show the view-limits dashboard state — the address, the uptime an
 Run exactly this command with the shell tool:
 
 ```sh
-node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard status
+node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard status --relay
 ```
 
 Relay the output above verbatim.

@@ -7,10 +7,10 @@ no second renderer, no second gate, and no OpenCode-specific adapter.
 | File | What it is | CLI call |
 | --- | --- | --- |
 | `plugin/view-limits.js` | OpenCode plugin (plugin-format hooks) | `gate` |
-| `command/view-limits.md` | OpenCode custom command | `view` |
-| `command/dashboard.md` | OpenCode custom command for the dashboard launch (#136) | `dashboard open` |
-| `command/dashboard-stop.md` | OpenCode custom command for shutting the daemon down (#136, Q34-A) | `dashboard stop` |
-| `command/dashboard-status.md` | OpenCode custom command for the daemon state read (#136, Q34-A) | `dashboard status` |
+| `command/view-limits.md` | OpenCode custom command | `view --relay` |
+| `command/dashboard.md` | OpenCode custom command for the dashboard launch (#136) | `dashboard open --relay` |
+| `command/dashboard-stop.md` | OpenCode custom command for shutting the daemon down (#136, Q34-A) | `dashboard stop --relay` |
+| `command/dashboard-status.md` | OpenCode custom command for the daemon state read (#136, Q34-A) | `dashboard status --relay` |
 
 ## Install
 
@@ -97,6 +97,17 @@ CLI.
   `/view-limits` command (which refreshes) or `vl.js refresh` yourself.
 - **`status` reads the cache.** It renders the cache and does no provider I/O.
   The command itself collects live.
+
+## The `--relay` flag on the command calls
+
+Each command file injects its call with `--relay`, the shim-only exit waiver
+([CLI reference](../docs/cli-reference.md#the--relay-exit-waiver-shim-only)):
+OpenCode folds the injected command's output into the prompt, and the state
+answers of these commands are not failures — `dashboard status` exits `3` when
+nothing is running and `dashboard stop` exits `1`. Output is identical either way,
+the flag is refused by every other command, and the gate in `plugin/view-limits.js`
+deliberately does not carry it: that call's exit code is part of how the plugin
+decides to fail open.
 
 ## Approval prompts (Issue #142): the grant is config-side, and the default needs none
 

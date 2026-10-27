@@ -54,12 +54,12 @@ const CLI_INVOCATION_PLAIN = /^node "([\s\S]+)\/bin\/vl\.js"((?: [A-Za-z0-9._:-]
 const ALLOWED_ARGV = {
   gate: ['gate'],
   refresh: ['refresh', '--quiet', '--session-start'],
-  view: ['view'],
+  view: ['view', '--relay'],
   // Issue #136: the dashboard skills open, stop and read the daemon; one fixed
   // call each, no logic and no argument (owner ruling Q34-A).
-  dashboard: ['dashboard', 'open'],
-  dashboardStop: ['dashboard', 'stop'],
-  dashboardStatus: ['dashboard', 'status'],
+  dashboard: ['dashboard', 'open', '--relay'],
+  dashboardStop: ['dashboard', 'stop', '--relay'],
+  dashboardStatus: ['dashboard', 'status', '--relay'],
 };
 
 // Shaping / processing tools that must never appear in a Codex surface file.

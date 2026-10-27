@@ -199,10 +199,17 @@ test('Claude, Codex and OpenCode surfaces all resolve to the identical bin/vl.js
 
   // Each surface gets the ONE subcommand it is documented to dispatch, and
   // nothing else — a harness may not grow private arguments. Since #60 every
-  // user surface resolves the SAME live view.
-  assert.deepStrictEqual(claude, ['view'], 'Claude dispatches exactly `view`');
-  assert.deepStrictEqual(codex, ['view'], 'Codex dispatches exactly `view`');
-  assert.deepStrictEqual(opencode, ['view'], 'OpenCode dispatches exactly `view`');
+  // user surface resolves the SAME live view. The one thing all three may
+  // carry is `--relay`, the shim-only exit waiver (D2-a): identical on every
+  // surface, never an argument, and never anything but the exit code. If it
+  // ever differs between them, this fails.
+  assert.deepStrictEqual(claude, ['view', '--relay'], 'Claude dispatches exactly `view --relay`');
+  assert.deepStrictEqual(codex, ['view', '--relay'], 'Codex dispatches exactly `view --relay`');
+  assert.deepStrictEqual(opencode, ['view', '--relay'], 'OpenCode dispatches exactly `view --relay`');
+  for (const argv of [claude, codex, opencode]) {
+    assert.ok(!argv.some((a) => a.includes('ARGUMENTS') || /^\$/.test(a)),
+      'a surface may pass no substituted argument (Q34-A)');
+  }
 });
 
 test('the harness surfaces resolve their own checkout outside a git repo (no Claude vars needed)', () => {

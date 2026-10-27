@@ -2,7 +2,7 @@
 description: Show the view-limits dashboard state — address, uptime and the last collection
 ---
 
-!`node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard status 2>&1`
+!`node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" dashboard status --relay 2>&1`
 
 Relay the output above verbatim.
 

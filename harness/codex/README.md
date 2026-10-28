@@ -50,10 +50,8 @@ Codex merges every `hooks.json` it finds, so pick one mode.
    export VIEW_LIMITS_ROOT="$HOME/path/to/view-limits"
    ```
 
-3. Credentials live in the same vault and cache the Claude surface uses.
-   Nothing here needs `CLAUDE_PLUGIN_ROOT` or `CLAUDE_PLUGIN_DATA`: with those
-   unset the CLI falls back to `~/.view-limits`, so the view, the gate, and
-   refresh all read the same files Claude does.
+3. To share state with the Claude plugin, set `VIEW_LIMITS_DATA_DIR` to the
+   Claude plugin's data folder. Left unset, the CLI uses `~/.view-limits`.
 
 Nothing here is required — the surface is entirely opt-in, and no hook in it can
 block a session. See "Known limits" below.

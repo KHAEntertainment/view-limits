@@ -352,10 +352,25 @@ test('AC9 the gate reads the daemon-written status.json network-free (guard prel
 
 console.log('refusals (nothing is started)');
 
-test('config that cannot be proven refuses loudly: absent/inconclusive → 9, corrupt → 10, invalid interval → 1', async () => {
+test('config that cannot be proven refuses loudly: absent → 8 (first run), unconfirmable → 9, corrupt → 10, invalid interval → 1', async () => {
+  // Issue #148: an ABSENT config.json is a data dir that was never set up, not
+  // a write in flight, so it refuses with the view's own first-run notice and
+  // the migration-pending exit (8). The lax read cannot tell the two apart; the
+  // presence check after the refusal can.
   const absent = scratch(null);
   const a = await vl(absent, ['dashboard', 'start']);
-  assert.strictEqual(a.status, 9, a.stderr);
+  assert.strictEqual(a.status, 8, a.stderr);
+  assert.match(a.stderr, /No configuration yet: run \/view-limits:setup to add a provider, or start a new session to finish first-run setup\./,
+    'the notice names the state and the action');
+  assert.ok(!a.stderr.includes('mid-write'), 'a never-published document is not a retry that can never help');
+  assert.deepStrictEqual(fs.readdirSync(absent), [], 'a refused first run writes nothing to the data dir');
+  // Present by lstat — a swap in flight leaves the document there — but the
+  // reader cannot read it: unconfirmable, so it keeps the mid-write retry text.
+  const unconfirmable = scratch(null);
+  fs.symlinkSync(path.join(unconfirmable, 'never-published.json'), path.join(unconfirmable, 'config.json'));
+  const u = await vl(unconfirmable, ['dashboard', 'start']);
+  assert.strictEqual(u.status, 9, u.stderr);
+  assert.match(u.stderr, /config unreadable mid-write; retry\./);
   const corrupt = scratch();
   fs.writeFileSync(path.join(corrupt, 'config.json'), '{ not json');
   const c = await vl(corrupt, ['dashboard', 'start']);
@@ -364,9 +379,82 @@ test('config that cannot be proven refuses loudly: absent/inconclusive → 9, co
   const b = await vl(bad, ['dashboard', 'start']);
   assert.strictEqual(b.status, 1);
   assert.match(b.stderr, /dashboard\.intervalSeconds.*15 to 3600; got 5/);
-  for (const dir of [absent, corrupt, bad]) {
+  for (const dir of [absent, unconfirmable, corrupt, bad]) {
     assert.ok(!fs.existsSync(records.recordPath(dir)) && !fs.existsSync(path.join(dir, 'dashboard.log')), 'no daemon was spawned');
   }
+  assert.deepStrictEqual(fs.readdirSync(unconfirmable), ['config.json'], 'a refused unconfirmable read writes nothing either');
+});
+
+// Issue #148: an lstat that finds no config.json is not proof of absence. A
+// FIRST publish in flight has its temp file but has not linked config.json in
+// yet, and it holds the provider mutation lock while it does. That is a retry
+// (9), not a first run (8).
+const LOCK_LIB = path.join(__dirname, '..', 'lib', 'lock.js');
+function holdLockWithTempFile(dir) {
+  const script = `
+    const fs = require('fs'), path = require('path');
+    const lock = require(${JSON.stringify(LOCK_LIB)}).acquireMutationLock(${JSON.stringify(dir)});
+    if (!lock.ok) { console.log('busy'); process.exit(1); }
+    fs.writeFileSync(path.join(${JSON.stringify(dir)}, 'config.json.tmp.' + process.pid + '.0123456789abcdef'), '{"routes":[]}', { flag: 'wx', mode: 0o600 });
+    console.log('held');
+    process.stdin.resume();`;
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['pipe', 'pipe', 'inherit'] });
+  return new Promise((resolve, reject) => {
+    child.stdout.once('data', (d) => (String(d).trim() === 'held' ? resolve(child) : reject(new Error('lock not taken'))));
+    child.once('error', reject);
+  });
+}
+
+test('a first publish in flight (lock held, temp file, no config.json) is exit 9 with the mid-write text, not the first-run exit 8', async () => {
+  const dir = scratch(null);
+  const holder = await holdLockWithTempFile(dir);
+  try {
+    for (const args of [['dashboard', 'start'], ['dashboard', 'open', '--no-open']]) {
+      const r = await vl(dir, args);
+      assert.strictEqual(r.status, 9, `${args.join(' ')}: ${r.stderr}`);
+      assert.match(r.stderr, /config unreadable mid-write; retry\./);
+      assert.ok(!r.stderr.includes('No configuration yet'), 'not reported as a first run');
+      assert.strictEqual(r.stdout, '');
+      assert.ok(!fs.existsSync(records.recordPath(dir)) && !fs.existsSync(path.join(dir, 'dashboard.log')), 'no daemon was spawned');
+    }
+    assert.ok(!fs.existsSync(path.join(dir, 'config.json')), 'and nothing published a document');
+  } finally { holder.kill('SIGKILL'); }
+});
+
+test('a lock directory with nobody holding it and no config.json is proven absent under the lock: exit 8', async () => {
+  const dir = scratch(null);
+  fs.mkdirSync(path.join(dir, 'provider-mutations'));
+  const r = await vl(dir, ['dashboard', 'start']);
+  assert.strictEqual(r.status, 8, r.stderr);
+  assert.match(r.stderr, /No configuration yet: run \/view-limits:setup/);
+  assert.ok(!fs.existsSync(records.recordPath(dir)) && !fs.existsSync(path.join(dir, 'dashboard.log')));
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'provider-mutations')), [], 'the proof left no ticket behind');
+});
+
+// Issue #148: `dashboard open` reaches the same refusal through the shared
+// start path, so a first-time user cannot start the dashboard at all while
+// being told to retry.
+test('dashboard open on a data dir that was never set up refuses like start: exit 8, nothing started or written', async () => {
+  const dir = scratch(null);
+  const r = await vl(dir, ['dashboard', 'open', '--no-open']);
+  assert.strictEqual(r.status, 8, r.stderr);
+  assert.match(r.stderr, /No configuration yet: run \/view-limits:setup/);
+  assert.strictEqual(r.stdout, '', 'a refused open prints no address');
+  assert.deepStrictEqual(fs.readdirSync(dir), [], 'nothing was written');
+  assert.ok(!fs.existsSync(records.recordPath(dir)) && !fs.existsSync(path.join(dir, 'dashboard.log')), 'no daemon was spawned');
+});
+
+// A CONFIRMED configuration with no provider rows is not a refusal: the
+// first-run gate above must not catch the legitimate empty-document case.
+test('a confirmed but route-less configuration ({"routes":[]}) still starts the daemon', async () => {
+  const dir = scratch({ routes: [] });
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), '{"routes":[]}');
+  const start = await vl(dir, ['dashboard', 'start']);
+  assert.strictEqual(start.status, 0, start.stderr);
+  note(dir);
+  assert.match(start.stdout, /started at http:\/\/127\.0\.0\.1:\d+\/ \(pid \d+/);
+  const st = JSON.parse((await vl(dir, ['dashboard', 'status', '--json'], { preload: false })).stdout);
+  assert.strictEqual(st.state, 'running');
 });
 
 test('flags are validated: non-loopback host, bad port, bad interval, unknown option', async () => {

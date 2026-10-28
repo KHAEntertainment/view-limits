@@ -36,7 +36,8 @@ const { spawn } = require('child_process');
 
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt,
-  resolveDashboardInterval, hostLabel } = require('../lib/config');
+  resolveDashboardInterval, hostLabel, parseGlobalOptions } = require('../lib/config');
+const { importStandalone, noticeFor: standaloneNotice } = require('../lib/standalone-import');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, spawnRefresh,
@@ -2327,6 +2328,74 @@ function openerProblem(e) {
   return String(e.message || e.code || e).replace(/^Error:\s*/, '');
 }
 
+// Issue #148: the confirmed config read for the dashboard's start path.
+//
+// lib/config.js's lax read cannot tell a config.json that was never published
+// from one being replaced while it was read (#81): both throw
+// CONFIG_INCONCLUSIVE. `view` separates the two by re-confirming the
+// document's presence after the refusal, and the dashboard does the same here,
+// so a data directory that has never been set up is no longer reported as a
+// retry that can never help:
+//
+//   absent        -> nothing was ever published: `view`'s own first-run notice
+//                    and exit 8 (the migration-pending class)
+//   anything else -> unconfirmable (a publish is in flight, so a rerun may
+//                    help): the mid-write notice and exit 9, unchanged
+//   corrupt       -> the corrupt notice and exit 10, unchanged
+//
+// The presence check is an lstat, never a document read, and takes no lock. An
+// lstat that finds nothing is not yet proof, though: a FIRST publish in flight
+// has written its temp file but not linked config.json in. So "absent" is
+// confirmed before it is believed. Every publisher holds the provider mutation
+// lock, which it makes the directory for first; with no such directory nothing
+// has ever published or is publishing, and absence is proven without writing
+// anything. With one, the #81 strict reader proves it under the lock: ENOENT is
+// the proof (exit 8); a lock that cannot be had within its wait, or any other
+// inconclusive answer, is a publish in flight (exit 9); a document that has
+// appeared is read normally.
+// The notices are read at call time, like viewFailureNotice's, so the
+// declaration order further down the file costs nothing.
+function dashboardConfig() {
+  try {
+    return libLoadConfig();
+  } catch (e) {
+    if (e && e.code === 'CONFIG_INCONCLUSIVE') {
+      if (configPresence() !== 'absent') exitInconclusive();
+      dashboardConfirmAbsent();
+      try {
+        return libLoadConfig();
+      } catch (again) {
+        if (again && again.code === 'CONFIG_CORRUPT') exitCorrupt();
+        exitInconclusive();
+      }
+    }
+    if (e && e.code === 'CONFIG_CORRUPT') exitCorrupt();
+    throw e;
+  }
+}
+
+// Exits 8 (proven absent) or 9 (cannot be proven); returns only when the
+// document turns out to be there.
+function dashboardConfirmAbsent() {
+  let lockDirExists = true;
+  try {
+    fs.lstatSync(path.join(dataDir(), lifecycle.LOCK_DIR));
+  } catch (e) {
+    if (!e || e.code !== 'ENOENT') exitInconclusive();
+    lockDirExists = false;
+  }
+  if (lockDirExists) {
+    try {
+      readConfigText({ strict: true });
+      return;
+    } catch (e) {
+      if (!e || e.code !== 'ENOENT') exitInconclusive();
+    }
+  }
+  log(viewFailureNotice('config-absent'));
+  process.exit(lifecycle.exitCodeFor(lifecycle.STATUS.MIGRATION_PENDING));
+}
+
 // The start path, shared by `dashboard start` and `dashboard open` (Issue
 // #136) so the two cannot drift: the confirmed config read, the LAN
 // validation, the daemon spawn and every refusal message, unchanged. A
@@ -2343,8 +2412,10 @@ async function dashboardStart(dir, rest, dashboard, lanLib, opts) {
   const bind = dashboard.validateBind({ host: flags['--host'], port });
   if (!bind.ok) err(`dashboard start: ${bind.error}`);
   // The confirmed config read: a configuration that cannot be proven
-  // refuses (exit 9 / 10) instead of starting a daemon on guessed defaults.
-  const cfg = loadConfig();
+  // refuses (exit 8 / 9 / 10) instead of starting a daemon on guessed
+  // defaults, and a data dir that was never set up is the first-run case
+  // (Issue #148), not a mid-write retry.
+  const cfg = dashboardConfig();
   const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
   if (!interval.ok) err(`dashboard start: ${interval.error}`);
   // The LAN view (off unless config.dashboard.lan.enabled): a bad value or
@@ -2824,6 +2895,13 @@ function sessionStart() {
   // unreadable, so say what actually happened. systemMessage is shown to the
   // user and never enters the model's context; the text is fixed, with no
   // path, error text or credential material in it.
+  // The standalone import could not complete this time (#148) and the vault
+  // migration was held back with it. A busy lock is another process at work,
+  // so say nothing; anything else is one fixed line.
+  if (migration && migration.reason === 'import-pending' && !corrupt) {
+    if (/lock-busy$/.test(migration.importReason)) process.exit(0);
+    say(standaloneNotice(migration.importClass === 'permanent' ? 'refused' : 'failed', migration.importReason));
+  }
   if (migration && migration.reason === 'vault-unreadable') {
     say(corrupt ? `${MIGRATION_VAULT_UNREADABLE} ${corrupt}` : MIGRATION_VAULT_UNREADABLE);
   }
@@ -2878,8 +2956,25 @@ function relayWanted(cmdName, argv) {
   return at;
 }
 
-const cmd = process.argv[2];
-const args = process.argv.slice(3);
+// Global options (Issue #148), parsed before anything is dispatched, read or
+// written: `--data-dir <abs path>` names the data directory for this whole
+// process and wins over the environment; `--claude-plugin` opts this call into
+// the one-time import of the standalone data dir. Claude Code exports
+// ${CLAUDE_PLUGIN_DATA} to hooks but not to a `!` exec line, so the shims pass
+// it as this argument. The directory travels to anything vl.js spawns (the
+// dashboard daemon, `serve`) through the environment those children inherit.
+const GLOBAL = parseGlobalOptions(process.argv.slice(2));
+if (!GLOBAL.ok) {
+  process.stderr.write(`view-limits: ${GLOBAL.message}\n`);
+  // A shim's `!` exec aborts the whole invocation on a non-zero exit, which
+  // would hide this line from the person who has to fix it; --relay is the
+  // waiver for exactly that.
+  process.exit(process.argv.includes(RELAY_FLAG) ? 0 : 2);
+}
+if (GLOBAL.dataDir !== null) process.env.CLAUDE_PLUGIN_DATA = GLOBAL.dataDir;
+
+const cmd = GLOBAL.rest[0];
+const args = GLOBAL.rest.slice(1);
 const hasFlag = (n) => args.includes(n);
 
 // The waiver: taken out of argv so no command's own flag parser sees an unknown
@@ -2985,6 +3080,7 @@ function writesConfig(command, rest) {
 }
 
 // Fixed text: no path, no errno, no vault error text, no credential material.
+const IMPORT_PENDING_REFUSAL = 'not run: your existing settings have not been copied into the plugin data folder yet, and this command would change the configuration before they are. Nothing was written. Rerun this command in a moment; if this keeps happening, run /view-limits to see why the copy failed.';
 const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been migrated into routes yet (the credential vault could not be read, or another provider change is in progress), and this command would change the configuration before they are. Your stored credentials are untouched and nothing was written. Make sure the vault is accessible (for example, unlock the Keychain), then rerun this command.';
 
 // It fires only when config.json is genuinely absent, and the document it
@@ -2992,12 +3088,38 @@ const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been mig
 // command's stdout stays machine-readable. `session-start` is the exception:
 // a hook's stderr is not shown to the user, so it reports through its own
 // systemMessage instead (see sessionStart).
+// Issue #148: a plugin data dir that was never set up inherits the standalone
+// ~/.view-limits once, on the Claude path only (--claude-plugin: the command
+// shims and the SessionStart hooks pass it; Codex, OpenCode and a terminal
+// never do). It runs BEFORE the migration below, in the same process, so that
+// a present config.json is what the migration finds. Skipped is silent; a
+// copy, or a failed copy that changed nothing, is one fixed line.
+//
+// While the import is OWED (the plugin dir has no config.json and the standalone
+// dir has one) and did not complete, for ANY reason, nothing is published over
+// it: the vault migration does not run and config-writing commands are
+// refused. Whatever they wrote would make the plugin dir "present" and disarm
+// the import for good. The way out is to fix ~/.view-limits or move it aside;
+// the import is then not owed and the migration runs as it always did.
+let importPending = null;
+let importClass = null;
+if (GLOBAL.claudePlugin) {
+  const imported = importStandalone({ target: GLOBAL.dataDir });
+  if (imported.status === 'copied') process.stderr.write(`view-limits: ${standaloneNotice('copied')}\n`);
+  else if (imported.status === 'failed') {
+    process.stderr.write(`view-limits: ${standaloneNotice(imported.class === 'permanent' ? 'refused' : 'failed', imported.reason)}\n`);
+  }
+  if (imported.owed === true) { importPending = imported.reason; importClass = imported.class || 'transient'; }
+}
+
 let migration = null;
 if (MIGRATING_COMMANDS.has(cmd)) {
   // No config read: the migration decides presence by lstat under its own
   // lock (io.configPresence) and never uses the cfg, which only the
   // provider probe needs.
-  migration = lifecycle.migrateFromVault(lifecycleIo(null));
+  migration = importPending
+    ? { migrated: false, reason: 'import-pending', importReason: importPending, importClass, retry: true }
+    : lifecycle.migrateFromVault(lifecycleIo(null));
   if (migration.migrated && migration.ids.length) {
     process.stderr.write(`view-limits: migrated existing credentials into routes: ${migration.ids.join(', ')}\n`);
   } else if (migration.reason === 'vault-unreadable') {
@@ -3011,10 +3133,11 @@ if (MIGRATING_COMMANDS.has(cmd)) {
   // future retry reason cannot be forgotten here.
   if (migration.retry === true && writesConfig(cmd, args)) {
     const status = lifecycle.STATUS.MIGRATION_PENDING;
+    const refusal = migration.reason === 'import-pending' ? IMPORT_PENDING_REFUSAL : MIGRATION_PENDING_REFUSAL;
     if (cmd === 'provider' && args.includes('--json')) {
-      process.stdout.write(JSON.stringify({ command: args[0], ok: false, status, error: MIGRATION_PENDING_REFUSAL }, null, 2) + '\n');
+      process.stdout.write(JSON.stringify({ command: args[0], ok: false, status, error: refusal }, null, 2) + '\n');
     } else {
-      process.stderr.write(`view-limits: ${MIGRATION_PENDING_REFUSAL}\n`);
+      process.stderr.write(`view-limits: ${refusal}\n`);
     }
     process.exit(lifecycle.exitCodeFor(status));
   }
@@ -3044,7 +3167,7 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     case 'recommend': return recommendCmd(args);
     case 'dashboard': return dashboardCmd(args);
     default:
-      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|open [--no-open]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js [--data-dir <abs path>] [--claude-plugin] status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|open [--no-open]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
   }
 })().then(() => {
   // D2-a: the commands that report a state through `process.exitCode` (status

@@ -137,6 +137,17 @@ test('dashboard open — a refusal starts nothing and is waived', async () => {
   assert.ok(!fs.existsSync(records.recordPath(dir)), 'the waived refusal still started no daemon');
 });
 
+// Issue #148: a data dir that was never set up refuses `dashboard open` with
+// the first-run exit (8) instead of the mid-write retry (9). The waiver covers
+// that code exactly as it covered 9: the bytes are identical and the exit is 0,
+// because an aborted shim exec is the failure the flag exists to prevent.
+test('dashboard open on a never-set-up data dir — 8 unflagged, 0 with --relay, bytes identical', async () => {
+  const dir = scratch(null);
+  const plain = await assertWaived(dir, ['dashboard', 'open', '--no-open'], 8, 'dashboard open (first run)');
+  assert.match(plain.stderr.toString(), /No configuration yet: run \/view-limits:setup/);
+  assert.ok(!fs.existsSync(records.recordPath(dir)), 'the waived refusal still started no daemon');
+});
+
 test('the flag is invisible to the parsers: order-free, and no unknown-option error', async () => {
   const dir = scratch();
   const a = await raw(dir, ['dashboard', 'status', '--relay', '--json']);

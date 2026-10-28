@@ -93,15 +93,21 @@ function execProgram(cmd) {
 // disable`, which ran as two pre-approved vl.js calls. Quoting the substitution
 // does not help — it is textual replacement, not shell quoting.
 const ALLOWED_SUBSTITUTION = '${CLAUDE_PLUGIN_ROOT}';
+// Issue #148: the one other substitution, which is the plugin's data directory.
+// A `!` exec line cannot read CLAUDE_PLUGIN_DATA from its environment, so the
+// shim receives it as inline text and passes it as `--data-dir`. It is a path
+// Claude Code owns, not anything the user typed, and relay-only.test.js pins
+// the exact place it may appear.
+const ALLOWED_DATA_SUBSTITUTION = '${CLAUDE_PLUGIN_DATA}';
 
 // → the substitution fragments left in a command once the plugin root is
 // accounted for: `$ARGUMENTS`, `$ARGUMENTS[1]`, `$0`..`$9`, `$NAME`, any other
 // `${…}`, and `$(…)`. An empty array is the only passing answer.
 function findSubstitutions(cmd) {
-  const rest = cmd.split(ALLOWED_SUBSTITUTION).join('');
+  const rest = cmd.split(ALLOWED_SUBSTITUTION).join('').split(ALLOWED_DATA_SUBSTITUTION).join('');
   const bad = [];
   for (const m of rest.matchAll(/\$(?:\{[^}]*\}?|\([^)]*\)?|[A-Za-z_][A-Za-z0-9_]*|\d+)?/g)) bad.push(m[0]);
   return bad;
 }
 
-module.exports = { extractExecs, withoutInjections, execProgram, findSubstitutions, ALLOWED_SUBSTITUTION, INLINE_MARKER_RE, INLINE_EXEC_RE, FENCE_BLOCK_RE };
+module.exports = { extractExecs, withoutInjections, execProgram, findSubstitutions, ALLOWED_SUBSTITUTION, ALLOWED_DATA_SUBSTITUTION, INLINE_MARKER_RE, INLINE_EXEC_RE, FENCE_BLOCK_RE };

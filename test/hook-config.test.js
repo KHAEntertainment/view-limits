@@ -167,7 +167,9 @@ function settings(mode, injectContext) {
     }
 
     // Disabled SessionStart refresh touches no vault, provider, or worker lock.
-    assert.deepStrictEqual(refreshArgs, ['refresh', '--quiet', '--session-start']);
+    assert.deepStrictEqual(refreshArgs, ['--claude-plugin', 'refresh', '--quiet', '--session-start']);
+    // #148: only the SessionStart entries opt into the one-time import; the gate is untouched.
+    assert.deepStrictEqual(gateArgs, ['gate']);
     const before = fs.readFileSync(statusPath, 'utf8');
     for (const value of badValues.filter(value => value !== true)) {
       writeConfig({ refreshOnSessionStart: value });
@@ -248,7 +250,7 @@ function settings(mode, injectContext) {
       assert.doesNotMatch(corrupt.stderr, /retry\./, 'a corrupt file was reported as a publish in flight');
     }
     assert.deepStrictEqual(hooks.hooks.SessionStart[1].hooks[0], {
-      type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/bin/vl.js', 'session-start'], timeout: 5,
+      type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/bin/vl.js', '--claude-plugin', 'session-start'], timeout: 5,
     });
     console.log('hook modes, malformed config, context opt-in, SessionStart and manual refresh: PASS');
   } finally {

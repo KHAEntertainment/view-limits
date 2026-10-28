@@ -4,7 +4,7 @@ description: Rotate/update existing view-limits provider credentials — opens t
 allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" update --relay 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" --data-dir "${CLAUDE_PLUGIN_DATA}" --claude-plugin update --relay 2>&1`
 
 Relay the output above verbatim. If a form URL is shown, tell the user to paste
 the new key there (never in chat), then run `/view-limits` to refresh. Update

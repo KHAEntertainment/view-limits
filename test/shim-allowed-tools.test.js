@@ -107,7 +107,7 @@ function listShims() {
 // what counts as an exec: a line-initial `!`-exec, the inline form at the start
 // of a line or immediately after whitespace, and a ```! fenced block whose lines
 // are the commands.
-const { extractExecs, execProgram, findSubstitutions, ALLOWED_SUBSTITUTION } = require('./helpers/injected-commands.cjs');
+const { extractExecs, execProgram, findSubstitutions, ALLOWED_SUBSTITUTION, ALLOWED_DATA_SUBSTITUTION } = require('./helpers/injected-commands.cjs');
 
 // The known shims that must keep injecting the CLI, each with the ONE
 // argument-free call it is allowed to make. A file losing its injection silently
@@ -174,7 +174,7 @@ for (const rel of shims) {
     // whatever the substitution turns it into.
     const bad = findSubstitutions(cmd);
     assert.deepStrictEqual(bad, [],
-      `${rel}: an injected command may only substitute ${ALLOWED_SUBSTITUTION}; found ${bad.join(', ')} in: ${cmd}`);
+      `${rel}: an injected command may only substitute ${ALLOWED_SUBSTITUTION} and ${ALLOWED_DATA_SUBSTITUTION}; found ${bad.join(', ')} in: ${cmd}`);
     let p;
     try {
       p = execProgram(cmd);

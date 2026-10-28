@@ -187,7 +187,8 @@ function runCli(args, d, preload) {
 console.log('\nphase 1 boundary — every surface dispatches to the same bin/vl.js');
 
 test('Claude, Codex and OpenCode surfaces all resolve to the identical bin/vl.js', () => {
-  const claudeEnv = { CLAUDE_PLUGIN_ROOT: ROOT };
+  const claudeData = path.join(dir, 'claude-plugin-data');
+  const claudeEnv = { CLAUDE_PLUGIN_ROOT: ROOT, CLAUDE_PLUGIN_DATA: claudeData };
   const harnessEnv = { VIEW_LIMITS_ROOT: ROOT };
   const claude = resolveArgv(claudeExec(), { env: claudeEnv });
   const codex = resolveArgv(codexSh(), { env: harnessEnv });
@@ -209,9 +210,20 @@ test('Claude, Codex and OpenCode surfaces all resolve to the identical bin/vl.js
   // carry is `--relay`, the shim-only exit waiver (D2-a): identical on every
   // surface, never an argument, and never anything but the exit code. If it
   // ever differs between them, this fails.
-  assert.deepStrictEqual(claude, ['view', '--relay'], 'Claude dispatches exactly `view --relay`');
+  // Issue #148: the two global options are the only addition. Claude passes its
+  // data dir (substituted inline — a `!` exec has no CLAUDE_PLUGIN_DATA in its
+  // environment) and opts into the one-time import; the harness surfaces pass
+  // --data-dir only when VIEW_LIMITS_DATA_DIR is set and NEVER --claude-plugin.
+  assert.deepStrictEqual(claude, ['--data-dir', claudeData, '--claude-plugin', 'view', '--relay'],
+    'Claude dispatches exactly `--data-dir <plugin data> --claude-plugin view --relay`');
   assert.deepStrictEqual(codex, ['view', '--relay'], 'Codex dispatches exactly `view --relay`');
   assert.deepStrictEqual(opencode, ['view', '--relay'], 'OpenCode dispatches exactly `view --relay`');
+  const shared = path.join(dir, 'shared-data');
+  const sharedEnv = { VIEW_LIMITS_ROOT: ROOT, VIEW_LIMITS_DATA_DIR: shared };
+  assert.deepStrictEqual(resolveArgv(codexSh(), { env: sharedEnv }), ['--data-dir=' + shared, 'view', '--relay'],
+    'Codex passes VIEW_LIMITS_DATA_DIR as --data-dir');
+  assert.deepStrictEqual(resolveArgv(openCodeExec(), { env: sharedEnv }), ['--data-dir=' + shared, 'view', '--relay'],
+    'OpenCode passes VIEW_LIMITS_DATA_DIR as --data-dir');
   for (const argv of [claude, codex, opencode]) {
     assert.ok(!argv.some((a) => a.includes('ARGUMENTS') || /^\$/.test(a)),
       'a surface may pass no substituted argument (Q34-A)');

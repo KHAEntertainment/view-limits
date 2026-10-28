@@ -4,7 +4,7 @@ description: Set up the Xiaomi Token Plan route — builds the Chrome cookie hel
 allowed-tools: Bash("${CLAUDE_PLUGIN_ROOT}/bin/vl.js" *)
 ---
 
-!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" setup xiaomi-token-plan --relay 2>&1`
+!`"${CLAUDE_PLUGIN_ROOT}/bin/vl.js" --data-dir "${CLAUDE_PLUGIN_DATA}" --claude-plugin setup xiaomi-token-plan --relay 2>&1`
 
 Relay the output above verbatim.
 

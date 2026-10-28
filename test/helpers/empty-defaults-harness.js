@@ -536,12 +536,33 @@ const CONFIG_READERS = [
   'bin/vl.js | providerCmd | loadConfig | ',
   'bin/vl.js | config | loadConfig | ',
   // The dashboard start path (#61), since #136 shared by `start` and `open`
-  // through `dashboardStart`: strict default — an unconfirmed or corrupt
-  // config.json refuses (exit 9 / 10) before any daemon is spawned, so the
-  // interval is never read from built-in defaults. `dashboard open` reaches
-  // config nowhere else; `--relay` splices a flag and waives an exit code, and
-  // adds no reader.
-  'bin/vl.js | dashboardStart | loadConfig | ',
+  // through `dashboardStart`, which reads through `dashboardConfig` (Issue
+  // #148): strict default — a config.json that cannot be confirmed or cannot
+  // be parsed refuses (exit 9 / 10) before any daemon is spawned, so the
+  // interval is never read from built-in defaults. The same site re-confirms
+  // an inconclusive read's PRESENCE (an lstat, never a document read) and
+  // refuses an absent document as the first-run case (exit 8). `dashboard
+  // open` reaches config nowhere else; `--relay` splices a flag and waives an
+  // exit code, and adds no reader.
+  'bin/vl.js | dashboardConfig | libLoadConfig | ',
+  'bin/vl.js | dashboardConfig | configPresence | ',
+  // Issue #148 (review): an lstat that finds no config.json is confirmed before
+  // it is believed. The retry after a document turns out to be there is the same
+  // strict-default lax read as the first (no opt-in), and the confirmation is the
+  // #81 strict reader under the mutation lock (proven ENOENT -> exit 8, lock not
+  // obtainable -> exit 9), reached only when a lock directory exists.
+  'bin/vl.js | dashboardConfig | libLoadConfig | ',
+  'bin/vl.js | dashboardConfirmAbsent | readConfigText | { strict: true }',
+  // Issue #148: the one-time import of the standalone data dir. configPresence
+  // asks only whether the TARGET's config.json exists (an lstat, never a
+  // document read), once before the locks and once under them. The SOURCE's
+  // document is read with the #81 strict reader under the source's mutation
+  // lock, so "the source has no config" is only ever a proven absence; it is
+  // parsed by the importer itself and published only through the create-only
+  // first publish, never as DEFAULTS.
+  'lib/standalone-import.js | runImport | configPresence | ', // before the locks
+  'lib/standalone-import.js | runImport | configPresence | ', // again under them
+  'lib/standalone-import.js | runImport | readConfigTextIn | source, { strict: true }',
   // Issue #62 LAN view: `lan url` reads the confirmed config; enable/disable
   // read-modify-write dashboard.lan under the mutation lock.
   'bin/vl.js | dashboardLanCmd | loadConfig | ',

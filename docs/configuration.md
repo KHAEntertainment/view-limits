@@ -104,6 +104,16 @@ catalog of what setup can add:
   the commands above runs — in practice at most one session, since
   `session-start` is in that list.
 
+### When first-run setup does not finish
+
+The Claude plugin copies your existing settings from `~/.view-limits` into its own data folder once, when that folder has no `config.json` yet. While the copy cannot finish, nothing is written to the plugin data folder and the setup commands stop with "your existing settings have not been copied into the plugin data folder yet". Three cases hold it:
+
+- `~/.view-limits` is a symlink.
+- `~/.view-limits` is read-only.
+- A file inside `~/.view-limits` cannot be read.
+
+Fix the standalone folder or move it aside, then rerun. The notice ends with a `(reason: …)` code that names the case.
+
 ## Hooks
 
 Add these non-secret settings to the view-limits plugin's

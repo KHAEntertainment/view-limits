@@ -2327,6 +2327,38 @@ function openerProblem(e) {
   return String(e.message || e.code || e).replace(/^Error:\s*/, '');
 }
 
+// Issue #148: the confirmed config read for the dashboard's start path.
+//
+// lib/config.js's lax read cannot tell a config.json that was never published
+// from one being replaced while it was read (#81): both throw
+// CONFIG_INCONCLUSIVE. `view` separates the two by re-confirming the
+// document's presence after the refusal, and the dashboard does the same here,
+// so a data directory that has never been set up is no longer reported as a
+// retry that can never help:
+//
+//   absent        -> nothing was ever published: `view`'s own first-run notice
+//                    and exit 8 (the migration-pending class)
+//   anything else -> unconfirmable (a publish is in flight, so a rerun may
+//                    help): the mid-write notice and exit 9, unchanged
+//   corrupt       -> the corrupt notice and exit 10, unchanged
+//
+// The presence check is an lstat, never a document read, and takes no lock.
+// The notices are read at call time, like viewFailureNotice's, so the
+// declaration order further down the file costs nothing.
+function dashboardConfig() {
+  try {
+    return libLoadConfig();
+  } catch (e) {
+    if (e && e.code === 'CONFIG_INCONCLUSIVE') {
+      if (configPresence() !== 'absent') exitInconclusive();
+      log(viewFailureNotice('config-absent'));
+      process.exit(lifecycle.exitCodeFor(lifecycle.STATUS.MIGRATION_PENDING));
+    }
+    if (e && e.code === 'CONFIG_CORRUPT') exitCorrupt();
+    throw e;
+  }
+}
+
 // The start path, shared by `dashboard start` and `dashboard open` (Issue
 // #136) so the two cannot drift: the confirmed config read, the LAN
 // validation, the daemon spawn and every refusal message, unchanged. A
@@ -2343,8 +2375,10 @@ async function dashboardStart(dir, rest, dashboard, lanLib, opts) {
   const bind = dashboard.validateBind({ host: flags['--host'], port });
   if (!bind.ok) err(`dashboard start: ${bind.error}`);
   // The confirmed config read: a configuration that cannot be proven
-  // refuses (exit 9 / 10) instead of starting a daemon on guessed defaults.
-  const cfg = loadConfig();
+  // refuses (exit 8 / 9 / 10) instead of starting a daemon on guessed
+  // defaults, and a data dir that was never set up is the first-run case
+  // (Issue #148), not a mid-write retry.
+  const cfg = dashboardConfig();
   const interval = resolveDashboardInterval(cfg, Number.isNaN(flagInterval) ? -1 : flagInterval);
   if (!interval.ok) err(`dashboard start: ${interval.error}`);
   // The LAN view (off unless config.dashboard.lan.enabled): a bad value or

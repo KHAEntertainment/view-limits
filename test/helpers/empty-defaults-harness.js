@@ -536,12 +536,16 @@ const CONFIG_READERS = [
   'bin/vl.js | providerCmd | loadConfig | ',
   'bin/vl.js | config | loadConfig | ',
   // The dashboard start path (#61), since #136 shared by `start` and `open`
-  // through `dashboardStart`: strict default — an unconfirmed or corrupt
-  // config.json refuses (exit 9 / 10) before any daemon is spawned, so the
-  // interval is never read from built-in defaults. `dashboard open` reaches
-  // config nowhere else; `--relay` splices a flag and waives an exit code, and
-  // adds no reader.
-  'bin/vl.js | dashboardStart | loadConfig | ',
+  // through `dashboardStart`, which reads through `dashboardConfig` (Issue
+  // #148): strict default — a config.json that cannot be confirmed or cannot
+  // be parsed refuses (exit 9 / 10) before any daemon is spawned, so the
+  // interval is never read from built-in defaults. The same site re-confirms
+  // an inconclusive read's PRESENCE (an lstat, never a document read) and
+  // refuses an absent document as the first-run case (exit 8). `dashboard
+  // open` reaches config nowhere else; `--relay` splices a flag and waives an
+  // exit code, and adds no reader.
+  'bin/vl.js | dashboardConfig | libLoadConfig | ',
+  'bin/vl.js | dashboardConfig | configPresence | ',
   // Issue #62 LAN view: `lan url` reads the confirmed config; enable/disable
   // read-modify-write dashboard.lan under the mutation lock.
   'bin/vl.js | dashboardLanCmd | loadConfig | ',

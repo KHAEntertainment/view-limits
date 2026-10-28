@@ -37,7 +37,7 @@ const { spawn } = require('child_process');
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt,
   resolveDashboardInterval, hostLabel, parseGlobalOptions } = require('../lib/config');
-const { importStandalone, NOTICE: STANDALONE_NOTICE } = require('../lib/standalone-import');
+const { importStandalone, noticeFor: standaloneNotice } = require('../lib/standalone-import');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, spawnRefresh,
@@ -2864,7 +2864,7 @@ function sessionStart() {
   // so say nothing; anything else is one fixed line.
   if (migration && migration.reason === 'import-pending' && !corrupt) {
     if (/lock-busy$/.test(migration.importReason)) process.exit(0);
-    say(STANDALONE_NOTICE.failed);
+    say(standaloneNotice(migration.importClass === 'permanent' ? 'refused' : 'failed', migration.importReason));
   }
   if (migration && migration.reason === 'vault-unreadable') {
     say(corrupt ? `${MIGRATION_VAULT_UNREADABLE} ${corrupt}` : MIGRATION_VAULT_UNREADABLE);
@@ -3044,7 +3044,7 @@ function writesConfig(command, rest) {
 }
 
 // Fixed text: no path, no errno, no vault error text, no credential material.
-const IMPORT_PENDING_REFUSAL = 'not run: your existing settings have not been copied into the plugin data folder yet, and this command would change the configuration before they are. Nothing was written. Rerun this command in a moment.';
+const IMPORT_PENDING_REFUSAL = 'not run: your existing settings have not been copied into the plugin data folder yet, and this command would change the configuration before they are. Nothing was written. Rerun this command in a moment; if this keeps happening, run /view-limits to see why the copy failed.';
 const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been migrated into routes yet (the credential vault could not be read, or another provider change is in progress), and this command would change the configuration before they are. Your stored credentials are untouched and nothing was written. Make sure the vault is accessible (for example, unlock the Keychain), then rerun this command.';
 
 // It fires only when config.json is genuinely absent, and the document it
@@ -3059,21 +3059,21 @@ const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been mig
 // a present config.json is what the migration finds. Skipped is silent; a
 // copy, or a failed copy that changed nothing, is one fixed line.
 //
-// A TRANSIENT outcome (`retry: true`: a lock busy, an I/O error, a source that
-// could not be read) leaves the import still owed. The vault migration is then
-// NOT run in this process: the config.json it would publish ({routes: []} on an
-// empty Keychain) would make the import's target "present" and disarm it for
-// good. Nothing is published, and the next command retries. A PERMANENT outcome
-// (a corrupt or symlinked source, a name already taken in the plugin dir)
-// cannot change by waiting, so the migration proceeds exactly as it always did.
+// While the import is OWED (the plugin dir has no config.json and the standalone
+// dir has one) and did not complete, for ANY reason, nothing is published over
+// it: the vault migration does not run and config-writing commands are
+// refused. Whatever they wrote would make the plugin dir "present" and disarm
+// the import for good. The way out is to fix ~/.view-limits or move it aside;
+// the import is then not owed and the migration runs as it always did.
 let importPending = null;
+let importClass = null;
 if (GLOBAL.claudePlugin) {
   const imported = importStandalone({ target: GLOBAL.dataDir });
-  if (imported.status === 'copied') process.stderr.write(`view-limits: ${STANDALONE_NOTICE.copied}\n`);
+  if (imported.status === 'copied') process.stderr.write(`view-limits: ${standaloneNotice('copied')}\n`);
   else if (imported.status === 'failed') {
-    process.stderr.write(`view-limits: ${imported.retry === true ? STANDALONE_NOTICE.failed : STANDALONE_NOTICE.refused}\n`);
+    process.stderr.write(`view-limits: ${standaloneNotice(imported.class === 'permanent' ? 'refused' : 'failed', imported.reason)}\n`);
   }
-  if (imported.retry === true) importPending = imported.reason;
+  if (imported.owed === true) { importPending = imported.reason; importClass = imported.class || 'transient'; }
 }
 
 let migration = null;
@@ -3082,7 +3082,7 @@ if (MIGRATING_COMMANDS.has(cmd)) {
   // lock (io.configPresence) and never uses the cfg, which only the
   // provider probe needs.
   migration = importPending
-    ? { migrated: false, reason: 'import-pending', importReason: importPending, retry: true }
+    ? { migrated: false, reason: 'import-pending', importReason: importPending, importClass, retry: true }
     : lifecycle.migrateFromVault(lifecycleIo(null));
   if (migration.migrated && migration.ids.length) {
     process.stderr.write(`view-limits: migrated existing credentials into routes: ${migration.ids.join(', ')}\n`);

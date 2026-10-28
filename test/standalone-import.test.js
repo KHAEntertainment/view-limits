@@ -96,7 +96,7 @@ const mode = (f) => fs.statSync(f).mode & 0o777;
 
 const config = require('../lib/config');
 const lockLib = require('../lib/lock');
-const { importStandalone } = require('../lib/standalone-import');
+const { importStandalone, noticeFor, REASONS } = require('../lib/standalone-import');
 function runImport(target, home, deps) {
   const saved = process.env.CLAUDE_PLUGIN_DATA;
   process.env.CLAUDE_PLUGIN_DATA = target;
@@ -231,14 +231,14 @@ test('a target that is not the directory dataDir() resolves refuses rather than 
   assert.deepStrictEqual(tree(a).concat(tree(b)), []);
 });
 
-test('a mutation lock held elsewhere: copy nothing, retry next time', () => {
+test('a mutation lock held elsewhere: copy nothing, still owed', () => {
   const { home } = makeHome();
   const target = fresh('plugin');
   const held = lockLib.acquireMutationLock(target);
   assert.ok(held.ok);
   try {
     const r = runImport(target, home);
-    assert.deepStrictEqual([r.status, r.reason, r.retry], ['skipped', 'lock-busy', true]);
+    assert.deepStrictEqual([r.status, r.reason, r.owed], ['skipped', 'lock-busy', true]);
     assert.deepStrictEqual(tree(target), []);
   } finally { held.release(); }
   assert.strictEqual(runImport(target, home).status, 'copied', 'and it copies once the lock is free');
@@ -292,12 +292,18 @@ test('a symlinked standalone dir fails closed', () => {
   assertNothingCopied(target, 'symlinked source dir');
 });
 
-test('an unexpected entry in secrets/ fails closed', () => {
+test('stray names are ignored, never a reason to refuse: .DS_Store, notes.txt, temp files, in secrets/ and in the root', () => {
   const { home, src } = makeHome();
+  write(path.join(src, 'secrets', '.DS_Store'), 'x', 0o600);
   write(path.join(src, 'secrets', 'notes.txt'), 'who knows', 0o600);
+  write(path.join(src, 'secrets', 'kimi-code-plan.enc.tmp-1-abc'), 'partial', 0o600);
+  write(path.join(src, '.DS_Store'), 'x', 0o600);
+  write(path.join(src, 'README'), 'x', 0o600);
+  fs.mkdirSync(path.join(src, 'secrets', 'subdir'));
   const target = fresh('plugin');
-  assert.strictEqual(runImport(target, home).reason, 'unexpected-source-entry');
-  assertNothingCopied(target, 'unexpected entry');
+  const r = runImport(target, home);
+  assert.strictEqual(r.status, 'copied', JSON.stringify(r));
+  assert.deepStrictEqual(tree(target), ['config.json', 'master.key', 'secrets/', 'secrets/kimi-code-plan.enc', 'secrets/minimax-token-plan.enc']);
 });
 
 test('a config.json that is not a JSON object fails closed', () => {
@@ -325,7 +331,7 @@ test('a mid-copy failure (secrets is a file in the target) removes the master.ke
   const target = fresh('plugin');
   write(path.join(target, 'secrets'), 'squatter', 0o600);
   const r = runImport(target, home);
-  assert.deepStrictEqual([r.status, r.reason, r.retry], ['failed', 'target-conflict', undefined]);
+  assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'target-conflict', true]);
   assert.deepStrictEqual(tree(target), ['secrets'], 'only the squatter is left');
   assert.strictEqual(fs.readFileSync(path.join(target, 'secrets'), 'utf8'), 'squatter', 'and it is untouched');
 });
@@ -354,7 +360,7 @@ test('a failed publish rolls back the vault files and the directory it created',
   const { home } = makeHome();
   const target = fresh('plugin');
   const r = runImport(target, home, { saveConfig: () => { throw new Error('boom'); } });
-  assert.deepStrictEqual([r.status, r.reason, r.retry], ['failed', 'copy-failed', true]);
+  assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'copy-failed', true]);
   assertNothingCopied(target, 'failed publish');
 });
 
@@ -375,7 +381,7 @@ test('a create-only publish that finds config.json already there removes only wh
     return config.saveConfig(doc, opts); // FIRST_PUBLISH refuses: EEXIST
   };
   const r = runImport(target, home, { saveConfig: racing });
-  assert.deepStrictEqual([r.status, r.reason, r.retry], ['failed', 'target-conflict', undefined]);
+  assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'target-conflict', true]);
   assert.deepStrictEqual(tree(target), ['config.json'], 'the vault files are gone');
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(target, 'config.json'), 'utf8')).by, 'someone else',
     'and the document that appeared in the meantime is not clobbered or removed');
@@ -395,7 +401,7 @@ test('a write that fails after the file was created is rolled back, and a later 
     fs.writeSync(fd, buf, 0, buf.length);
   };
   const r = runImport(target, home, { writeFile: failing });
-  assert.deepStrictEqual([r.status, r.reason, r.retry], ['failed', 'copy-failed', true]);
+  assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'copy-failed', true]);
   assertNothingCopied(target, 'a partial file from a failed write');
   assert.strictEqual(runImport(target, home).status, 'copied', 'the leftover would have made this exclusive create fail');
 });
@@ -408,54 +414,120 @@ test('a write that fails on the very first byte of the first file leaves nothing
   assertNothingCopied(target, 'an empty file from a failed first write');
 });
 
-console.log('\nimport — B2: what is transient (retry) and what is permanent');
+console.log('\nimport — owed: nothing may publish over an import that is still to do');
 
-test('classification table: every non-copied outcome says whether it may be retried', () => {
-  const outcome = (r) => [r.status, r.reason, r.retry === true ? 'transient' : 'permanent'].join(' ');
+const isRoot = !!(process.getuid && process.getuid() === 0);
+
+test('classification table: owed or not, and the class that picks the notice', () => {
+  const outcome = (r) => [r.status, r.reason, r.owed ? 'owed' : 'not-owed', r.class || '-'].join(' ');
   const rows = [];
-  // not owed
+  // NOT owed: the caller may migrate as it always did
   let h = makeHome(); let t = fresh('plugin');
   write(path.join(t, 'config.json'), '{"routes":[]}\n', 0o600);
-  rows.push(['config-present', 'skipped config-present permanent', outcome(runImport(t, h.home))]);
-  rows.push(['no standalone dir', 'skipped no-standalone-dir permanent', outcome(runImport(fresh('plugin'), fresh('home')))]);
-  // transient
+  rows.push(['target has config', 'skipped config-present not-owed -', outcome(runImport(t, h.home))]);
+  rows.push(['no standalone dir', 'skipped no-standalone-dir not-owed -', outcome(runImport(fresh('plugin'), fresh('home')))]);
+  h = makeHome(); t = fresh('plugin');
+  fs.rmSync(path.join(h.src, 'config.json'));
+  rows.push(['standalone dir without a config', 'skipped no-standalone-config not-owed -', outcome(runImport(t, h.home))]);
+  h = makeHome();
+  rows.push(['standalone dir is the target', 'skipped same-dir not-owed -', outcome(runImport(h.src, h.home))]);
+  h = makeHome(); t = fresh('plugin');
+  rows.push(['copied', 'copied  not-owed -', outcome(runImport(t, h.home))]);
+  // OWED, notice says it retries by itself (transient)
   h = makeHome(); t = fresh('plugin');
   const heldTarget = lockLib.acquireMutationLock(t);
-  rows.push(['target lock busy', 'skipped lock-busy transient', outcome(runImport(t, h.home))]);
+  rows.push(['target lock busy', 'skipped lock-busy owed -', outcome(runImport(t, h.home))]);
   heldTarget.release();
   h = makeHome(); t = fresh('plugin');
   const heldSource = lockLib.acquireMutationLock(h.src);
-  rows.push(['source lock busy', 'skipped source-lock-busy transient', outcome(runImport(t, h.home))]);
+  rows.push(['source lock busy', 'skipped source-lock-busy owed -', outcome(runImport(t, h.home))]);
   heldSource.release();
+  if (!isRoot) {
+    h = makeHome(); t = fresh('plugin');
+    fs.chmodSync(path.join(h.src, 'secrets', 'minimax-token-plan.enc'), 0o000);
+    rows.push(['unreadable secret', 'failed source-unreadable owed transient', outcome(runImport(t, h.home))]);
+    fs.chmodSync(path.join(h.src, 'secrets', 'minimax-token-plan.enc'), 0o600);
+  }
   h = makeHome(); t = fresh('plugin');
-  fs.chmodSync(path.join(h.src, 'secrets', 'minimax-token-plan.enc'), 0o000);
-  if (!(process.getuid && process.getuid() === 0)) rows.push(['unreadable secret', 'failed source-unreadable transient', outcome(runImport(t, h.home))]);
-  fs.chmodSync(path.join(h.src, 'secrets', 'minimax-token-plan.enc'), 0o600);
-  h = makeHome(); t = fresh('plugin');
-  rows.push(['write fails', 'failed copy-failed transient', outcome(runImport(t, h.home, { writeFile: () => { throw new Error('EIO'); } }))]);
-  // permanent
+  rows.push(['write fails', 'failed copy-failed owed transient', outcome(runImport(t, h.home, { writeFile: () => { throw new Error('EIO'); } }))]);
+  // OWED, notice says it needs a fix (permanent) — and the caller still publishes nothing
   h = makeHome(); t = fresh('plugin');
   write(path.join(h.src, 'config.json'), '[]', 0o600);
-  rows.push(['source config not an object', 'failed source-config-unreadable permanent', outcome(runImport(t, h.home))]);
+  rows.push(['source config not an object', 'failed source-config-unreadable owed permanent', outcome(runImport(t, h.home))]);
+  h = makeHome(); t = fresh('plugin');
+  write(path.join(h.src, 'config.json'), '{ not json', 0o600);
+  rows.push(['source config corrupt', 'failed source-config-unreadable owed permanent', outcome(runImport(t, h.home))]);
   h = makeHome(); t = fresh('plugin');
   fs.symlinkSync('/etc/hosts', path.join(h.src, 'secrets', 'evil.enc'));
-  rows.push(['symlink in secrets/', 'failed unsafe-source permanent', outcome(runImport(t, h.home))]);
-  h = makeHome(); t = fresh('plugin');
-  write(path.join(h.src, 'secrets', 'notes.txt'), 'x', 0o600);
-  rows.push(['unexpected entry', 'failed unexpected-source-entry permanent', outcome(runImport(t, h.home))]);
+  rows.push(['symlink named like a ciphertext', 'failed unsafe-source owed permanent', outcome(runImport(t, h.home))]);
   h = makeHome(); t = fresh('plugin');
   write(path.join(t, 'master.key'), 'mine', 0o600);
-  rows.push(['name taken in the target', 'failed target-conflict permanent', outcome(runImport(t, h.home))]);
+  rows.push(['name taken in the target', 'failed target-conflict owed permanent', outcome(runImport(t, h.home))]);
   h = makeHome(); t = fresh('plugin');
-  rows.push(['source swapped while read', 'failed source-changed permanent', outcome(runImport(t, h.home, {
+  rows.push(['source swapped while read', 'failed source-changed owed permanent', outcome(runImport(t, h.home, {
     beforeSourceRecheck: ({ source }) => { fs.renameSync(path.join(source, 'secrets'), path.join(source, 'secrets.real')); fs.symlinkSync('secrets.real', path.join(source, 'secrets')); },
   }))]);
-  if (!(process.getuid && process.getuid() === 0)) {
+  if (!isRoot) {
     h = makeHome(); t = fresh('plugin');
     fs.chmodSync(h.src, 0o500);
-    try { rows.push(['source dir cannot hold a lock', 'failed source-lock-unavailable permanent', outcome(runImport(t, h.home))]); } finally { fs.chmodSync(h.src, 0o700); }
+    try { rows.push(['source dir cannot hold a lock', 'failed source-lock-unavailable owed permanent', outcome(runImport(t, h.home))]); } finally { fs.chmodSync(h.src, 0o700); }
   }
   for (const [name, want, got] of rows) assert.strictEqual(got, want, name);
+});
+
+test('a source mid-publish (config.json.prev only) counts as present: it is copied, never "absent"', () => {
+  const { home, src } = makeHome();
+  fs.renameSync(path.join(src, 'config.json'), path.join(src, 'config.json.prev'));
+  const target = fresh('plugin');
+  const r = runImport(target, home);
+  assert.strictEqual(r.status, 'copied', JSON.stringify(r));
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(target, 'config.json'), 'utf8')), SOURCE_DOC);
+});
+
+test('a source mid-publish with its lock busy is OWED, not "no standalone config"', () => {
+  const { home, src } = makeHome();
+  fs.renameSync(path.join(src, 'config.json'), path.join(src, 'config.json.prev'));
+  const held = lockLib.acquireMutationLock(src);
+  try {
+    const r = runImport(fresh('plugin'), home);
+    assert.deepStrictEqual([r.status, r.reason, r.owed], ['skipped', 'source-lock-busy', true]);
+  } finally { held.release(); }
+});
+
+test('a read-only (0500) secrets/ is copied: written 0700, its mode applied afterwards', { skip: isRoot }, () => {
+  const { home, src } = makeHome();
+  fs.chmodSync(path.join(src, 'secrets'), 0o500);
+  const target = fresh('plugin');
+  try {
+    const r = runImport(target, home);
+    assert.strictEqual(r.status, 'copied', JSON.stringify(r));
+    assert.strictEqual(mode(path.join(target, 'secrets')), 0o500);
+    assert.strictEqual(fs.readFileSync(path.join(target, 'secrets', 'kimi-code-plan.enc'), 'utf8'), SECRETS['kimi-code-plan.enc']);
+  } finally {
+    fs.chmodSync(path.join(src, 'secrets'), 0o700);
+    if (fs.existsSync(path.join(target, 'secrets'))) fs.chmodSync(path.join(target, 'secrets'), 0o700);
+  }
+});
+
+test('a failure AFTER the 0500 mode was applied still rolls everything back (rollback restores 0700 first)', { skip: isRoot }, () => {
+  const { home, src } = makeHome();
+  fs.chmodSync(path.join(src, 'secrets'), 0o500);
+  const target = fresh('plugin');
+  try {
+    const r = runImport(target, home, { saveConfig: () => { throw new Error('boom'); } });
+    assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'copy-failed', true]);
+    assertNothingCopied(target, 'rollback of a 0500 directory');
+  } finally { fs.chmodSync(path.join(src, 'secrets'), 0o700); }
+});
+
+test('an EACCES on the very first lstat of the standalone dir is a fixed outcome, never a thrown error', { skip: isRoot }, () => {
+  const { home } = makeHome();
+  fs.chmodSync(home, 0o000); // lstat of <home>/.view-limits now fails with EACCES
+  const target = fresh('plugin');
+  let r;
+  try { r = runImport(target, home); } finally { fs.chmodSync(home, 0o700); }
+  assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'source-unreadable', true]);
+  assertNothingCopied(target, 'unreadable root');
 });
 
 console.log('\nimport — B3: the source lock, then the target lock');
@@ -467,7 +539,7 @@ test('a source lock held elsewhere: copy nothing, retry; the target lock is not 
   assert.ok(held.ok);
   try {
     const r = runImport(target, home);
-    assert.deepStrictEqual([r.status, r.reason, r.retry], ['skipped', 'source-lock-busy', true]);
+    assert.deepStrictEqual([r.status, r.reason, r.owed], ['skipped', 'source-lock-busy', true]);
     assert.deepStrictEqual(tree(target), []);
   } finally { held.release(); }
   const free = lockLib.acquireMutationLock(target);
@@ -482,7 +554,7 @@ test('the order is source first: a held TARGET lock with a free source ends lock
   assert.ok(held.ok);
   try {
     const r = runImport(target, home);
-    assert.deepStrictEqual([r.status, r.reason, r.retry], ['skipped', 'lock-busy', true]);
+    assert.deepStrictEqual([r.status, r.reason, r.owed], ['skipped', 'lock-busy', true]);
     assert.deepStrictEqual(tree(target), []);
   } finally { held.release(); }
   const free = lockLib.acquireMutationLock(src);
@@ -523,7 +595,7 @@ test('secrets/ swapped for a symlink between the check and the recheck: copy not
       fs.symlinkSync(decoy, path.join(source, 'secrets'));
     },
   });
-  assert.deepStrictEqual([r.status, r.reason, r.retry], ['failed', 'source-changed', undefined]);
+  assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'source-changed', true]);
   assertNothingCopied(target, 'swapped secrets/');
 });
 
@@ -629,11 +701,12 @@ test('the import runs before the migration: a first-run view finds the copied ro
 
 test('a failed copy prints one fixed line, still runs the command, and leaves nothing', () => {
   const { home, src } = makeHome();
-  write(path.join(src, 'secrets', 'notes.txt'), 'x', 0o600);
+  fs.symlinkSync('/etc/hosts', path.join(src, 'secrets', 'evil.enc'));
   const target = fresh('plugin');
   const r = cli(['--data-dir', target, '--claude-plugin', 'config'], { home });
   assert.ok([0, 9].includes(r.status), r.stderr); // the command then runs on the unconfigured dir
-  assert.match(r.stderr, /^view-limits: could not copy your existing settings .* nothing was copied/m);
+  assert.match(r.stderr, /^view-limits: could not copy your existing settings .* nothing was copied.* \(reason: unsafe-source\)$/m);
+  assert.ok(!r.stderr.includes(home), 'no path in the notice');
   assert.deepStrictEqual(tree(target), []);
 });
 
@@ -739,15 +812,121 @@ test('a hook whose import finds the SOURCE lock busy does not migrate either', (
   assert.match(hook(target, home).stderr, /copied your existing settings/);
 });
 
-test('a PERMANENT source problem (corrupt standalone config) lets the migration proceed, with the "will not be retried" line', () => {
+test('a PERMANENT source problem (corrupt standalone config): no migration, no publish, the refused notice; moving it aside lets migration run', () => {
   const { home, src } = makeHome();
   write(path.join(src, 'config.json'), '{ not json', 0o600);
   const target = fresh('plugin');
   const r = hook(target, home);
   assert.strictEqual(r.status, 0, r.stderr);
-  assert.match(r.stderr, /will not be retried until the standalone folder or the plugin folder is fixed/);
-  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(target, 'config.json'), 'utf8')), { routes: [] }, 'the migration published as it always did');
-  assert.ok(!tree(target).includes('master.key'), 'and nothing of the standalone vault came with it');
+  assert.match(r.stderr, /Fix the standalone folder or move it aside, then rerun\. \(reason: source-config-unreadable\)/);
+  assert.match(r.stdout, /\(reason: source-config-unreadable\)/, 'session-start says the same in its systemMessage');
+  assert.deepStrictEqual(tree(target), [], 'nothing published over the owed import: no migrated {routes: []}');
+  assert.deepStrictEqual(tree(target), [], 'and again on the next run');
+  hook(target, home);
+  assert.deepStrictEqual(tree(target), []);
+  // The escape hatch: the user moves the standalone folder aside. The import is
+  // no longer owed, and the migration runs exactly as it always did.
+  fs.renameSync(src, `${src}.moved-aside`);
+  const after = hook(target, home);
+  assert.strictEqual(after.status, 0, after.stderr);
+  assert.doesNotMatch(after.stderr, /could not copy/);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(target, 'config.json'), 'utf8')), { routes: [] });
+});
+
+test('a config-changing command is refused for a PERMANENT problem too', () => {
+  const { home, src } = makeHome();
+  fs.symlinkSync('/etc/hosts', path.join(src, 'secrets', 'evil.enc'));
+  const target = fresh('plugin');
+  const r = cli(['--data-dir', target, '--claude-plugin', 'provider', 'remove', 'nope'], { home, env: { NODE_OPTIONS: `--require=${BARRIER}` } });
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.stderr, /have not been copied into the plugin data folder yet/);
+  assert.deepStrictEqual(tree(target), []);
+});
+
+test('stray names in the standalone folder do not hold anything back: the hook copies', () => {
+  const { home, src } = makeHome();
+  write(path.join(src, 'secrets', '.DS_Store'), 'x', 0o600);
+  write(path.join(src, 'secrets', 'notes.txt'), 'x', 0o600);
+  const target = fresh('plugin');
+  assert.match(hook(target, home).stderr, /copied your existing settings/);
+  assert.ok(tree(target).includes('secrets/kimi-code-plan.enc'));
+});
+
+test('an unreadable HOME entry (EACCES on the first lstat) prints the fixed notice: no stack, no path', { skip: isRoot }, () => {
+  const { home } = makeHome();
+  const target = fresh('plugin');
+  fs.chmodSync(home, 0o000);
+  let r;
+  try { r = hook(target, home); } finally { fs.chmodSync(home, 0o700); }
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(r.stderr, /could not copy your existing settings .*\(reason: source-unreadable\)/);
+  assert.doesNotMatch(r.stderr + r.stdout, /\n\s+at |EACCES|Error:/, 'no raw stack or errno');
+  assert.ok(!(r.stderr + r.stdout).includes(home), 'no path');
+  assert.deepStrictEqual(tree(target), []);
+});
+
+console.log('\nnotices — owner ruling Q43-A, pinned byte for byte');
+
+const FINAL = {
+  copied: 'copied your existing settings from the standalone data folder into the plugin data folder.',
+  failed: 'could not copy your existing settings from the standalone data folder into the plugin data folder — nothing was copied; this retries on the next command.',
+  refused: 'could not copy your existing settings from the standalone data folder into the plugin data folder — nothing was copied. Fix the standalone folder or move it aside, then rerun.',
+  pending: 'not run: your existing settings have not been copied into the plugin data folder yet, and this command would change the configuration before they are. Nothing was written. Rerun this command in a moment; if this keeps happening, run /view-limits to see why the copy failed.',
+};
+
+test('1. copied: exact text, no reason code', () => {
+  assert.strictEqual(noticeFor('copied'), FINAL.copied);
+  assert.strictEqual(noticeFor('copied', 'copy-failed'), FINAL.copied);
+});
+
+test('2. failed (retries) and 3. refused (permanent): exact text + " (reason: <code>)" for EVERY reason the importer can return', () => {
+  assert.ok(REASONS.length >= 9);
+  for (const code of REASONS) {
+    assert.match(code, /^[a-z]+(-[a-z]+)*$/, 'a reason code is a fixed slug, never a path or errno');
+    assert.strictEqual(noticeFor('failed', code), `${FINAL.failed} (reason: ${code})`);
+    assert.strictEqual(noticeFor('refused', code), `${FINAL.refused} (reason: ${code})`);
+  }
+  assert.strictEqual(noticeFor('failed', '/tmp/x/.view-limits: EIO'), `${FINAL.failed} (reason: source-unreadable)`,
+    'anything that is not a known code collapses to a fixed one');
+});
+
+test('every failed outcome the importer actually returns carries a known reason code', () => {
+  const seen = new Set();
+  const note = (r) => { if (r.status === 'failed') seen.add(r.reason); };
+  let h = makeHome(); let t = fresh('plugin');
+  fs.symlinkSync('/etc/hosts', path.join(h.src, 'secrets', 'evil.enc')); note(runImport(t, h.home));
+  h = makeHome(); t = fresh('plugin'); write(path.join(h.src, 'config.json'), '[]', 0o600); note(runImport(t, h.home));
+  h = makeHome(); t = fresh('plugin'); write(path.join(t, 'master.key'), 'x', 0o600); note(runImport(t, h.home));
+  h = makeHome(); t = fresh('plugin'); note(runImport(t, h.home, { writeFile: () => { throw new Error('EIO'); } }));
+  h = makeHome(); t = fresh('plugin');
+  note(runImport(t, h.home, { beforeSourceRecheck: ({ source }) => { fs.renameSync(path.join(source, 'secrets'), path.join(source, 's.real')); fs.symlinkSync('s.real', path.join(source, 'secrets')); } }));
+  if (!isRoot) {
+    h = makeHome(); t = fresh('plugin'); fs.chmodSync(h.home, 0o000);
+    try { note(runImport(t, h.home)); } finally { fs.chmodSync(h.home, 0o700); }
+    h = makeHome(); t = fresh('plugin'); fs.chmodSync(h.src, 0o500);
+    try { note(runImport(t, h.home)); } finally { fs.chmodSync(h.src, 0o700); }
+  }
+  for (const code of seen) assert.ok(REASONS.includes(code), `${code} is not in REASONS`);
+  assert.ok(seen.size >= (isRoot ? 5 : 7), `exercised ${[...seen].join(', ')}`);
+});
+
+test('4. the pending refusal is exact text on the CLI, and each printed failure line ends in its reason code', () => {
+  const { home, src } = makeHome();
+  fs.symlinkSync('/etc/hosts', path.join(src, 'secrets', 'evil.enc'));
+  const target = fresh('plugin');
+  const r = cli(['--data-dir', target, '--claude-plugin', 'provider', 'remove', 'nope'], { home, env: { NODE_OPTIONS: `--require=${BARRIER}` } });
+  const lines = r.stderr.split('\n');
+  assert.ok(lines.includes(`view-limits: ${FINAL.refused} (reason: unsafe-source)`), r.stderr);
+  assert.ok(lines.includes(`view-limits: ${FINAL.pending}`), r.stderr);
+});
+
+test('the transient CLI line is the exact "failed" text with its reason code', { skip: isRoot }, () => {
+  const { home } = makeHome();
+  const target = fresh('plugin');
+  fs.chmodSync(home, 0o000);
+  let r;
+  try { r = hook(target, home); } finally { fs.chmodSync(home, 0o700); }
+  assert.ok(r.stderr.split('\n').includes(`view-limits: ${FINAL.failed} (reason: source-unreadable)`), r.stderr);
 });
 
 (async () => {

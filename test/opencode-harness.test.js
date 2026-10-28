@@ -180,7 +180,7 @@ function assertNoNetworkOrCredentials(log, label) {
 // path (VIEW_LIMITS_DATA_DIR set: pass it; unset: nothing). It must appear
 // exactly once, directly after the path, and is removed before every other check
 // so those stay as strict as they were.
-const DATA_DIR_EXPR = ' ${VIEW_LIMITS_DATA_DIR:+--data-dir "$VIEW_LIMITS_DATA_DIR"}';
+const DATA_DIR_EXPR = ' ${VIEW_LIMITS_DATA_DIR:+--data-dir="$VIEW_LIMITS_DATA_DIR"}';
 function commandFileProblems(label, rawCommand, { argv = null, allowedRoots = [ROOT_EXPR] } = {}) {
   const bad = [];
   let command = rawCommand;

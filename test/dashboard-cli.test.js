@@ -385,6 +385,52 @@ test('config that cannot be proven refuses loudly: absent → 8 (first run), unc
   assert.deepStrictEqual(fs.readdirSync(unconfirmable), ['config.json'], 'a refused unconfirmable read writes nothing either');
 });
 
+// Issue #148: an lstat that finds no config.json is not proof of absence. A
+// FIRST publish in flight has its temp file but has not linked config.json in
+// yet, and it holds the provider mutation lock while it does. That is a retry
+// (9), not a first run (8).
+const LOCK_LIB = path.join(__dirname, '..', 'lib', 'lock.js');
+function holdLockWithTempFile(dir) {
+  const script = `
+    const fs = require('fs'), path = require('path');
+    const lock = require(${JSON.stringify(LOCK_LIB)}).acquireMutationLock(${JSON.stringify(dir)});
+    if (!lock.ok) { console.log('busy'); process.exit(1); }
+    fs.writeFileSync(path.join(${JSON.stringify(dir)}, 'config.json.tmp.' + process.pid + '.0123456789abcdef'), '{"routes":[]}', { flag: 'wx', mode: 0o600 });
+    console.log('held');
+    process.stdin.resume();`;
+  const child = spawn(process.execPath, ['-e', script], { stdio: ['pipe', 'pipe', 'inherit'] });
+  return new Promise((resolve, reject) => {
+    child.stdout.once('data', (d) => (String(d).trim() === 'held' ? resolve(child) : reject(new Error('lock not taken'))));
+    child.once('error', reject);
+  });
+}
+
+test('a first publish in flight (lock held, temp file, no config.json) is exit 9 with the mid-write text, not the first-run exit 8', async () => {
+  const dir = scratch(null);
+  const holder = await holdLockWithTempFile(dir);
+  try {
+    for (const args of [['dashboard', 'start'], ['dashboard', 'open', '--no-open']]) {
+      const r = await vl(dir, args);
+      assert.strictEqual(r.status, 9, `${args.join(' ')}: ${r.stderr}`);
+      assert.match(r.stderr, /config unreadable mid-write; retry\./);
+      assert.ok(!r.stderr.includes('No configuration yet'), 'not reported as a first run');
+      assert.strictEqual(r.stdout, '');
+      assert.ok(!fs.existsSync(records.recordPath(dir)) && !fs.existsSync(path.join(dir, 'dashboard.log')), 'no daemon was spawned');
+    }
+    assert.ok(!fs.existsSync(path.join(dir, 'config.json')), 'and nothing published a document');
+  } finally { holder.kill('SIGKILL'); }
+});
+
+test('a lock directory with nobody holding it and no config.json is proven absent under the lock: exit 8', async () => {
+  const dir = scratch(null);
+  fs.mkdirSync(path.join(dir, 'provider-mutations'));
+  const r = await vl(dir, ['dashboard', 'start']);
+  assert.strictEqual(r.status, 8, r.stderr);
+  assert.match(r.stderr, /No configuration yet: run \/view-limits:setup/);
+  assert.ok(!fs.existsSync(records.recordPath(dir)) && !fs.existsSync(path.join(dir, 'dashboard.log')));
+  assert.deepStrictEqual(fs.readdirSync(path.join(dir, 'provider-mutations')), [], 'the proof left no ticket behind');
+});
+
 // Issue #148: `dashboard open` reaches the same refusal through the shared
 // start path, so a first-time user cannot start the dashboard at all while
 // being told to retry.

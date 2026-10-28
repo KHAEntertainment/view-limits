@@ -1027,8 +1027,13 @@ test('the transient CLI line is the exact "failed" text with its reason code', {
     }
     console.log(`  ✓ ${ROUNDS} rounds of the same command in two real processes: at most one copy, never a partial one`);
 
-    // The two real SessionStart hook commands against the same fresh dir.
-    let copiedRounds = 0;
+    // The two real SessionStart hook commands against the same fresh dir. Both
+    // can legitimately lose: each sees the other's lock ticket and skips, so
+    // the race itself promises at most one copy, never a partial or migrated
+    // document, and if nobody copied, nothing published at all. A hook that runs
+    // afterwards on its own then copies, with config and vault intact.
+    let copiedInRace = 0;
+    let copiedAfter = 0;
     for (let i = 0; i < ROUNDS; i += 1) {
       const { home } = makeHome();
       const target = fresh('plugin');
@@ -1037,16 +1042,31 @@ test('the transient CLI line is the exact "failed" text with its reason code', {
       const copies = [a, b].filter((r) => /copied your existing settings/.test(r.err)).length;
       assert.ok(copies <= 1, `hooks round ${i}: ${copies} copies`);
       const got = tree(target);
-      const doc = JSON.parse(fs.readFileSync(path.join(target, 'config.json'), 'utf8'));
-      // The loser's import found a lock busy (or the finished document), and a
-      // process whose import is still owed does not run the vault migration, so
-      // there is always exactly one copy and never a migrated {routes: []}.
-      assert.strictEqual(copies, 1, `hooks round ${i}: expected exactly one copy, got ${copies}\n${a.err}\n${b.err}`);
-      copiedRounds += 1;
-      assert.deepStrictEqual(doc, SOURCE_DOC, `hooks round ${i}`);
-      assert.ok(got.includes('master.key') && got.includes('secrets/kimi-code-plan.enc'), `hooks round ${i}: vault files travelled with the document`);
+      if (copies === 1) {
+        copiedInRace += 1;
+        const doc = JSON.parse(fs.readFileSync(path.join(target, 'config.json'), 'utf8'));
+        assert.deepStrictEqual(doc, SOURCE_DOC, `hooks round ${i}: a migrated {routes: []} or a partial document`);
+        assert.ok(got.includes('master.key') && got.includes('secrets/kimi-code-plan.enc'), `hooks round ${i}: vault files travelled with the document`);
+      } else {
+        // Both lost the lock: nothing may have been published or half copied.
+        assert.deepStrictEqual(got, [], `hooks round ${i}: nobody copied, so nothing may exist: ${got}\n${a.err}\n${b.err}`);
+      }
+      // One hook on its own, no race: the copy has happened by the time it ends.
+      const alone = hook(target, home);
+      assert.strictEqual(alone.status, 0, alone.stderr);
+      if (copies === 0) {
+        copiedAfter += 1;
+        assert.match(alone.stderr, /copied your existing settings/, `hooks round ${i}: the sequential hook must copy`);
+      } else {
+        assert.doesNotMatch(alone.stderr, /copied your existing settings/, `hooks round ${i}: and not copy twice`);
+      }
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(target, 'config.json'), 'utf8')), SOURCE_DOC, `hooks round ${i}: final config`);
+      assert.strictEqual(fs.readFileSync(path.join(target, 'master.key'), 'utf8'), MASTER, `hooks round ${i}: final master.key`);
+      for (const [name, text] of Object.entries(SECRETS)) {
+        assert.strictEqual(fs.readFileSync(path.join(target, 'secrets', name), 'utf8'), text, `hooks round ${i}: final ${name}`);
+      }
     }
-    console.log(`  ✓ ${ROUNDS} rounds of refresh --session-start + session-start together: exactly one copy, config and vault files together, no migration published in its place (${copiedRounds}/${ROUNDS})`);
+    console.log(`  ✓ ${ROUNDS} rounds of refresh --session-start + session-start together: at most one copy, never partial or migrated, nothing published when both lose; a following hook copies intact (${copiedInRace} copied in the race, ${copiedAfter} by the following hook)`);
   } catch (e) {
     failures += 1;
     console.log(`  ✗ concurrency\n    ${e.stack || e.message}`);

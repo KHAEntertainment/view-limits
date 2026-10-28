@@ -2343,7 +2343,16 @@ function openerProblem(e) {
 //                    help): the mid-write notice and exit 9, unchanged
 //   corrupt       -> the corrupt notice and exit 10, unchanged
 //
-// The presence check is an lstat, never a document read, and takes no lock.
+// The presence check is an lstat, never a document read, and takes no lock. An
+// lstat that finds nothing is not yet proof, though: a FIRST publish in flight
+// has written its temp file but not linked config.json in. So "absent" is
+// confirmed before it is believed. Every publisher holds the provider mutation
+// lock, which it makes the directory for first; with no such directory nothing
+// has ever published or is publishing, and absence is proven without writing
+// anything. With one, the #81 strict reader proves it under the lock: ENOENT is
+// the proof (exit 8); a lock that cannot be had within its wait, or any other
+// inconclusive answer, is a publish in flight (exit 9); a document that has
+// appeared is read normally.
 // The notices are read at call time, like viewFailureNotice's, so the
 // declaration order further down the file costs nothing.
 function dashboardConfig() {
@@ -2352,12 +2361,39 @@ function dashboardConfig() {
   } catch (e) {
     if (e && e.code === 'CONFIG_INCONCLUSIVE') {
       if (configPresence() !== 'absent') exitInconclusive();
-      log(viewFailureNotice('config-absent'));
-      process.exit(lifecycle.exitCodeFor(lifecycle.STATUS.MIGRATION_PENDING));
+      dashboardConfirmAbsent();
+      try {
+        return libLoadConfig();
+      } catch (again) {
+        if (again && again.code === 'CONFIG_CORRUPT') exitCorrupt();
+        exitInconclusive();
+      }
     }
     if (e && e.code === 'CONFIG_CORRUPT') exitCorrupt();
     throw e;
   }
+}
+
+// Exits 8 (proven absent) or 9 (cannot be proven); returns only when the
+// document turns out to be there.
+function dashboardConfirmAbsent() {
+  let lockDirExists = true;
+  try {
+    fs.lstatSync(path.join(dataDir(), lifecycle.LOCK_DIR));
+  } catch (e) {
+    if (!e || e.code !== 'ENOENT') exitInconclusive();
+    lockDirExists = false;
+  }
+  if (lockDirExists) {
+    try {
+      readConfigText({ strict: true });
+      return;
+    } catch (e) {
+      if (!e || e.code !== 'ENOENT') exitInconclusive();
+    }
+  }
+  log(viewFailureNotice('config-absent'));
+  process.exit(lifecycle.exitCodeFor(lifecycle.STATUS.MIGRATION_PENDING));
 }
 
 // The start path, shared by `dashboard start` and `dashboard open` (Issue

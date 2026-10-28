@@ -220,9 +220,9 @@ test('Claude, Codex and OpenCode surfaces all resolve to the identical bin/vl.js
   assert.deepStrictEqual(opencode, ['view', '--relay'], 'OpenCode dispatches exactly `view --relay`');
   const shared = path.join(dir, 'shared-data');
   const sharedEnv = { VIEW_LIMITS_ROOT: ROOT, VIEW_LIMITS_DATA_DIR: shared };
-  assert.deepStrictEqual(resolveArgv(codexSh(), { env: sharedEnv }), ['--data-dir', shared, 'view', '--relay'],
+  assert.deepStrictEqual(resolveArgv(codexSh(), { env: sharedEnv }), ['--data-dir=' + shared, 'view', '--relay'],
     'Codex passes VIEW_LIMITS_DATA_DIR as --data-dir');
-  assert.deepStrictEqual(resolveArgv(openCodeExec(), { env: sharedEnv }), ['--data-dir', shared, 'view', '--relay'],
+  assert.deepStrictEqual(resolveArgv(openCodeExec(), { env: sharedEnv }), ['--data-dir=' + shared, 'view', '--relay'],
     'OpenCode passes VIEW_LIMITS_DATA_DIR as --data-dir');
   for (const argv of [claude, codex, opencode]) {
     assert.ok(!argv.some((a) => a.includes('ARGUMENTS') || /^\$/.test(a)),

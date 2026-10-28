@@ -50,7 +50,7 @@ const ROOT_EXPR = '${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}';
 // (unset: no argument at all, so the CLI keeps ~/.view-limits). It is pinned by
 // exact text, once, directly after the CLI path, and stripped before the
 // existing argv/operator checks so those stay exactly as strict as they were.
-const DATA_DIR_EXPR = ' ${VIEW_LIMITS_DATA_DIR:+--data-dir "$VIEW_LIMITS_DATA_DIR"}';
+const DATA_DIR_EXPR = ' ${VIEW_LIMITS_DATA_DIR:+--data-dir="$VIEW_LIMITS_DATA_DIR"}';
 function withoutDataDir(label, command) {
   assert.strictEqual(command.split('/bin/vl.js"' + DATA_DIR_EXPR).length, 2,
     `${label}: must carry the data-dir expansion exactly once, right after the CLI path`);

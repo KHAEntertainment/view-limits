@@ -546,6 +546,13 @@ const CONFIG_READERS = [
   // exit code, and adds no reader.
   'bin/vl.js | dashboardConfig | libLoadConfig | ',
   'bin/vl.js | dashboardConfig | configPresence | ',
+  // Issue #148 (review): an lstat that finds no config.json is confirmed before
+  // it is believed. The retry after a document turns out to be there is the same
+  // strict-default lax read as the first (no opt-in), and the confirmation is the
+  // #81 strict reader under the mutation lock (proven ENOENT -> exit 8, lock not
+  // obtainable -> exit 9), reached only when a lock directory exists.
+  'bin/vl.js | dashboardConfig | libLoadConfig | ',
+  'bin/vl.js | dashboardConfirmAbsent | readConfigText | { strict: true }',
   // Issue #148: the one-time import of the standalone data dir. configPresence
   // asks only whether the TARGET's config.json exists (an lstat, never a
   // document read), once before the locks and once under them. The SOURCE's

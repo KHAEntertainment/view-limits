@@ -2859,6 +2859,13 @@ function sessionStart() {
   // unreadable, so say what actually happened. systemMessage is shown to the
   // user and never enters the model's context; the text is fixed, with no
   // path, error text or credential material in it.
+  // The standalone import could not complete this time (#148) and the vault
+  // migration was held back with it. A busy lock is another process at work,
+  // so say nothing; anything else is one fixed line.
+  if (migration && migration.reason === 'import-pending' && !corrupt) {
+    if (/lock-busy$/.test(migration.importReason)) process.exit(0);
+    say(STANDALONE_NOTICE.failed);
+  }
   if (migration && migration.reason === 'vault-unreadable') {
     say(corrupt ? `${MIGRATION_VAULT_UNREADABLE} ${corrupt}` : MIGRATION_VAULT_UNREADABLE);
   }
@@ -3037,6 +3044,7 @@ function writesConfig(command, rest) {
 }
 
 // Fixed text: no path, no errno, no vault error text, no credential material.
+const IMPORT_PENDING_REFUSAL = 'not run: your existing settings have not been copied into the plugin data folder yet, and this command would change the configuration before they are. Nothing was written. Rerun this command in a moment.';
 const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been migrated into routes yet (the credential vault could not be read, or another provider change is in progress), and this command would change the configuration before they are. Your stored credentials are untouched and nothing was written. Make sure the vault is accessible (for example, unlock the Keychain), then rerun this command.';
 
 // It fires only when config.json is genuinely absent, and the document it
@@ -3050,10 +3058,22 @@ const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been mig
 // never do). It runs BEFORE the migration below, in the same process, so that
 // a present config.json is what the migration finds. Skipped is silent; a
 // copy, or a failed copy that changed nothing, is one fixed line.
+//
+// A TRANSIENT outcome (`retry: true`: a lock busy, an I/O error, a source that
+// could not be read) leaves the import still owed. The vault migration is then
+// NOT run in this process: the config.json it would publish ({routes: []} on an
+// empty Keychain) would make the import's target "present" and disarm it for
+// good. Nothing is published, and the next command retries. A PERMANENT outcome
+// (a corrupt or symlinked source, a name already taken in the plugin dir)
+// cannot change by waiting, so the migration proceeds exactly as it always did.
+let importPending = null;
 if (GLOBAL.claudePlugin) {
   const imported = importStandalone({ target: GLOBAL.dataDir });
   if (imported.status === 'copied') process.stderr.write(`view-limits: ${STANDALONE_NOTICE.copied}\n`);
-  else if (imported.status === 'failed') process.stderr.write(`view-limits: ${STANDALONE_NOTICE.failed}\n`);
+  else if (imported.status === 'failed') {
+    process.stderr.write(`view-limits: ${imported.retry === true ? STANDALONE_NOTICE.failed : STANDALONE_NOTICE.refused}\n`);
+  }
+  if (imported.retry === true) importPending = imported.reason;
 }
 
 let migration = null;
@@ -3061,7 +3081,9 @@ if (MIGRATING_COMMANDS.has(cmd)) {
   // No config read: the migration decides presence by lstat under its own
   // lock (io.configPresence) and never uses the cfg, which only the
   // provider probe needs.
-  migration = lifecycle.migrateFromVault(lifecycleIo(null));
+  migration = importPending
+    ? { migrated: false, reason: 'import-pending', importReason: importPending, retry: true }
+    : lifecycle.migrateFromVault(lifecycleIo(null));
   if (migration.migrated && migration.ids.length) {
     process.stderr.write(`view-limits: migrated existing credentials into routes: ${migration.ids.join(', ')}\n`);
   } else if (migration.reason === 'vault-unreadable') {
@@ -3075,10 +3097,11 @@ if (MIGRATING_COMMANDS.has(cmd)) {
   // future retry reason cannot be forgotten here.
   if (migration.retry === true && writesConfig(cmd, args)) {
     const status = lifecycle.STATUS.MIGRATION_PENDING;
+    const refusal = migration.reason === 'import-pending' ? IMPORT_PENDING_REFUSAL : MIGRATION_PENDING_REFUSAL;
     if (cmd === 'provider' && args.includes('--json')) {
-      process.stdout.write(JSON.stringify({ command: args[0], ok: false, status, error: MIGRATION_PENDING_REFUSAL }, null, 2) + '\n');
+      process.stdout.write(JSON.stringify({ command: args[0], ok: false, status, error: refusal }, null, 2) + '\n');
     } else {
-      process.stderr.write(`view-limits: ${MIGRATION_PENDING_REFUSAL}\n`);
+      process.stderr.write(`view-limits: ${refusal}\n`);
     }
     process.exit(lifecycle.exitCodeFor(status));
   }

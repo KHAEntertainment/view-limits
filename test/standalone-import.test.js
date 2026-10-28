@@ -530,6 +530,76 @@ test('an EACCES on the very first lstat of the standalone dir is a fixed outcome
   assertNothingCopied(target, 'unreadable root');
 });
 
+console.log('\nimport — the target root is private; a FIFO never blocks');
+
+test('an absent target root is created 0700 under umask 022, secrets/ keeps the source mode', () => {
+  const { home } = makeHome();
+  const target = path.join(fresh('base'), 'plugin-data');
+  const prior = process.umask(0o022);
+  try {
+    const r = runImport(target, home);
+    assert.strictEqual(r.status, 'copied', JSON.stringify(r));
+  } finally { process.umask(prior); }
+  assert.strictEqual(mode(target), 0o700, 'the root is not 0755');
+  assert.strictEqual(mode(path.join(target, 'secrets')), 0o700);
+  assert.strictEqual(mode(path.join(target, 'config.json')), 0o600);
+  assert.ok(fs.lstatSync(target).isDirectory() && !fs.lstatSync(target).isSymbolicLink());
+});
+
+test('an existing target root keeps its mode (never loosened, never tightened)', () => {
+  const { home } = makeHome();
+  const target = fresh('plugin');
+  fs.chmodSync(target, 0o750);
+  const prior = process.umask(0o022);
+  try { assert.strictEqual(runImport(target, home).status, 'copied'); } finally { process.umask(prior); }
+  assert.strictEqual(mode(target), 0o750);
+});
+
+test('an absent target root is not created before the source is proven and locked (source lock busy)', () => {
+  const { home, src } = makeHome();
+  const target = path.join(fresh('base'), 'plugin-data');
+  const held = lockLib.acquireMutationLock(src);
+  const prior = process.umask(0o022);
+  try { assert.strictEqual(runImport(target, home).reason, 'source-lock-busy'); } finally { process.umask(prior); held.release(); }
+  assert.ok(!fs.existsSync(target), 'nothing is created before the source is proven and locked');
+});
+
+const mkfifo = (file) => assert.strictEqual(spawnSync('mkfifo', [file]).status, 0, 'mkfifo');
+
+test('a FIFO at config.json is unsafe-source and returns promptly, no hang', () => {
+  const { home, src } = makeHome();
+  fs.rmSync(path.join(src, 'config.json'));
+  mkfifo(path.join(src, 'config.json'));
+  const target = fresh('plugin');
+  const t0 = Date.now();
+  const r = runImport(target, home);
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  assert.deepStrictEqual([r.status, r.reason, r.owed, r.class], ['failed', 'unsafe-source', true, 'permanent']);
+  assertNothingCopied(target, 'a FIFO config');
+});
+
+test('a FIFO at config.json.prev with config.json absent is unsafe-source and returns promptly', () => {
+  const { home, src } = makeHome();
+  fs.rmSync(path.join(src, 'config.json'));
+  mkfifo(path.join(src, 'config.json.prev'));
+  const target = fresh('plugin');
+  const t0 = Date.now();
+  const r = runImport(target, home);
+  assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'unsafe-source', true]);
+  assertNothingCopied(target, 'a FIFO .prev');
+});
+
+test('a symlinked config.json and a directory at config.json.prev are refused before any open', () => {
+  let { home, src } = makeHome();
+  fs.renameSync(path.join(src, 'config.json'), path.join(home, 'elsewhere.json'));
+  fs.symlinkSync(path.join(home, 'elsewhere.json'), path.join(src, 'config.json'));
+  assert.strictEqual(runImport(fresh('plugin'), home).reason, 'unsafe-source');
+  ({ home, src } = makeHome());
+  fs.mkdirSync(path.join(src, 'config.json.prev'));
+  assert.strictEqual(runImport(fresh('plugin'), home).reason, 'unsafe-source');
+});
+
 console.log('\nimport — B3: the source lock, then the target lock');
 
 test('a source lock held elsewhere: copy nothing, retry; the target lock is not left held', () => {

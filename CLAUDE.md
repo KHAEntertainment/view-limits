@@ -68,6 +68,7 @@ node bin/vl.js check <routeId>  # live-check one route (JSON)
 - **GitHub:** push to `KHAEntertainment` only, never `Clarit-AI` (a different
   project uses that account). `origin` is pinned to
   `https://github.com/KHAEntertainment/view-limits.git`.
+- Never set push_sessions to true in .entire/settings.local.json; before any push, `entire status` must show 'Automatic checkpoint pushing: disabled'.
 
 ## Provider notes (field shapes verified live unless noted)
 

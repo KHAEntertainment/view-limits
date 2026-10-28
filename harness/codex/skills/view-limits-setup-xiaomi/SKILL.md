@@ -6,7 +6,7 @@ description: Set up the Xiaomi Token Plan route in view-limits — builds the Ch
 Run exactly this command with the shell tool:
 
 ```sh
-node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" setup xiaomi-token-plan --relay
+node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" ${VIEW_LIMITS_DATA_DIR:+--data-dir "$VIEW_LIMITS_DATA_DIR"} setup xiaomi-token-plan --relay
 ```
 
 Relay the output above verbatim.

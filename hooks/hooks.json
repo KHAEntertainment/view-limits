@@ -20,7 +20,7 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "refresh", "--quiet", "--session-start"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "--claude-plugin", "refresh", "--quiet", "--session-start"],
             "async": true,
             "timeout": 30
           }
@@ -31,7 +31,7 @@
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "session-start"],
+            "args": ["${CLAUDE_PLUGIN_ROOT}/bin/vl.js", "--claude-plugin", "session-start"],
             "timeout": 5
           }
         ]

@@ -59,8 +59,12 @@ const REQUIRED_SHIMS = [
 // lan disable` executed two vl.js calls inside one grant. Wrapping the
 // substitution in quotes does not help: the substitution is textual.
 const CLI_PREFIX = /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js"/;
+// Issue #148: every exec carries the two global options, in this order and this
+// spelling, before the subcommand. The data directory is the ONLY other thing a
+// `!` exec may substitute, and only here.
+const GLOBAL_OPTS = '--data-dir "${CLAUDE_PLUGIN_DATA}" --claude-plugin';
 const EXEC_BODY_RE =
-  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js"(?: [A-Za-z0-9._:@/-]+)*(?: 2>&1)?$/;
+  /^"[$]{1,2}\{?CLAUDE_PLUGIN_ROOT\}?\/bin\/vl\.js" --data-dir "\$\{CLAUDE_PLUGIN_DATA\}" --claude-plugin(?: [A-Za-z0-9._:@/-]+)*(?: 2>&1)?$/;
 
 // The shim must instruct verbatim relay of the injected CLI output.
 const RELAY_RE = /relay the output above verbatim/i;
@@ -111,7 +115,7 @@ const EXPECTED_EXEC = {
 // The prefix is matched in either documented spelling, closing quote included,
 // exactly as the shims write it.
 const expectedExecRe = (tail) => new RegExp(
-  `^"[$]{1,2}\\{?CLAUDE_PLUGIN_ROOT\\}?/bin/vl\\.js" ${tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+  `^"[$]{1,2}\\{?CLAUDE_PLUGIN_ROOT\\}?/bin/vl\\.js" ${GLOBAL_OPTS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ${tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
 
 const failures = [];function check(cond, msg) {
   if (!cond) failures.push(msg);
@@ -127,7 +131,7 @@ const failures = [];function check(cond, msg) {
 // commands. A marker that cannot be parsed is a MALFORMED injection, not an
 // absent one, and is reported as a failure rather than skipping the file —
 // skipping is how a shim escapes a guard without anyone noticing.
-const { extractExecs, withoutInjections, findSubstitutions, ALLOWED_SUBSTITUTION } = require('./helpers/injected-commands.cjs');
+const { extractExecs, withoutInjections, findSubstitutions, ALLOWED_SUBSTITUTION, ALLOWED_DATA_SUBSTITUTION } = require('./helpers/injected-commands.cjs');
 
 function listShims() {
   const found = [];
@@ -232,7 +236,7 @@ for (const rel of shims) {
       // regex cannot silently re-open it.
       const bad = findSubstitutions(cmd);
       check(bad.length === 0,
-        `${rel}: an injected command substitutes ${bad.join(', ')} — only ${ALLOWED_SUBSTITUTION} may appear (Q34-A): ${cmd}`);
+        `${rel}: an injected command substitutes ${bad.join(', ')} — only ${ALLOWED_SUBSTITUTION} and ${ALLOWED_DATA_SUBSTITUTION} may appear (Q34-A, #148): ${cmd}`);
     }
   }
 }

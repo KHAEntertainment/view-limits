@@ -176,8 +176,19 @@ function assertNoNetworkOrCredentials(log, label) {
 // `allowedRoots` is the one place a fixture may name a root other than the real
 // expansion. The files on disk get no such allowance: they must resolve the
 // checkout exactly as the surface documents it.
-function commandFileProblems(label, command, { argv = null, allowedRoots = [ROOT_EXPR] } = {}) {
+// Issue #148: the data directory is the one optional addition after the CLI
+// path (VIEW_LIMITS_DATA_DIR set: pass it; unset: nothing). It must appear
+// exactly once, directly after the path, and is removed before every other check
+// so those stay as strict as they were.
+const DATA_DIR_EXPR = ' ${VIEW_LIMITS_DATA_DIR:+--data-dir "$VIEW_LIMITS_DATA_DIR"}';
+function commandFileProblems(label, rawCommand, { argv = null, allowedRoots = [ROOT_EXPR] } = {}) {
   const bad = [];
+  let command = rawCommand;
+  if (command.split('/bin/vl.js"' + DATA_DIR_EXPR).length !== 2) {
+    bad.push(`${label}: must carry the data-dir expansion exactly once, right after the CLI path`);
+  } else {
+    command = command.replace('/bin/vl.js"' + DATA_DIR_EXPR, '/bin/vl.js"');
+  }
   if (!/^---\ndescription: [^\n]+\n---\n/.test(command)) bad.push(`${label}: no single-description frontmatter`);
   // The load-bearing check: the sequence OpenCode scans for must not appear in
   // the file at all — prose included — so the surface contributes no shell
@@ -237,7 +248,7 @@ function commandFileProblems(label, command, { argv = null, allowedRoots = [ROOT
     }
     assert.doesNotMatch(pluginCode, /require\s*\(/, 'plugin: ESM only, no CJS require');
     assert.doesNotMatch(pluginCode, /\.\.\/lib|\blib\//, 'plugin: never imports lib/ — the CLI owns all logic');
-    assert.match(pluginCode, /spawnSync\('node', \[cliPath\(\), 'gate'\]/,
+    assert.match(pluginCode, /spawnSync\('node', \[cliPath\(\), \.\.\.dataDirArgs\(\), 'gate'\]/,
       'the plugin spawns a bare `node <cli> gate` (literal node — process.execPath is the opencode binary under Bun)');
     assert.doesNotMatch(pluginCode, /process\.execPath/,
       'plugin: never process.execPath — OpenCode runs plugins under Bun, where it is the opencode binary');
@@ -362,6 +373,15 @@ function commandFileProblems(label, command, { argv = null, allowedRoots = [ROOT
       argv: ALLOWED_GATE_ARGV,
       stdin: JSON.stringify({ tool_name: 'Agent', tool_input: { model: 'kimi-k2' } }),
     }, 'the surface sends the PreToolUse envelope to `vl.js gate`');
+
+    // Issue #148: VIEW_LIMITS_DATA_DIR becomes the CLI's --data-dir, ahead of the
+    // subcommand, and only when it is set. Never --claude-plugin.
+    const sharedData = path.join(dir, 'shared-data');
+    resetCapture();
+    await withEnv(cliEnv({ VIEW_LIMITS_ROOT: stubRoot, STUB_CAPTURE: stubCapture, VIEW_LIMITS_DATA_DIR: sharedData }), () =>
+      plugin['tool.execute.before']({ tool: 'task', sessionID: 's1', callID: 'c1' }, { args: { model: 'kimi-k2' } }));
+    assert.deepStrictEqual(readCapture().argv, ['--data-dir', sharedData, ...ALLOWED_GATE_ARGV],
+      'VIEW_LIMITS_DATA_DIR is passed to the gate as --data-dir');
 
     // Deny: an explicit permissionDecision "deny" throws with the CLI's reason.
     installStubCli(DENY_STDOUT);

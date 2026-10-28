@@ -546,6 +546,13 @@ const CONFIG_READERS = [
   // exit code, and adds no reader.
   'bin/vl.js | dashboardConfig | libLoadConfig | ',
   'bin/vl.js | dashboardConfig | configPresence | ',
+  // Issue #148: the one-time import of the standalone data dir. It asks only
+  // whether config.json EXISTS (an lstat, never a document read), once before
+  // the lock and once under it, and publishes through the create-only first
+  // publish. It never parses this dir's document, so no unconfirmed read can
+  // turn into DEFAULTS here.
+  'lib/standalone-import.js | importStandalone | configPresence | ', // before the lock
+  'lib/standalone-import.js | importStandalone | configPresence | ', // again under it
   // Issue #62 LAN view: `lan url` reads the confirmed config; enable/disable
   // read-modify-write dashboard.lan under the mutation lock.
   'bin/vl.js | dashboardLanCmd | loadConfig | ',

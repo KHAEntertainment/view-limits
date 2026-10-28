@@ -36,7 +36,8 @@ const { spawn } = require('child_process');
 
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt,
-  resolveDashboardInterval, hostLabel } = require('../lib/config');
+  resolveDashboardInterval, hostLabel, parseGlobalOptions } = require('../lib/config');
+const { importStandalone, NOTICE: STANDALONE_NOTICE } = require('../lib/standalone-import');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, spawnRefresh,
@@ -2912,8 +2913,25 @@ function relayWanted(cmdName, argv) {
   return at;
 }
 
-const cmd = process.argv[2];
-const args = process.argv.slice(3);
+// Global options (Issue #148), parsed before anything is dispatched, read or
+// written: `--data-dir <abs path>` names the data directory for this whole
+// process and wins over the environment; `--claude-plugin` opts this call into
+// the one-time import of the standalone data dir. Claude Code exports
+// ${CLAUDE_PLUGIN_DATA} to hooks but not to a `!` exec line, so the shims pass
+// it as this argument. The directory travels to anything vl.js spawns (the
+// dashboard daemon, `serve`) through the environment those children inherit.
+const GLOBAL = parseGlobalOptions(process.argv.slice(2));
+if (!GLOBAL.ok) {
+  process.stderr.write(`view-limits: ${GLOBAL.message}\n`);
+  // A shim's `!` exec aborts the whole invocation on a non-zero exit, which
+  // would hide this line from the person who has to fix it; --relay is the
+  // waiver for exactly that.
+  process.exit(process.argv.includes(RELAY_FLAG) ? 0 : 2);
+}
+if (GLOBAL.dataDir !== null) process.env.CLAUDE_PLUGIN_DATA = GLOBAL.dataDir;
+
+const cmd = GLOBAL.rest[0];
+const args = GLOBAL.rest.slice(1);
 const hasFlag = (n) => args.includes(n);
 
 // The waiver: taken out of argv so no command's own flag parser sees an unknown
@@ -3026,6 +3044,18 @@ const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been mig
 // command's stdout stays machine-readable. `session-start` is the exception:
 // a hook's stderr is not shown to the user, so it reports through its own
 // systemMessage instead (see sessionStart).
+// Issue #148: a plugin data dir that was never set up inherits the standalone
+// ~/.view-limits once, on the Claude path only (--claude-plugin: the command
+// shims and the SessionStart hooks pass it; Codex, OpenCode and a terminal
+// never do). It runs BEFORE the migration below, in the same process, so that
+// a present config.json is what the migration finds. Skipped is silent; a
+// copy, or a failed copy that changed nothing, is one fixed line.
+if (GLOBAL.claudePlugin) {
+  const imported = importStandalone({ target: GLOBAL.dataDir });
+  if (imported.status === 'copied') process.stderr.write(`view-limits: ${STANDALONE_NOTICE.copied}\n`);
+  else if (imported.status === 'failed') process.stderr.write(`view-limits: ${STANDALONE_NOTICE.failed}\n`);
+}
+
 let migration = null;
 if (MIGRATING_COMMANDS.has(cmd)) {
   // No config read: the migration decides presence by lstat under its own
@@ -3078,7 +3108,7 @@ if (MIGRATING_COMMANDS.has(cmd)) {
     case 'recommend': return recommendCmd(args);
     case 'dashboard': return dashboardCmd(args);
     default:
-      return err('usage: vl.js status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|open [--no-open]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
+      return err('usage: vl.js [--data-dir <abs path>] [--claude-plugin] status|report [--json]|view [--condensed] [--json]|gate|refresh [--quiet]|check <routeId>|setup [<routeId>]|update [<routeId>]|provider add|update|remove|list|remove <routeId>|config|snapshot --json [--refresh]|recommend --json|dashboard start [--port N] [--host 127.0.0.1] [--interval S]|open [--no-open]|stop|status [--json]|session-start|serve <port> <nonce> <ids...>');
   }
 })().then(() => {
   // D2-a: the commands that report a state through `process.exitCode` (status

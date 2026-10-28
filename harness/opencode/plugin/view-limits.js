@@ -16,9 +16,10 @@
 //
 // The CLI path is resolved from VIEW_LIMITS_ROOT (copied install), else from
 // this file's location in the checkout (repo-local install), mirroring the
-// Codex surface's resolution rules. Credentials and cache are shared with the
-// other surfaces: with CLAUDE_PLUGIN_* unset the CLI falls back to
-// ~/.view-limits.
+// Codex surface's resolution rules. State is shared with another surface only
+// when VIEW_LIMITS_DATA_DIR names the same data directory (for the Claude
+// plugin, its data folder); it is passed to the CLI as --data-dir. Unset, the
+// CLI falls back to ~/.view-limits.
 
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -42,11 +43,17 @@ function modelOf(args) {
   return typeof model === 'string' && model.trim() !== '' ? model : null
 }
 
+// VIEW_LIMITS_DATA_DIR, when set and non-empty, becomes the CLI's --data-dir.
+function dataDirArgs() {
+  const dir = process.env.VIEW_LIMITS_DATA_DIR
+  return typeof dir === 'string' && dir !== '' ? ['--data-dir', dir] : []
+}
+
 function runGate(model) {
   // Literal 'node', never process.execPath: OpenCode loads plugins under Bun,
   // where process.execPath is the opencode binary itself. 'node' matches the
   // command surface's idiom and fails open below if node is not on PATH.
-  const result = spawnSync('node', [cliPath(), 'gate'], {
+  const result = spawnSync('node', [cliPath(), ...dataDirArgs(), 'gate'], {
     input: JSON.stringify({ tool_name: 'Agent', tool_input: { model } }),
     encoding: 'utf8',
     timeout: CLI_TIMEOUT_MS,

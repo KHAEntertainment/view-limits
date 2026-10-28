@@ -5,7 +5,7 @@ description: Set up the view-limits Xiaomi Token Plan route (Chrome cookie helpe
 Run exactly this command with the shell tool:
 
 ```sh
-node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" setup xiaomi-token-plan --relay
+node "${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}/bin/vl.js" ${VIEW_LIMITS_DATA_DIR:+--data-dir "$VIEW_LIMITS_DATA_DIR"} setup xiaomi-token-plan --relay
 ```
 
 Relay the output above verbatim.

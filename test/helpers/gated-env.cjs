@@ -24,7 +24,9 @@
 // delete it for callers that never name it.
 function cliEnv(bindings, options = {}) {
   const env = { ...bindings };
-  for (const key of ['CLAUDE_PLUGIN_ROOT', 'CLAUDE_PLUGIN_DATA', 'VIEW_LIMITS_ROOT']) {
+  // VIEW_LIMITS_DATA_DIR (#148) is the Codex/OpenCode counterpart of
+  // CLAUDE_PLUGIN_DATA and leaks the same way, so it is isolated the same way.
+  for (const key of ['CLAUDE_PLUGIN_ROOT', 'CLAUDE_PLUGIN_DATA', 'VIEW_LIMITS_ROOT', 'VIEW_LIMITS_DATA_DIR']) {
     env[key] = options[key]; // undefined ⇒ withEnv deletes it from process.env
   }
   for (const key of ['STUB_STDOUT', 'STUB_CAPTURE']) {

@@ -45,6 +45,17 @@ const hooks = require('../harness/codex/hooks.json');
 // view-limits checkout from VIEW_LIMITS_ROOT, else from the session git root
 // (the pattern Codex documents for repo-local hooks).
 const ROOT_EXPR = '${VIEW_LIMITS_ROOT:-$(git rev-parse --show-toplevel)}';
+// Issue #148: the one optional addition after the CLI path — the data directory
+// of the Claude plugin, passed through only when the user set VIEW_LIMITS_DATA_DIR
+// (unset: no argument at all, so the CLI keeps ~/.view-limits). It is pinned by
+// exact text, once, directly after the CLI path, and stripped before the
+// existing argv/operator checks so those stay exactly as strict as they were.
+const DATA_DIR_EXPR = ' ${VIEW_LIMITS_DATA_DIR:+--data-dir "$VIEW_LIMITS_DATA_DIR"}';
+function withoutDataDir(label, command) {
+  assert.strictEqual(command.split('/bin/vl.js"' + DATA_DIR_EXPR).length, 2,
+    `${label}: must carry the data-dir expansion exactly once, right after the CLI path`);
+  return command.replace('/bin/vl.js"' + DATA_DIR_EXPR, '/bin/vl.js"');
+}
 const CLI_INVOCATION = /^node "([\s\S]+)\/bin\/vl\.js"((?: [A-Za-z0-9._:-]+)*) \|\| true$/;
 // The status skill is run by the agent, not by a hook that must not block, so
 // it carries no `|| true` — a real error there must stay visible.
@@ -211,7 +222,8 @@ try {
 
   // ---- 2. THIN: bare CLI invocations, nothing else -------------------------
   for (const handler of handlers) {
-    const match = handler.command.match(CLI_INVOCATION);
+    const command = withoutDataDir(handler.event, handler.command);
+    const match = command.match(CLI_INVOCATION);
     assert.ok(match, `${handler.event}: not a bare CLI invocation: ${handler.command}`);
     assert.strictEqual(match[1], ROOT_EXPR, `${handler.event}: unexpected root resolution`);
     const argv = match[2].trim().split(/\s+/);
@@ -222,7 +234,7 @@ try {
     // documented root resolution — no pipes, redirects, `;`, `&&`, backticks.
     // Checked with the expansion stripped, which is asserted identical to
     // ROOT_EXPR above, so `git rev-parse` is not mistaken for the `rev` tool.
-    const withoutRoot = handler.command.split(ROOT_EXPR).join('ROOT');
+    const withoutRoot = command.split(ROOT_EXPR).join('ROOT');
     assert.doesNotMatch(withoutRoot, FORMAT_TOOL_RE, `${handler.event}: no text-processing tools`);
     // `|| true` is required by the CLI_INVOCATION shape above; strip it so the
     // operator scan sees nothing else — no pipes, redirects, `;`, `&&`, `$(...)`.
@@ -231,7 +243,7 @@ try {
       /[|;&<>`]/,
       `${handler.event}: no shell operators besides '|| true'`,
     );
-    assert.strictEqual((handler.command.match(/\$\(/g) || []).length, 1, `${handler.event}: one expansion only`);
+    assert.strictEqual((command.match(/\$\(/g) || []).length, 1, `${handler.event}: one expansion only`);
   }
 
   // Both skills are the same shape: frontmatter, exactly one `sh` block holding
@@ -250,7 +262,8 @@ try {
     assert.match(skill, new RegExp(`^---\\nname: ${spec.name}\\ndescription: [^\\n]+\\n---\\n`), `${spec.name}: skill frontmatter`);
     const skillCommands = [...skill.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) => m[1].trim());
     assert.strictEqual(skillCommands.length, 1, `${spec.name}: the skill runs exactly one command`);
-    const skillMatch = skillCommands[0].match(CLI_INVOCATION_PLAIN);
+    const skillCommand = withoutDataDir(spec.name, skillCommands[0]);
+    const skillMatch = skillCommand.match(CLI_INVOCATION_PLAIN);
     assert.ok(skillMatch, `${spec.name}: not a bare CLI invocation: ${skillCommands[0]}`);
     assert.strictEqual(skillMatch[1], ROOT_EXPR, `${spec.name}: unexpected root resolution`);
     assert.deepStrictEqual(
@@ -267,7 +280,7 @@ try {
     // and no `allowed-tools` field, but the rule still applies to what the skill
     // tells the model to run — one fixed command line with nothing substituted
     // but the documented root resolution.
-    const noRoot = skillCommands[0].split(ROOT_EXPR).join('ROOT');
+    const noRoot = skillCommand.split(ROOT_EXPR).join('ROOT');
     assert.doesNotMatch(noRoot, /\$/, `${spec.name}: the command line substitutes nothing but the root resolution`);
     assert.doesNotMatch(skill, /\$ARGUMENTS|\$[0-9]/,
       `${spec.name}: no user argument reaches a shell command (Q34-A)`);

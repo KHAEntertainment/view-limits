@@ -54,7 +54,7 @@ async function kill(child) {
     assert.doesNotMatch(manual.stdout, /invalidNull|invalidArray|invalidPrimitive/);
     const hooks = require('../hooks/hooks.json');
     const sessionArgs = hooks.hooks.SessionStart[0].hooks[0].args.slice(1);
-    assert.deepStrictEqual(sessionArgs, ['refresh', '--quiet', '--session-start']);
+    assert.deepStrictEqual(sessionArgs, ['--claude-plugin', 'refresh', '--quiet', '--session-start']);
     run(sessionArgs);
     const input = JSON.stringify({ tool_name: 'Agent', tool_input: { model: 'kimi-k2' } });
     const gate = run(['gate'], { input });

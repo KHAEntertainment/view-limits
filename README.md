@@ -4,7 +4,7 @@
 
 ### Know what's left on your coding plans before you dispatch
 
-[![License](https://img.shields.io/github/license/KHAEntertainment/view-limits)](LICENSE) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/KHAEntertainment/view-limits) ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/KHAEntertainment/view-limits?logo=CodeRabbit&logoColor=%23FFFFFF&color=%23FF570A)
+[![License](https://img.shields.io/github/license/KHAEntertainment/view-limits)](LICENSE) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/KHAEntertainment/view-limits) ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/KHAEntertainment/view-limits?logo=CodeRabbit&logoColor=%23FFFFFF&color=%23FF570A) [![Built with Showrunner](https://svg.khaentertainment.com/badge.svg?gold=0)](https://svg.khaentertainment.com/go)
 
 **See how much is left on your coding plans before your agents start new work.**
 

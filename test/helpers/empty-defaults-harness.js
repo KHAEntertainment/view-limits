@@ -560,9 +560,10 @@ const CONFIG_READERS = [
   // lock, so "the source has no config" is only ever a proven absence; it is
   // parsed by the importer itself and published only through the create-only
   // first publish, never as DEFAULTS.
-  'lib/standalone-import.js | runImport | configPresence | ', // before the locks
-  'lib/standalone-import.js | runImport | configPresence | ', // again under them
-  'lib/standalone-import.js | runImport | readConfigTextIn | source, { strict: true }',
+  'lib/standalone-import.js | importOne | configPresence | ', // before the locks
+  'lib/standalone-import.js | importOne | configPresence | ', // again under them
+  'lib/standalone-import.js | importOne | readConfigTextIn | source, { strict: true }',
+  'lib/standalone-import.js | inlineNotice | readConfigTextIn | inlineDir', // lax, lock-free, read-only: the -inline folder is never written (#155)
   // Issue #62 LAN view: `lan url` reads the confirmed config; enable/disable
   // read-modify-write dashboard.lan under the mutation lock.
   'bin/vl.js | dashboardLanCmd | loadConfig | ',

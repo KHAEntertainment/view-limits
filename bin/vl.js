@@ -2886,7 +2886,7 @@ function sessionStart() {
   // Issue #155 (owner question Q51, pending): the -inline folder named routes this
   // install lacks. Once; only when the plugin data folder is set up and nothing
   // else is wrong. The -inline folder is read, never written.
-  if (!notice && !(migration && migration.reason === 'import-pending') && configPresence() === 'present') {
+  if (!notice && !(migration && migration.reason === 'import-pending')) {
     const inl = inlineNotice({ target: dataDir(), inlineDir: GLOBAL.inlineDir, canonicalRouteIds: cfg.routes.map((r) => r && r.id) });
     if (inl) say(inl);
   }

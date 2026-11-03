@@ -153,13 +153,43 @@ old process once; the next `/view-limits:dashboard` starts one in the install fo
 
 ### When first-run setup does not finish
 
-The Claude plugin copies your existing settings from `~/.view-limits` into its own data folder once, when that folder has no `config.json` yet. While the copy cannot finish, nothing is written to the plugin data folder and the setup commands stop with "your existing settings have not been copied into the plugin data folder yet". Three cases hold it:
+The Claude plugin copies your existing settings into its own data folder once,
+when that folder has no `config.json` yet. The sources are the Traycer folder
+(`view-limits-inline`, see above) and then `~/.view-limits`. While a copy that is
+owed cannot finish, no `config.json` is written to the plugin data folder and the
+setup commands stop with "your existing settings have not been copied into the
+plugin data folder yet".
 
-- `~/.view-limits` is a symlink.
-- `~/.view-limits` is read-only.
-- A file inside `~/.view-limits` cannot be read.
+These cases hold it. Each prints a notice that names the folder (the standalone
+folder or the Traycer folder) and ends with a `(reason: …)` code:
 
-Fix the standalone folder or move it aside, then rerun. The notice ends with a `(reason: …)` code that names the case.
+| Case | `(reason: …)` | Retries by itself |
+|---|---|---|
+| A folder inside the source is a symlink (`secrets/`), or `master.key`, `config.json`, `config.json.prev` or a `*.enc` file is a symlink or not a regular file | `unsafe-source` | no |
+| The `~/.view-limits` root is a symlink that does not resolve to a directory you own (a symlink to a real directory you own is fine) | `unsafe-source` | no |
+| The source `config.json` is not valid JSON, or not a JSON object | `source-config-unreadable` | no |
+| The source changed while it was being read | `source-changed` | no |
+| A name in the plugin data folder is already taken (`master.key`, a ciphertext, or `secrets` is a file) | `target-conflict` | no |
+| A file or folder in the source cannot be read | `source-unreadable` | yes |
+| The source folder is read-only, or its lock folder cannot be created for another reason | `source-lock-unavailable` | not for permission or read-only errors; otherwise yes |
+| Copying or checking a file failed | `copy-failed` | yes |
+| The plugin data folder's `config.json` cannot be read | `config-unreadable` | yes |
+| The command was pointed at a different folder than the one being copied into | `target-mismatch` | no |
+
+A **busy lock** also holds it, but is retried silently: another view-limits
+process is copying or changing settings at that moment, so there is no notice and
+no `(reason: …)` code, and the next command tries again.
+
+A `~/.view-limits` that is a symlink to a real directory (a dotfiles setup) is
+copied like a real directory: the link is followed once, and everything below it is
+still checked file by file, so a symlink *inside* it is refused.
+
+**What can be left behind.** A failed copy removes everything it created, but the
+plugin data folder itself and its `provider-mutations/` lock folder can exist
+afterwards. No `config.json`, `master.key` or `secrets/` file from the failed copy
+is kept, and the source folder is not changed.
+
+Fix the folder named in the notice or move it aside, then rerun.
 
 ## Hooks
 

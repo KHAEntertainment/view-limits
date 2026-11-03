@@ -282,14 +282,67 @@ test('a symlinked master.key fails closed', () => {
   assertNothingCopied(target, 'symlinked master.key');
 });
 
-test('a symlinked standalone dir fails closed', () => {
+// Issue #152: the ROOT may be a symlink (a dotfiles setup); anything below it may not.
+test('a symlinked standalone root copies like a real directory (#152)', () => {
   const { home, src } = makeHome();
   const real = path.join(home, 'elsewhere');
   fs.renameSync(src, real);
   fs.symlinkSync(real, src);
   const target = fresh('plugin');
-  assert.strictEqual(runImport(target, home).status, 'failed');
-  assertNothingCopied(target, 'symlinked source dir');
+  const r = runImport(target, home);
+  assert.strictEqual(r.status, 'copied', JSON.stringify(r));
+  assert.deepStrictEqual(tree(target), ['config.json', 'master.key', 'secrets/', 'secrets/kimi-code-plan.enc', 'secrets/minimax-token-plan.enc']);
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(target, 'config.json'), 'utf8')), SOURCE_DOC);
+  assert.ok(fs.lstatSync(src).isSymbolicLink(), 'the symlink is left as it was');
+  assert.ok(fs.existsSync(path.join(real, 'config.json')), 'the source is left where it was');
+});
+
+test('a symlink BELOW a symlinked root is still refused (#152)', () => {
+  const { home, src } = makeHome();
+  const real = path.join(home, 'elsewhere');
+  fs.renameSync(src, real);
+  fs.symlinkSync(real, src);
+  fs.rmSync(path.join(real, 'master.key'));
+  fs.symlinkSync(path.join(real, 'config.json'), path.join(real, 'master.key'));
+  const target = fresh('plugin');
+  const r = runImport(target, home);
+  assert.deepStrictEqual([r.status, r.reason, r.owed], ['failed', 'unsafe-source', true]);
+  assertNothingCopied(target, 'symlink below a symlinked root');
+  const home2 = makeHome();
+  const real2 = path.join(home2.home, 'elsewhere');
+  fs.renameSync(home2.src, real2);
+  fs.symlinkSync(real2, home2.src);
+  fs.rmSync(path.join(real2, 'secrets'), { recursive: true });
+  fs.symlinkSync(real2, path.join(real2, 'secrets'));
+  const t2 = fresh('plugin');
+  assert.strictEqual(runImport(t2, home2.home).reason, 'unsafe-source');
+  assertNothingCopied(t2, 'symlinked secrets/ below a symlinked root');
+});
+
+test('a symlinked root that dangles, or chains to a file, fails closed (#152)', () => {
+  const { home, src } = makeHome();
+  fs.rmSync(src, { recursive: true });
+  fs.symlinkSync(path.join(home, 'nowhere'), src);
+  let target = fresh('plugin');
+  assert.deepStrictEqual([runImport(target, home).status, runImport(target, home).reason], ['failed', 'unsafe-source']);
+  fs.rmSync(src);
+  fs.writeFileSync(path.join(home, 'afile'), 'x');
+  fs.symlinkSync(path.join(home, 'afile'), src);
+  target = fresh('plugin');
+  assert.strictEqual(runImport(target, home).reason, 'unsafe-source');
+  assertNothingCopied(target, 'root is a file');
+});
+
+test('a symlinked root whose directory the user does not own fails closed (#152)', { skip: typeof process.getuid !== 'function' }, () => {
+  const { home, src } = makeHome();
+  const real = path.join(home, 'elsewhere');
+  fs.renameSync(src, real);
+  fs.symlinkSync(real, src);
+  const realUid = process.getuid;
+  process.getuid = () => realUid.call(process) + 1; // "the user" is somebody else
+  let r;
+  try { r = runImport(fresh('plugin'), home); } finally { process.getuid = realUid; }
+  assert.deepStrictEqual([r.status, r.reason], ['failed', 'unsafe-source']);
 });
 
 test('stray names are ignored, never a reason to refuse: .DS_Store, notes.txt, temp files, in secrets/ and in the root', () => {

@@ -104,6 +104,53 @@ catalog of what setup can add:
   the commands above runs — in practice at most one session, since
   `session-start` is in that list.
 
+### One settings folder for Traycer and terminal sessions
+
+A plugin installed from a marketplace keeps its settings in one folder,
+`~/.claude/plugins/data/view-limits-<marketplace>` (for example
+`view-limits-kha-marketplace`). Traycer starts every Claude session with
+`--plugin-dir` pointing at the install cache, and Claude Code then calls the
+plugin `view-limits@inline` and exports a different folder,
+`~/.claude/plugins/data/view-limits-inline`. Before 0.1.56 that meant a Traycer
+session and a terminal session on the same install read and wrote two sets of
+settings, so a key added in one did not show in the other.
+
+From 0.1.56 both use the install's own folder. view-limits maps `view-limits-inline`
+to `view-limits-<marketplace>` only when the code that is running sits in the
+install cache of that same Claude directory (`…/plugins/cache/<marketplace>/view-limits/<version>`).
+In every other case the folder Claude exported is used exactly as it is:
+
+- A source checkout loaded with `--plugin-dir` (development) keeps its own
+  `view-limits-inline` folder.
+- Codex, OpenCode and standalone use keep `~/.view-limits`.
+- A marketplace name that Claude would rewrite (anything but letters, digits, `_`
+  and `-`) is not guessed at; the `-inline` folder stays in use.
+
+What happens to the folders you already have:
+
+- **Nothing is deleted, renamed or overwritten.** The `view-limits-inline` folder
+  is never changed after the switch. (While settings are being copied out of it, a
+  `provider-mutations/` lock folder can appear in it, as it does in any data
+  folder; no file you own is touched.)
+- **The install folder has no `config.json` yet:** your settings are copied once
+  from `view-limits-inline` (the same copy as the standalone one below: config,
+  master key and ciphertexts, nothing else). If `view-limits-inline` has none,
+  `~/.view-limits` is tried next.
+- **Both folders have a `config.json`:** the install folder wins and
+  `view-limits-inline` is left alone. If it holds routes the install folder lacks,
+  the next session start prints one line naming them and suggesting
+  `/view-limits:setup`; it is shown once and recorded in the install folder
+  (`inline-notice.json`).
+- **A copy from `view-limits-inline` that cannot finish holds setup.** It does not
+  skip to `~/.view-limits` and does not carry on with an empty folder: either would
+  leave the Traycer settings behind for good. The notice names the Traycer folder
+  and ends with the `(reason: …)` code.
+
+A dashboard that is already running when you upgrade keeps running from the folder
+it was started in, so `/view-limits:dashboard-status` (which now looks in the
+install folder) may report it as not running. Stop it before upgrading, or end the
+old process once; the next `/view-limits:dashboard` starts one in the install folder.
+
 ### When first-run setup does not finish
 
 The Claude plugin copies your existing settings from `~/.view-limits` into its own data folder once, when that folder has no `config.json` yet. While the copy cannot finish, nothing is written to the plugin data folder and the setup commands stop with "your existing settings have not been copied into the plugin data folder yet". Three cases hold it:

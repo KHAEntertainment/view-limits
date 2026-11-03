@@ -36,8 +36,8 @@ const { spawn } = require('child_process');
 
 const { loadConfig: libLoadConfig, loadConfigStrict, dataDir, expandHome, deepMerge, configPath, saveConfig,
   BUILT_IN_ROUTES, builtInRoute, readConfigText, configPresence, configInconclusive, configCorrupt,
-  resolveDashboardInterval, hostLabel, parseGlobalOptions } = require('../lib/config');
-const { importStandalone, noticeFor: standaloneNotice } = require('../lib/standalone-import');
+  resolveDashboardInterval, hostLabel, parseGlobalOptions, canonicalDataDir } = require('../lib/config');
+const { importStandalone, noticeFor: standaloneNotice, defaultSources, inlineNotice } = require('../lib/standalone-import');
 const {
   readCache, writeCache, isFresh,
   tryScheduleRefresh, spawnRefresh,
@@ -2883,6 +2883,13 @@ function sessionStart() {
     if (hasCreds) say(`${receiptMsg}.`);
     say(`${receiptMsg}. Run /view-limits to refresh, or /view-limits:setup to add more provider keys.`);
   }
+  // Issue #155 (owner question Q51, pending): the -inline folder named routes this
+  // install lacks. Once; only when the plugin data folder is set up and nothing
+  // else is wrong. The -inline folder is read, never written.
+  if (!notice && !(migration && migration.reason === 'import-pending') && configPresence() === 'present') {
+    const inl = inlineNotice({ target: dataDir(), inlineDir: GLOBAL.inlineDir, canonicalRouteIds: cfg.routes.map((r) => r && r.id) });
+    if (inl) say(inl);
+  }
   if (hasCreds && !notice) process.exit(0);
   // The two migration branches below run only when the migration found
   // config.json absent. A lock-free read of an absent file is marked
@@ -2900,7 +2907,7 @@ function sessionStart() {
   // so say nothing; anything else is one fixed line.
   if (migration && migration.reason === 'import-pending' && !corrupt) {
     if (/lock-busy$/.test(migration.importReason)) process.exit(0);
-    say(standaloneNotice(migration.importClass === 'permanent' ? 'refused' : 'failed', migration.importReason));
+    say(standaloneNotice(migration.importClass === 'permanent' ? 'refused' : 'failed', migration.importReason, migration.importSource));
   }
   if (migration && migration.reason === 'vault-unreadable') {
     say(corrupt ? `${MIGRATION_VAULT_UNREADABLE} ${corrupt}` : MIGRATION_VAULT_UNREADABLE);
@@ -2971,7 +2978,13 @@ if (!GLOBAL.ok) {
   // waiver for exactly that.
   process.exit(process.argv.includes(RELAY_FLAG) ? 0 : 2);
 }
+// Issue #155: children (the dashboard daemon, `serve`, detached refresh workers)
+// inherit the environment, so it carries the CANONICAL folder, never the
+// -inline one Claude Code exported. Set only when it was already set or a global
+// option named a folder: the standalone / Codex path has no CLAUDE_PLUGIN_DATA
+// and must not get one.
 if (GLOBAL.dataDir !== null) process.env.CLAUDE_PLUGIN_DATA = GLOBAL.dataDir;
+else if (process.env.CLAUDE_PLUGIN_DATA) process.env.CLAUDE_PLUGIN_DATA = canonicalDataDir(process.env.CLAUDE_PLUGIN_DATA);
 
 const cmd = GLOBAL.rest[0];
 const args = GLOBAL.rest.slice(1);
@@ -3103,11 +3116,16 @@ const MIGRATION_PENDING_REFUSAL = 'not run: stored credentials have not been mig
 // the import is then not owed and the migration runs as it always did.
 let importPending = null;
 let importClass = null;
+let importSource = 'standalone';
 if (GLOBAL.claudePlugin) {
-  const imported = importStandalone({ target: GLOBAL.dataDir });
-  if (imported.status === 'copied') process.stderr.write(`view-limits: ${standaloneNotice('copied')}\n`);
+  // Issue #155: the Traycer -inline sibling is tried first (only when the
+  // resolver mapped it away), then ~/.view-limits. An owed import HOLDS, whichever
+  // source it is: the notice names the folder that holds it.
+  const imported = importStandalone({ target: GLOBAL.dataDir, sources: defaultSources({ inlineDir: GLOBAL.inlineDir }) });
+  if (imported.source) importSource = imported.source;
+  if (imported.status === 'copied') process.stderr.write(`view-limits: ${standaloneNotice('copied', undefined, importSource)}\n`);
   else if (imported.status === 'failed') {
-    process.stderr.write(`view-limits: ${standaloneNotice(imported.class === 'permanent' ? 'refused' : 'failed', imported.reason)}\n`);
+    process.stderr.write(`view-limits: ${standaloneNotice(imported.class === 'permanent' ? 'refused' : 'failed', imported.reason, importSource)}\n`);
   }
   if (imported.owed === true) { importPending = imported.reason; importClass = imported.class || 'transient'; }
 }
@@ -3118,7 +3136,7 @@ if (MIGRATING_COMMANDS.has(cmd)) {
   // lock (io.configPresence) and never uses the cfg, which only the
   // provider probe needs.
   migration = importPending
-    ? { migrated: false, reason: 'import-pending', importReason: importPending, importClass, retry: true }
+    ? { migrated: false, reason: 'import-pending', importReason: importPending, importClass, importSource, retry: true }
     : lifecycle.migrateFromVault(lifecycleIo(null));
   if (migration.migrated && migration.ids.length) {
     process.stderr.write(`view-limits: migrated existing credentials into routes: ${migration.ids.join(', ')}\n`);
